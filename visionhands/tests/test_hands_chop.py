@@ -155,9 +155,9 @@ def test_a_hand_is_published_in_the_documented_order() -> None:
     assert named["h0_score"] == 1.0          # Vision's constant, mirrored
     assert named["h0_conf_median"] == 0.5    # ours, the one to gate on
     assert named["h0_chirality"] == 1.0
-    assert named["h0_lm00_x"] == 0.5
-    assert named["h0_lm00_y"] == 0.6         # y is NOT flipped (DESIGN.md 7)
-    assert named["h0_lm00_conf"] == 0.5
+    assert named["h0_wrist_x"] == 0.5
+    assert named["h0_wrist_y"] == 0.6         # y is NOT flipped (DESIGN.md 7)
+    assert named["h0_wrist_conf"] == 0.5
 
 
 def test_an_absent_hand_publishes_zeros_with_every_channel_present() -> None:
@@ -167,9 +167,10 @@ def test_an_absent_hand_publishes_zeros_with_every_channel_present() -> None:
     assert named["h1_found"] == 0.0
     assert named["h1_score"] == 0.0           # NOT 1.0 - an empty slot is not confident
     assert named["h1_conf_median"] == 0.0
-    for joint_index in range(N_JOINTS):
+    from visionhands.types import JOINT_NAMES
+    for joint_name in JOINT_NAMES:
         for suffix in ("x", "y", "conf"):
-            assert named["h1_lm%02d_%s" % (joint_index, suffix)] == 0.0
+            assert named["h1_%s_%s" % (joint_name, suffix)] == 0.0
 
 
 def test_negative_chirality_survives_as_a_float() -> None:
@@ -276,7 +277,7 @@ def test_a_real_frame_reaches_the_channels() -> None:
     assert published["seq"] > 0.0
     assert published["n_hands"] == 1.0
     assert published["h0_found"] == 1.0
-    assert published["h0_lm00_x"] == 0.5
+    assert published["h0_wrist_x"] == 0.5
     assert published["age_ms"] >= 0.0
 
 

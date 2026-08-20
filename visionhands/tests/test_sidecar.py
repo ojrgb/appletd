@@ -103,12 +103,12 @@ def test_a_frame_arrives_as_the_full_named_contract(receiver: socket.socket) -> 
     assert received["n_hands"] == 1.0
     assert received["h0_found"] == 1.0
     assert received["h0_conf_median"] == pytest.approx(0.8, abs=1e-6)
-    assert received["h0_lm00_x"] == pytest.approx(0.25, abs=1e-6)
+    assert received["h0_wrist_x"] == pytest.approx(0.25, abs=1e-6)
     # y is NOT flipped anywhere in the pipeline (DESIGN.md 7).
-    assert received["h0_lm00_y"] == pytest.approx(0.75, abs=1e-6)
+    assert received["h0_wrist_y"] == pytest.approx(0.75, abs=1e-6)
     # An absent hand still publishes every channel, as zeros.
     assert received["h1_found"] == 0.0
-    assert received["h1_lm20_conf"] == 0.0
+    assert received["h1_little_tip_conf"] == 0.0
 
 
 def test_channel_order_on_the_wire_matches_the_contract(receiver: socket.socket) -> None:

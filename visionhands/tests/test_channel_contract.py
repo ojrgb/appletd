@@ -53,16 +53,28 @@ def test_channel_names_are_unique_and_ordered() -> None:
     # Then each hand as a contiguous block, so a TD selector can grab one hand
     # by name pattern.
     assert names[3:7] == ("h0_found", "h0_score", "h0_conf_median", "h0_chirality")
-    assert names[7:10] == ("h0_lm00_x", "h0_lm00_y", "h0_lm00_conf")
-    assert names[-3:] == ("h1_lm20_x", "h1_lm20_y", "h1_lm20_conf")
+    assert names[7:10] == ("h0_wrist_x", "h0_wrist_y", "h0_wrist_conf")
+    assert names[-3:] == ("h1_little_tip_x", "h1_little_tip_y", "h1_little_tip_conf")
 
 
-def test_joint_indices_are_zero_padded() -> None:
-    """lm08 not lm8, so the names are fixed-width and sort correctly in TD."""
+def test_joints_are_named_not_numbered() -> None:
+    """Channel names answer "which joint is this" without a lookup table.
+
+    The wire format used to emit h0_lm08_x and leave every consumer to
+    translate. `h0_index_tip_x` costs ~400 bytes across the bundle and removes a
+    translation layer from every downstream project (types.channel_names).
+    """
     names = channel_names()
-    assert "h0_lm08_x" in names
-    assert "h0_lm8_x" not in names
-    assert "h1_lm20_conf" in names
+    assert "h0_index_tip_x" in names
+    assert "h0_lm08_x" not in names
+    assert "h1_little_tip_conf" in names
+    # Every joint name from the table appears for both hands, with all three
+    # values - so a renamed joint cannot silently drop a channel.
+    from visionhands.types import JOINT_NAMES
+    for hand in range(MAX_HANDS):
+        for joint in JOINT_NAMES:
+            for value in ("x", "y", "conf"):
+                assert "h%d_%s_%s" % (hand, joint, value) in names
 
 
 def test_blank_frame_fills_every_slot() -> None:

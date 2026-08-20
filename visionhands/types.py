@@ -297,20 +297,29 @@ def channel_names() -> tuple[str, ...]:
               they vanish, and it breaks it silently - the operator that
               referenced h1_lm08_x just stops receiving. An absent hand
               therefore publishes zeros with all of its channels present.
-    Why joint INDEX and not joint name in the channel name: index keeps the
-              names short and fixed-width (h0_lm08_x), and the index-to-name
-              mapping is JOINT_NAMES, right here in this module. Renaming a
-              joint then costs nothing downstream.
+    Why joint NAME and not index. This used to emit `h0_lm08_x`, on the grounds
+              that fixed-width names are tidy and JOINT_NAMES carries the
+              mapping anyway. That was the wrong trade. Every consumer - a
+              TouchDesigner project, an OSC monitor, a person reading a channel
+              list - has to do the index-to-joint translation in their head or
+              in an extra operator, and "which one is lm08" is exactly the
+              question a name should answer. `h0_index_tip_x` costs about 400
+              bytes across the whole bundle and removes a translation layer
+              from every downstream project.
+              The alternative considered and rejected: keep indices on the wire
+              and rename inside TouchDesigner. A Rename CHOP CAN do it, via a
+              name-reference input built from a Table DAT (verified), but it
+              renames BY POSITION - so the translation would silently depend on
+              channel order matching, two hops away from where the order is
+              decided. Naming belongs at the single source of truth.
     """
     names: list[str] = list(_FRAME_SCALARS)
     for hand_i in range(MAX_HANDS):
         for scalar in _HAND_SCALARS:
             names.append("h%d_%s" % (hand_i, scalar))
-        for joint_i in range(N_JOINTS):
+        for joint_name in JOINT_NAMES:
             for value in _JOINT_VALUES:
-                # %02d, so lm08 and lm18 sort next to each other and line up in
-                # TD's channel list. 21 joints will never need three digits.
-                names.append("h%d_lm%02d_%s" % (hand_i, joint_i, value))
+                names.append("h%d_%s_%s" % (hand_i, joint_name, value))
     return tuple(names)
 
 

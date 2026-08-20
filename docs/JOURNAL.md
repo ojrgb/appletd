@@ -979,3 +979,60 @@ and printed by it.
 
 Cleaned up after myself: prototype and diagnostic nodes destroyed, only
 `visionhands_osc` and the older Script CHOP pair remain in the project.
+
+---
+
+## Readable channel names, and the coordinate COMP
+2026-08-20
+
+The user asked for a COMP after the OSC In CHOP that (a) turns `h0_lm08_x` into
+readable names and (b) converts to TouchDesigner coordinates. Built (b);
+moved (a) to the source instead, which is a better answer than the one requested
+and worth explaining.
+
+**Naming moved to the sidecar.** `channel_names()` now emits
+`h0_index_tip_x` rather than `h0_lm08_x`. The original rationale - fixed-width
+names, with JOINT_NAMES carrying the mapping - was a bad trade: every consumer,
+human or operator network, had to do the translation, and "which one is lm08" is
+exactly the question a name should answer. Cost: the bundle grew from 3480 to
+4088 bytes. Worth it.
+
+**The rename-in-TD route was built first, and it taught us three things before
+being thrown away.**
+
+1. TouchDesigner's Rename CHOP DOES support wildcard back-references:
+   `*_lm08_*` -> `*_index_tip_*` renames h0 and h1, and `_x`, `_y` and `_conf`,
+   from a single rule. Verified live.
+2. It does NOT apply a space-separated From/To list as pairwise rules. The first
+   replacement is applied to everything the whole From list matches, so 21 rules
+   turned all 126 landmark channels into `h0_wrist_x`, `h0_wrist_x1`,
+   `h0_wrist_x2`... - TD deduplicating by suffix. That failure is silent in the
+   sense that it produces 137 plausible channels.
+3. The working alternative is the Rename CHOP's second input, a name reference.
+   One can be built with no cook-time Python from a Table DAT through a DAT to
+   CHOP - and note the DAT arrives by PARAMETER, `par.dat`, not by a wire: a DAT
+   to CHOP has no CHOP input connector, so `inputConnectors[0]` raises
+   `IndexError: list index out of range`, which is what cost the debugging time.
+
+That last route works, but it renames BY POSITION - the mapping would depend on
+channel order matching, two hops from where the order is decided. Naming belongs
+at the single source of truth, so the sidecar does it.
+
+**What the COMP does now**, in 15 built-in operators with no Python in any cook:
+
+| channel | space |
+|---|---|
+| `h0_index_tip_x` / `_y` | unchanged: normalised 0..1, origin bottom-left |
+| `h0_index_tip_tx` / `_ty` | centred on zero, x scaled by aspect - drop into a Geometry COMP translate |
+| `h0_index_tip_px` / `_py` | pixels, still bottom-left like TD's TOPs |
+
+305 channels out: the 137 in, plus tx/ty/px/py for all 42 joints. Source
+resolution is a COMP parameter (`Resw`/`Resh`, default 1280x720) rather than read
+from the stream, because the wire contract deliberately does not carry width and
+height and a parameter solves it without a contract change.
+
+**Verified by injection, not by waving.** Stopped the sidecar, sent a bundle with
+known coordinates - centre, both edges - and checked all twelve conversions:
+0.5 -> tx 0.0 -> px 640; 1.0 -> tx +0.8889 -> px 1280; 0.0 -> tx -0.8889 -> px 0,
+and the y equivalents. Zero failures. That is a deterministic check of the
+arithmetic, which watching a hand move could never be.

@@ -22,8 +22,10 @@ from visionhands.types import N_CHANNELS, blank_frame, channel_names, channel_va
 
 # MEASURED: the exact size of our 137-channel bundle, and the reason it matters.
 # A UDP datagram on macOS loopback tops out around 16 KB; past that this silently
-# stops arriving. Pinned so that growing the contract has to notice.
-BUNDLE_BYTES_137 = 3480
+# stops arriving. Pinned so that growing the contract has to notice - it grew
+# from 3480 to 4088 bytes when channel names went from `h0_lm08_x` to
+# `h0_index_tip_x`, which is the cost of readable names and is worth it.
+BUNDLE_BYTES_137 = 4088
 LOOPBACK_DATAGRAM_LIMIT = 16384
 
 
