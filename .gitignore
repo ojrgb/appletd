@@ -7,3 +7,10 @@ __pycache__/
 .pytest_cache/
 out/
 temp/
+
+# Fixture media is NOT committed by default. A clip of a person - body and room
+# identify someone perfectly well without a face in shot - must not enter git
+# history, where removing it later is expensive. Un-ignore a specific fixture
+# deliberately, once it has been confirmed to show hands only.
+fixtures/*.mp4
+fixtures/*.mov

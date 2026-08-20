@@ -144,14 +144,21 @@ what was measured with numbers, what surprised us, what is still unknown.
 with their figures. Questions in 11 are closed explicitly with the answer, not
 left to rot. A design change is written into the doc *before* the code changes.
 
-**Fixtures are hands-only.** A fixture is committed to the repo, because it is
-the provenance for every performance number we quote - which means it is a video
-file that goes into version control and stays there. So no fixture may contain an
-identifiable person: frame the shot on hands against a wall or a desk, with faces
-out of it. A clip that shows someone stays out of git and lives in `temp/`
-(ignored), which also means it cannot serve as a citable benchmark input. Check
-before committing, not after - `VNDetectFaceRectanglesRequest` over every 15th
-frame answers it in seconds.
+**Fixtures are hands-only, and the gate is people, not faces.** A committed
+fixture is a video file that enters git history and stays there, so no fixture
+containing an identifiable person may be committed. The first version of this
+rule checked `VNDetectFaceRectanglesRequest` and that was the wrong gate: the
+first real fixture passed it with zero faces while showing the user from the chin
+down, in their own home. A body, clothing and a room identify someone perfectly
+well. Use `VNDetectHumanRectanglesRequest` over every 10th frame, and look at a
+montage of frames yourself before committing - the detector answers "is a person
+in shot", not "would the subject mind this being public".
+
+Fixture media is gitignored by default (`fixtures/*.mp4`, `*.mov`) so the mistake
+cannot be made accidentally; un-ignoring a specific file is a deliberate act
+taken after checking it. A fixture that stays out of git still works locally as a
+benchmark input - it just cannot be cited as reproducible provenance, and the
+journal has to say so.
 
 **Measurement honesty.** Performance claims come only from deterministic fixture
 replay. Live-camera timings are never quoted as results — the spike saw an 8x

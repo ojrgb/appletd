@@ -205,6 +205,50 @@ probe tried to write to `/docs` and got `Errno 30, read-only file system`. A
 `except NameError` guard does not help, because nothing raises. Validate that
 the derived path actually exists before using it.
 
+### 2.6 This repo's own fixture — measured, and two corrections
+
+`fixtures/hand_clip.mp4`, recorded with `tools/record_fixture.py`: 1280×720,
+30 fps, **284 frames (9.5 s)**, one hand mostly, both hands sometimes.
+
+| | |
+|---|---|
+| Vision, median | **3.41 ms** (p95 4.87, min 1.70, max 6.82) |
+| vision-only ceiling | ~293 fps |
+| hand present | 271 / 283 frames (96%) |
+| dropout runs | 3, of 10, 1 and 1 frames |
+| two-hand frames | 63 (max 2 hands) |
+| wrist travel | x 0.930, y 0.704 of the frame |
+
+**3.41 ms against §2.1's 3.29 ms at the same resolution.** Two independent
+recordings, two toolchains, the same number. §2.1's throughput figures are
+confirmed rather than merely inherited.
+
+**The fixture is NOT in git, and that is a deliberate limitation.** It shows the
+person who recorded it, from the chin down, in their home. `VNDetectFaceRectangles`
+found no faces — the head is cropped — and that is exactly why face detection is
+the wrong gate: `VNDetectHumanRectangles` finds a person in 29 of 29 sampled
+frames. So `fixtures/*.mp4` is gitignored, and these numbers are reproducible
+locally but not from a clone. Anyone rebuilding this repo must record their own
+clip, hands only.
+
+**Correction 1 — `VNHumanHandPoseObservation.confidence()` is a constant.** It
+returned exactly **1.0 on all 336 observations** in the fixture. §6.2 originally
+said to gate downstream work on `h<i>_score`; that instruction was useless,
+because the channel never moves. `h<i>_score` still publishes the raw value, as a
+faithful mirror that will show us the day Apple starts varying it, but a new
+channel `h<i>_conf_median` carries the median of the hand's 21 joint
+confidences, and that is the one to gate on. The channel count is therefore
+**137, not 135**.
+
+**Correction 2 — per-joint confidence is where the signal is, and it reaches
+zero.** Over 7056 joint samples: min **0.000**, median **0.685**, max **0.945**,
+with **40.8%** below 0.5 and **11.0%** at exactly 0.0. §2.4 said Vision returns
+occluded joints with *lower* confidence rather than omitting them, which is true;
+this sharpens it. A joint at exactly 0.0 is Vision saying it has no idea, while
+still handing back coordinates that will look perfectly plausible on screen. The
+§2.4 figure of 0.77–0.92 was one clean unoccluded palm and is not
+representative of a moving hand.
+
 ---
 
 ## 3. Traps — all of these cost real time in the spike
@@ -366,14 +410,18 @@ hand reports zeros with all its channels still present.
 
 ```
 n_hands, seq, age_ms
-h<i>_found, h<i>_score, h<i>_chirality           for i in 0..MAX_HANDS-1
-h<i>_lm<jj>_x, h<i>_lm<jj>_y, h<i>_lm<jj>_conf   for jj in 00..20
+h<i>_found, h<i>_score, h<i>_conf_median, h<i>_chirality    for i in 0..MAX_HANDS-1
+h<i>_lm<jj>_x, h<i>_lm<jj>_y, h<i>_lm<jj>_conf              for jj in 00..20
 ```
 
-`MAX_HANDS = 2` gives 3 + 2×(3 + 63) = **135 channels**.
+`MAX_HANDS = 2` gives 3 + 2×(4 + 63) = **137 channels**.
 
-Gate downstream work on `h<i>_score` and per-joint `conf`, never on `found`
-alone. Publish `age_ms` and treat a rising value as engine death.
+**Gate on `h<i>_conf_median` and per-joint `conf`. Never on `found` alone, and
+never on `h<i>_score`** — that channel is a measured constant 1.0 (§2.6). It is
+published only so that a future macOS starting to vary it becomes visible rather
+than silent.
+
+Publish `age_ms` and treat a rising value as engine death.
 
 ### 6.3 Slot assignment — new work, not inherited from the spike
 

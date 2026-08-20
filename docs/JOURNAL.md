@@ -255,3 +255,59 @@ cited as a benchmark input.
 macOS puts before "AM". Two shell attempts reported the file as missing, and
 cv2's "couldn't read video stream" for a nonexistent path reads exactly like a
 codec failure. Glob for fixture paths; never retype them.
+
+---
+
+## Fixture accepted, and two corrections to the design
+2026-08-20
+
+`fixtures/hand_clip.mp4` recorded with the tool: 1280x720, 30 fps, 284 frames
+(9.5 s), hand present in 271/283, three dropout runs of 10/1/1 frames, wrist
+travelling 0.930 of x and 0.704 of y, and 63 frames with two hands. Vision median
+**3.41 ms**, against the 3.29 ms of `DESIGN.md` 2.1 at the same resolution: two
+independent recordings and two toolchains agreeing, so 2.1's numbers are now
+confirmed rather than inherited. Promoted into `DESIGN.md` 2.6.
+
+**The fixture is gitignored, deliberately, and my privacy check was wrong the
+first time.** I wrote a standard requiring hands-only fixtures and gated it on
+`VNDetectFaceRectanglesRequest`. This clip passed that gate with zero faces —
+because the head is cropped out of frame — while showing the user from the chin
+down in their own home. `VNDetectHumanRectanglesRequest` finds a person in 29 of
+29 sampled frames. The lesson is not "use a better detector", it is that a
+detector answers "is a person in shot" and not "would the subject mind this being
+public", so the standard now requires looking at frames as well. `fixtures/*.mp4`
+and `*.mov` are gitignored so the mistake cannot be made by accident: putting a
+video of someone into git history is not something to undo later. The user chose
+to keep the clip local, so these numbers are reproducible here but not from a
+clone, and `DESIGN.md` 2.6 says so.
+
+**Correction 1: `VNHumanHandPoseObservation.confidence()` is a constant 1.0.**
+Exactly 1.0 on all 336 observations. `DESIGN.md` 6.2 told everyone to gate
+downstream work on `h<i>_score`, which would have been gating on a channel that
+never moves — a defect that would have shipped and then looked like a
+smoothing problem months later. On the user's decision, `h<i>_score` keeps
+publishing Vision's raw value as a faithful mirror (so the day Apple starts
+varying it, we see it) and a NEW channel `h<i>_conf_median` carries our own
+aggregate. **The contract is now 137 channels, not 135.**
+
+Median rather than mean, and that choice is itself measured: 11.0% of joint
+confidences arrive at exactly 0.0, so a mean lets two occluded joints drag a
+perfectly good hand down. `median_joint_confidence()` exploits N_JOINTS being
+odd and fixed — a 21-element sort and one index, microseconds against a 3.4 ms
+budget — and returns 0.0 for an empty tuple so `BLANK_HAND` needs no special
+case. Three tests pin the behaviour, including the robustness-to-zeros property
+that is the whole reason for the choice.
+
+**Correction 2: per-joint confidence is the real signal, and it bottoms out at
+zero.** Over 7056 samples: min 0.000, median 0.685, max 0.945, 40.8% below 0.5,
+11.0% at exactly 0.0. `DESIGN.md` 2.4's "occluded joints come back with lower
+confidence" is right; what it missed is that lower can mean *zero* while Vision
+still returns coordinates that look entirely plausible on screen. 2.4's
+0.77-0.92 range was one clean unoccluded palm and does not describe a moving
+hand.
+
+**Still open.** Whether the clip is horizontally mirrored is unresolved: both
+chiralities appear in it (295 right, 41 left across 336 observations) because
+both hands are in shot at times, so the statistics cannot settle it, and the one
+frame I inspected was too motion-blurred to read handedness off. Deferred to the
+two-hand fixture, where it can be checked against a known pose.

@@ -16,22 +16,32 @@ from visionhands.types import (
     MAX_HANDS,
     N_CHANNELS,
     N_JOINTS,
+    Confidence,
+    Joint,
+    NormX,
+    NormY,
     blank_frame,
     channel_names,
+    median_joint_confidence,
 )
 
 
-def test_channel_count_is_135() -> None:
-    """3 frame scalars + 2 hands * (3 hand scalars + 21 joints * 3) = 135.
+def test_channel_count_is_137() -> None:
+    """3 frame scalars + 2 hands * (4 hand scalars + 21 joints * 3) = 137.
 
     Hardcoded rather than recomputed from the constants, so that changing
     MAX_HANDS or N_JOINTS fails here loudly instead of quietly redefining a
     contract that TD projects are wired against.
+
+    Was 135 until h<i>_conf_median joined the per-hand scalars, because Vision's
+    own observation confidence turned out to be a measured constant (DESIGN.md
+    2.6) and the channel DESIGN.md 6.2 told everyone to gate on was therefore
+    carrying no information at all.
     """
     assert MAX_HANDS == 2
     assert N_JOINTS == 21
-    assert N_CHANNELS == 135
-    assert len(channel_names()) == 135
+    assert N_CHANNELS == 137
+    assert len(channel_names()) == 137
 
 
 def test_channel_names_are_unique_and_ordered() -> None:
@@ -42,8 +52,8 @@ def test_channel_names_are_unique_and_ordered() -> None:
     assert names[:3] == ("n_hands", "seq", "age_ms")
     # Then each hand as a contiguous block, so a TD selector can grab one hand
     # by name pattern.
-    assert names[3:6] == ("h0_found", "h0_score", "h0_chirality")
-    assert names[6:9] == ("h0_lm00_x", "h0_lm00_y", "h0_lm00_conf")
+    assert names[3:7] == ("h0_found", "h0_score", "h0_conf_median", "h0_chirality")
+    assert names[7:10] == ("h0_lm00_x", "h0_lm00_y", "h0_lm00_conf")
     assert names[-3:] == ("h1_lm20_x", "h1_lm20_y", "h1_lm20_conf")
 
 
@@ -61,7 +71,10 @@ def test_blank_frame_fills_every_slot() -> None:
     assert len(frame.hands) == MAX_HANDS
     for hand in frame.hands:
         assert hand.found is False
+        # 0.0, not the 1.0 Vision reports for every real observation - an empty
+        # slot must not read as a confident hand.
         assert hand.confidence == 0.0
+        assert hand.conf_median == 0.0
         assert len(hand.joints) == N_JOINTS
         assert all(j.x == 0.0 and j.y == 0.0 and j.conf == 0.0 for j in hand.joints)
 
@@ -76,3 +89,40 @@ def test_blank_hand_is_shared_not_copied() -> None:
     frame = blank_frame()
     assert frame.hands[0] is BLANK_HAND
     assert frame.hands[1] is BLANK_HAND
+
+
+def _joints(*confs: float) -> tuple[Joint, ...]:
+    """N_JOINTS joints whose confidences are the given values, padded with 1.0."""
+    values = list(confs) + [1.0] * (N_JOINTS - len(confs))
+    return tuple(Joint(NormX(0.5), NormY(0.5), Confidence(c)) for c in values[:N_JOINTS])
+
+
+def test_median_joint_confidence_is_robust_to_zeros() -> None:
+    """The reason for median over mean, stated as a test.
+
+    11.0% of real joint confidences arrive at exactly 0.0 (MEASURED, DESIGN.md
+    2.6). A hand with a few occluded joints and seventeen good ones is a good
+    hand, and the published score has to say so.
+    """
+    mostly_good = _joints(0.0, 0.0, 0.0, 0.0)      # 4 zeros, 17 at 1.0
+    assert median_joint_confidence(mostly_good) == 1.0
+
+    # Past half the joints, the median does move - which is correct: that is no
+    # longer a hand we can see.
+    mostly_bad = _joints(*([0.0] * 11))
+    assert median_joint_confidence(mostly_bad) == 0.0
+
+
+def test_median_joint_confidence_picks_the_middle_value() -> None:
+    """N_JOINTS is odd, so there is a real middle element and no averaging."""
+    ramp = tuple(
+        Joint(NormX(0.5), NormY(0.5), Confidence(i / (N_JOINTS - 1)))
+        for i in range(N_JOINTS)
+    )
+    assert median_joint_confidence(ramp) == 0.5
+
+
+def test_median_joint_confidence_of_nothing_is_zero() -> None:
+    """So a blank hand needs no special case at the call site."""
+    assert median_joint_confidence(()) == 0.0
+    assert median_joint_confidence(BLANK_HAND.joints) == 0.0

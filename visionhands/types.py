@@ -156,7 +156,7 @@ class Joint:
 
 @dataclass(frozen=True)
 class Hand:
-    """One hand: 21 joints in JOINTS order, plus Vision's own two judgements.
+    """One hand: 21 joints in JOINTS order, plus three per-hand scalars.
 
     Contract: joints always has exactly N_JOINTS entries, in JOINTS order, even
               when the hand is absent - see BLANK_HAND. Downstream code indexes
@@ -165,7 +165,23 @@ class Hand:
     """
 
     chirality: int          # CHIRALITY_LEFT / _UNKNOWN / _RIGHT
-    confidence: Confidence  # the observation's own confidence, not a joint's
+
+    # Vision's own observation confidence, passed through unchanged.
+    #
+    # MEASURED over fixtures/hand_clip.mp4: this is 1.0 on every one of 336
+    # observations. It is a CONSTANT, not a signal. It is published anyway, as a
+    # faithful mirror of what the API returns - so that the day Apple starts
+    # varying it, we see it - but nothing may gate on it. Gate on conf_median
+    # below, or on individual joint confidences.
+    confidence: Confidence
+
+    # Our own aggregate: the median of the 21 joint confidences. This is the
+    # per-hand quality number that Vision does not give us and that
+    # `confidence` above was originally expected to be. Median rather than mean
+    # because 11.0% of joint confidences arrive at exactly 0.0 (MEASURED, same
+    # fixture), and a mean lets a couple of occluded joints drag a perfectly
+    # good hand down.
+    conf_median: Confidence
     joints: tuple[Joint, ...]
     # True when this slot holds a real detection. A slot can be held through a
     # brief dropout by the slot-assignment grace period (DESIGN.md 6.3), so
@@ -198,6 +214,26 @@ class LandmarkFrame:
     hands: tuple[Hand, ...]
 
 
+def median_joint_confidence(joints: tuple[Joint, ...]) -> Confidence:
+    """Median of a hand's joint confidences - the value published as h<i>_score's
+    useful counterpart, h<i>_conf_median.
+
+    Thread: called on the capture thread while building a Hand, so it is on the
+            per-frame hot path. N_JOINTS is 21 and odd, so this is a 21-element
+            sort and a single index - roughly a microsecond against a 3.4 ms
+            frame budget (MEASURED, DESIGN.md 2.6).
+    Why not statistics.median: it handles even-length inputs, empty inputs and
+            type coercion we do not have. The joint count here is fixed at 21 by
+            Vision, so the middle element IS the median, and hand-rolling keeps
+            the hot path free of a stdlib import that would have to prove it.
+    Contract: 0.0 for an empty tuple, so a blank hand needs no special case.
+    """
+    if not joints:
+        return Confidence(0.0)
+    ordered = sorted(j.conf for j in joints)
+    return Confidence(ordered[len(ordered) // 2])
+
+
 # A hand-shaped hole. Immutable and shared, so the CHOP's "no hand" path
 # allocates nothing per cook: every empty slot on every frame is this one
 # object. Zeros rather than NaN because a CHOP channel is a float and NaN
@@ -206,7 +242,11 @@ class LandmarkFrame:
 BLANK_JOINT: Final = Joint(NormX(0.0), NormY(0.0), Confidence(0.0))
 BLANK_HAND: Final = Hand(
     chirality=CHIRALITY_UNKNOWN,
+    # 0.0, NOT the 1.0 that Vision reports for every real observation. An empty
+    # slot must not look like a perfectly confident hand to anything that reads
+    # this channel without checking `found` first.
     confidence=Confidence(0.0),
+    conf_median=Confidence(0.0),
     joints=tuple(BLANK_JOINT for _ in range(N_JOINTS)),
     found=False,
 )
@@ -235,8 +275,11 @@ def blank_frame(seq: int = 0, captured_at: float = 0.0,
 # tests must be able to assert it without importing TouchDesigner. This is a
 # deliberate widening of what DESIGN.md 5 lists for this module.
 # ---------------------------------------------------------------------------
-# Per-hand scalars, in publication order.
-_HAND_SCALARS: Final = ("found", "score", "chirality")
+# Per-hand scalars, in publication order. `score` is Vision's raw observation
+# confidence and is a measured constant; `conf_median` is ours and is the one to
+# gate on. Both are published: one is the API's answer, the other is the useful
+# one, and collapsing them would hide the day the API's answer starts moving.
+_HAND_SCALARS: Final = ("found", "score", "conf_median", "chirality")
 # Per-joint values, in publication order.
 _JOINT_VALUES: Final = ("x", "y", "conf")
 # Frame-level scalars, in publication order.
@@ -246,8 +289,9 @@ _FRAME_SCALARS: Final = ("n_hands", "seq", "age_ms")
 def channel_names() -> tuple[str, ...]:
     """The complete, fixed channel list, in publication order.
 
-    Contract: 3 + MAX_HANDS * (3 + N_JOINTS * 3) names. At MAX_HANDS=2 that is
-              3 + 2 * 66 = 135 (DESIGN.md 6.2).
+    Contract: 3 + MAX_HANDS * (4 + N_JOINTS * 3) names. At MAX_HANDS=2 that is
+              3 + 2 * 67 = 137 (DESIGN.md 6.2). It was 135 until h<i>_conf_median
+              was added; DESIGN.md 2.6 records why.
     Why fixed and never conditional: a CHOP whose channels appear and disappear
               breaks every downstream reference in the TD project the moment
               they vanish, and it breaks it silently - the operator that
