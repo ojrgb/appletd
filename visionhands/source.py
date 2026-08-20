@@ -33,7 +33,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from visionhands.types import LandmarkFrame, blank_frame
 
@@ -47,6 +47,25 @@ if TYPE_CHECKING:
 # engine's counter starts at 1. Named because "if frame.seq" reads like a
 # truthiness accident rather than a documented sentinel.
 SEQ_NEVER_PUBLISHED = 0
+
+
+def _never_negative(age_ms: float) -> float:
+    """Clamp an age at zero.
+
+    A negative age is never a real condition. Every timestamp here comes from
+    `time.monotonic()` in this one process, so a frame cannot genuinely have
+    been captured in the future; a negative value can only be a sampling
+    artifact - the reader's clock read landing either side of a publish. The
+    ordering in `age_ms` narrows that window to almost nothing, but "almost"
+    is not a guarantee worth publishing to a CHOP, where a negative age reads
+    as fresher than fresh and would sail through any staleness gate
+    (DESIGN.md 6.2).
+
+    Note what this does NOT hide: a stale frame still reports a large age, and a
+    producer that never delivers still reports a rising one. Only the physically
+    impossible case is flattened.
+    """
+    return age_ms if age_ms > 0.0 else 0.0
 
 
 class LatestFrameBox:
@@ -68,11 +87,15 @@ class LatestFrameBox:
         under it. This is the property that makes the missing lock safe, and it
         is why unfreezing those dataclasses would be a concurrency change rather
         than a style change.
-      * Every counter has exactly ONE writer thread. `+=` is NOT atomic - it is
-        a load, an add and a store - so two writers would silently lose counts.
-        `_n_published` is only ever written by the publishing thread and
-        `_n_read` only by a reader; a second reader thread would need this
-        revisited, and there is deliberately no code that creates one.
+      * Every counter has exactly ONE writer thread. `+=` is not atomic by the
+        language definition - it is a load, an add and a store - so two writers
+        could in principle lose counts. Honesty about the evidence: the M3
+        review could not actually lose a count on CPython 3.11, even with six
+        threads and a 1 microsecond switch interval, because the eval breaker is
+        not polled between those three bytecodes. So the single-writer rule here
+        is discipline against an implementation detail changing, not a fix for
+        an observed race. It costs nothing to keep. `_n_published` is written
+        only by the publishing thread and `_n_read` only by a reader.
 
     What a reader can observe: a frame one publish behind the very latest. That
     is not a race to fix, it is the design - the alternative is waiting, and
@@ -134,13 +157,21 @@ class LatestFrameBox:
                   data" genuinely means "nothing was expected yet".
         Thread: safe from any thread; reads two values that each have one writer.
         """
-        now = time.monotonic() if now is None else now
+        # Frame FIRST, clock second. Sampling `now` first leaves a window - the
+        # reader can be preempted between the two lines, default switch interval
+        # 5 ms - in which a newer frame lands with captured_at later than `now`,
+        # and the age comes out NEGATIVE. Measured by the M3 review: 55 negative
+        # readings in 7.5M against a fast synthetic producer, worst -6.3 ms. It
+        # never happened against the real engine, because Vision's ~3.4 ms
+        # covers the window - but FakeSource is what the CHOP is developed
+        # against, and a negative age there would read as a fresh frame.
         frame = self._frame
+        now = time.monotonic() if now is None else now
         if frame.seq != SEQ_NEVER_PUBLISHED:
-            return (now - frame.captured_at) * 1e3
+            return _never_negative((now - frame.captured_at) * 1e3)
         if self._started_at is None:
             return 0.0
-        return (now - self._started_at) * 1e3
+        return _never_negative((now - self._started_at) * 1e3)
 
     @property
     def n_published(self) -> int:
@@ -151,8 +182,17 @@ class LatestFrameBox:
         return self._n_read
 
 
+@runtime_checkable
 class HandSource(Protocol):
     """Where a Script CHOP gets its landmarks from.
+
+    runtime_checkable so `isinstance(source, HandSource)` works and conformance
+    can be ASSERTED rather than assumed. Without it, nothing in the repo bound a
+    HandSource, so mypy never checked conformance either - the M3 review deleted
+    `FakeSource.errors` and the whole suite stayed green under ruff and
+    mypy --strict alike. Note what isinstance does and does not buy: it checks
+    that the attributes exist, not that they have the right signatures. The
+    typed binding in the tests is what covers the signatures.
 
     The point of this interface is that `td/hands_chop.py` is written against it
     and never against a camera. That is what makes an out-of-process source or a
@@ -188,6 +228,19 @@ class InProcessSource:
                  width_px: int | None = None,
                  height_px: int | None = None) -> None:
         self.box = LatestFrameBox()
+        # Guards start()/stop() against each other. It is NEVER taken by
+        # latest() or age_ms() - the read path stays lock-free, which is the
+        # whole point of this module. This only stops two callers building two
+        # engines through the check-then-act at the top of start(); TD calls
+        # these from its main thread, so it is cheap insurance rather than a
+        # response to an observed failure.
+        self._lifecycle_lock = threading.Lock()
+        # Errors from engines that have since been stopped or failed to start.
+        # Without this, `errors` returns [] the moment the engine is released -
+        # which is precisely when a caller most wants to know why. The M3 review
+        # measured a failed start reporting a rising age_ms and an empty error
+        # list, leaving the CHOP able to say "stale" but not "why".
+        self._retained_errors: list[str] = []
         # Stored rather than applied, because the engine - and therefore pyobjc -
         # is not imported until start(). None means "whatever engine.py's
         # measured defaults are", so the defaults live in exactly one place.
@@ -203,41 +256,66 @@ class InProcessSource:
         importable - and the CHOP layer stays testable - without pyobjc present.
         Python caches modules, so the cost is paid once and never on a cook.
         """
-        if self._engine is not None:
-            return
-        from visionhands.engine import (
-            DEFAULT_CAMERA_NAME,
-            DEFAULT_HEIGHT_PX,
-            DEFAULT_WIDTH_PX,
-            HandEngine,
-        )
+        with self._lifecycle_lock:
+            if self._engine is not None:
+                return
+            from visionhands.engine import (
+                DEFAULT_CAMERA_NAME,
+                DEFAULT_HEIGHT_PX,
+                DEFAULT_WIDTH_PX,
+                HandEngine,
+            )
 
-        engine = HandEngine(
-            on_frame=self.box.publish,
-            camera_name=self._camera_name or DEFAULT_CAMERA_NAME,
-            width_px=self._width_px or DEFAULT_WIDTH_PX,
-            height_px=self._height_px or DEFAULT_HEIGHT_PX,
-        )
-        # Marked before starting, so the age of a camera that never delivers is
-        # measured from the attempt rather than from the first success.
-        self.box.mark_started()
-        try:
-            engine.start()
-        except Exception:
-            # Not a blind swallow: the exception propagates. The engine is
-            # dropped so that a failed start leaves this source in the same
-            # state it began in, which is what makes a retry safe rather than a
-            # second half-live engine.
-            self._engine = None
-            raise
-        self._engine = engine
+            engine = HandEngine(
+                on_frame=self.box.publish,
+                camera_name=self._camera_name or DEFAULT_CAMERA_NAME,
+                width_px=self._width_px or DEFAULT_WIDTH_PX,
+                height_px=self._height_px or DEFAULT_HEIGHT_PX,
+                # Continue the sequence rather than restarting it. A new engine
+                # object starts counting from zero, and the box still holds the
+                # previous session's frame until the new one publishes - so a
+                # reload made seq jump 75 -> 2 (MEASURED, M3 review), which
+                # silently defeats every downstream `seq > last_seq` check until
+                # the new engine catches up. DESIGN.md 6.1 says monotonic.
+                seq_start=self.box.latest().seq,
+            )
+            # Marked before starting, so the age of a camera that never delivers
+            # is measured from the attempt rather than from the first success.
+            self.box.mark_started()
+            try:
+                engine.start()
+            except Exception as exc:
+                # Not a blind swallow: the exception propagates. But it is
+                # RECORDED first - a caller that only watches the CHOP's health
+                # channels never sees this traceback, and "stale with no reason"
+                # is the least actionable diagnostic there is.
+                self._retained_errors.append("start failed: %s" % exc)
+                self._engine = None
+                raise
+            self._engine = engine
 
     def stop(self) -> None:
-        """Stop the engine and release it. Idempotent, and safe after a failed start."""
-        engine = self._engine
-        self._engine = None
-        if engine is not None:
-            engine.stop()
+        """Stop the engine and release it. Idempotent, and safe after a failed start.
+
+        ORDER: stop the engine, THEN drop the reference, and only in a finally.
+        Nulling first - as the first version did - means that if `engine.stop()`
+        raises (a pyobjc exception out of stopRunning, say) the live capture
+        session becomes unreachable: `running` reports False, a retry of stop()
+        is a no-op, and nothing can ever shut it down. Keeping the reference
+        until the stop has actually returned makes a retry possible.
+        """
+        with self._lifecycle_lock:
+            engine = self._engine
+            if engine is None:
+                return
+            try:
+                # Copy the engine's errors out BEFORE releasing it, so a caller
+                # can still ask why after the source has been stopped.
+                self._retained_errors.extend(
+                    e for e in engine.errors if e not in self._retained_errors)
+                engine.stop()
+            finally:
+                self._engine = None
 
     def latest(self) -> LandmarkFrame:
         return self.box.latest()
@@ -252,16 +330,20 @@ class InProcessSource:
 
     @property
     def errors(self) -> list[str]:
-        """Faults recorded by the engine, readable from the main thread.
+        """Faults from the current engine AND from engines already released.
 
-        Returns a COPY: the underlying list is appended to from the capture
-        thread, and handing out the live object would let a caller iterate it
-        while it grows.
+        Returns a COPY: the engine's list is appended to from the capture thread,
+        and handing out the live object would let a caller iterate it while it
+        grows.
+
+        Retained errors come first because they are the older ones. A failed
+        start leaves its reason here even though there is no engine to ask,
+        which is what lets a CHOP publish "stale, and here is why" rather than
+        just "stale".
         """
         engine = self._engine
-        if engine is None:
-            return []
-        return list(engine.errors)
+        live = list(engine.errors) if engine is not None else []
+        return self._retained_errors + [e for e in live if e not in self._retained_errors]
 
 
 class FakeSource:
@@ -279,6 +361,12 @@ class FakeSource:
     tests.
     """
 
+    # How long stop() waits for the publisher. Generous: the publisher checks
+    # its Event every interval and between frames, so anything approaching this
+    # means frame_factory itself is blocking, which is a caller bug worth
+    # raising on rather than a timing tolerance worth widening.
+    JOIN_TIMEOUT_S = 2.0
+
     def __init__(self, frame_factory: Callable[[int], LandmarkFrame],
                  interval_s: float = 1.0 / 30.0) -> None:
         """`frame_factory(seq) -> LandmarkFrame`, called on the publishing thread."""
@@ -286,39 +374,88 @@ class FakeSource:
         self._frame_factory = frame_factory
         self._interval_s = interval_s
         self._thread: threading.Thread | None = None
-        # An Event rather than a bool: the publisher waits on it, so stopping is
-        # immediate instead of taking up to one interval. Waiting on an Event
-        # also releases the GIL, unlike a sleep-and-poll loop, which is the
-        # pattern DESIGN.md 3 measured starving the capture thread.
-        self._stop = threading.Event()
+        # ONE EVENT PER RUN, created in start() and owned by that run's thread.
+        #
+        # The first version kept a single Event and cleared it in start(). The
+        # M3 review demonstrated what that costs: if a publishing thread had not
+        # finished when stop() returned, a later start() cleared the shared Event
+        # and RESURRECTED the orphan, which then published alongside the new
+        # thread - two writers into one LatestFrameBox, breaking the
+        # single-writer invariant this module's correctness rests on.
+        #
+        # Honest accounting of which fix does the work: the barrier that
+        # actually prevents this now is stop() keeping `_thread` set when the
+        # join times out, so start() sees a live publisher via is_alive() and
+        # declines. Mutating the Event back to shared-and-cleared, on its own,
+        # does NOT reproduce the bug - verified. The per-run Event is
+        # defence-in-depth: it makes an orphan un-resurrectable even if that
+        # guard is ever weakened, and it costs one object per start.
+        self._stop: threading.Event | None = None
         self.errors: list[str] = []
 
     def start(self) -> None:
-        if self._thread is not None:
+        """Idempotent. Refuses to start a second publisher while one is alive."""
+        # is_alive(), not `is not None`: stop() leaves _thread set when a join
+        # times out, precisely so this check can see that a publisher is still
+        # running and decline to add another.
+        if self._thread is not None and self._thread.is_alive():
             return
-        self._stop.clear()
+        stop_event = threading.Event()
         self.box.mark_started()
-        self._thread = threading.Thread(target=self._run, name="visionhands-fake",
-                                        daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, args=(stop_event,),
+                                  name="visionhands-fake", daemon=True)
+        # Started BEFORE being recorded: if Thread.start() raises - thread
+        # exhaustion - the first version left _thread set, which made running
+        # report True, start() a permanent no-op, and stop() raise
+        # "cannot join thread before it is started" on the teardown path.
+        thread.start()
+        self._thread = thread
+        self._stop = stop_event
 
-    def _run(self) -> None:
+    def _run(self, stop_event: threading.Event) -> None:
+        """The publisher. Takes its stop Event as an ARGUMENT, not from self.
+
+        That is what makes an orphaned run un-resurrectable: this thread watches
+        the Event it was born with, and a later start() creating a new Event
+        cannot reach it.
+        """
         seq = 0
-        while not self._stop.is_set():
+        while not stop_event.is_set():
             seq += 1
             self.box.publish(self._frame_factory(seq))
-            # wait() returns True the moment stop is set, so a stop never has to
+            # wait() returns the moment stop is set, so stopping never has to
             # wait out the remaining interval.
-            self._stop.wait(self._interval_s)
+            stop_event.wait(self._interval_s)
 
     def stop(self) -> None:
-        """Idempotent, and joins - so a test that stops the source knows nothing
-        is still publishing into the box it is about to assert on."""
-        self._stop.set()
+        """Stop publishing and WAIT for it to have stopped. Idempotent.
+
+        Raises: RuntimeError if the publisher will not stop. That is deliberate.
+                The whole value of this class as a test double is that after
+                stop() returns, nothing is still writing into the box a test is
+                about to assert on - and the first version promised exactly that
+                in its docstring while never checking the join result, so a slow
+                frame_factory made it a lie (MEASURED, M3 review: stop()
+                returned with the publisher still running and `running`
+                reporting False). A test double that lies about its own state is
+                worse than no test double.
+        """
+        stop_event = self._stop
+        if stop_event is not None:
+            stop_event.set()
         thread = self._thread
+        if thread is None:
+            return
+        thread.join(timeout=self.JOIN_TIMEOUT_S)
+        if thread.is_alive():
+            # Keep _thread set: start() checks is_alive(), so this stops a
+            # second publisher joining the first.
+            raise RuntimeError(
+                "FakeSource publisher did not stop within %.1fs - it is still "
+                "writing into the box. Is frame_factory blocking?"
+                % self.JOIN_TIMEOUT_S)
         self._thread = None
-        if thread is not None:
-            thread.join(timeout=2.0)
+        self._stop = None
 
     def latest(self) -> LandmarkFrame:
         return self.box.latest()
@@ -328,4 +465,10 @@ class FakeSource:
 
     @property
     def running(self) -> bool:
-        return self._thread is not None
+        """True while a publisher thread is actually alive.
+
+        is_alive() rather than a flag, so this cannot report False while a
+        thread is still writing - the exact lie the M3 review caught.
+        """
+        thread = self._thread
+        return thread is not None and thread.is_alive()

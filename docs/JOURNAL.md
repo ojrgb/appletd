@@ -522,3 +522,105 @@ a frame assembled from two different writes would see the fields disagree. Zero
 torn reads over ~1000s of reads under contention, which is what immutability
 guarantees. The value is not today's result, it is that the day someone unfreezes
 `Hand` for convenience, this is the test that notices.
+
+---
+
+## Review of M3 — the tests were not testing the milestone
+2026-08-20
+
+Eight findings. The lock-free reasoning itself was confirmed correct and
+complete for CPython 3.11; what was wrong was everything around it.
+
+**MAJOR, and the most embarrassing: the suite did not test this milestone's
+central claim.** The reviewer mutated the code and all 60 tests stayed green
+for: unfreezing every dataclass, adding a real `threading.Lock` around both
+`publish()` and `latest()`, and deleting `FakeSource.errors` (which breaks the
+interface milestone 4 will be written against) — the last one passing ruff and
+`mypy --strict` too, because nothing in the repo ever bound a `HandSource`.
+
+The journal entry for M3 claimed "the day someone unfreezes `Hand` for
+convenience, this is the test that notices". It was not. Nothing in production
+mutates a frame, so no behavioural test can detect frozenness being removed.
+Three structural tests now do the work instead:
+
+- `test_the_frame_types_are_actually_frozen` asserts `FrozenInstanceError`
+  directly. Immutability is the reason no lock is needed, so it is a contract,
+  not a style choice.
+- `test_latest_calls_nothing_at_all` disassembles `latest()` and asserts it
+  contains no CALL opcode of any kind, and that the box holds no
+  synchronisation primitive. A timing test cannot tell an uncontended lock from
+  no lock; bytecode can.
+- `test_both_sources_satisfy_the_protocol_at_runtime` — `HandSource` is now
+  `@runtime_checkable`, and the test binds both sources to it with annotations
+  so mypy checks the signatures and `isinstance` checks the members exist.
+
+**MAJOR: `seq` ran backwards across a reload.** `HandEngine` deliberately keeps
+`_seq` monotonic across its own stop/start — but `InProcessSource` builds a NEW
+engine, so the counter restarted at 1 while the box still served the old
+session's frame. Measured by the reviewer on the real camera: **75 → 2**. Any
+downstream `seq > last_seq` freshness test silently ignores every frame until the
+new engine catches up, and `DESIGN.md` 6.1 promises monotonic. `HandEngine` now
+takes `seq_start`, and `InProcessSource` passes the box's last seq. Their probe
+initially missed this by comparing only endpoints — a warm camera reached a
+higher number in session 2 — which is a good reminder that "the number went up"
+is not the same as "the number never went down".
+
+**MAJOR: `FakeSource.stop()` lied, and `start()` then resurrected the orphan.**
+`stop()` called `join(timeout=2.0)` and ignored the result, so a slow
+`frame_factory` left it returning cleanly with the thread still publishing while
+`running` reported False. Then `start()` cleared the shared Event, bringing the
+orphan back alongside a new thread: two writers into one box. `stop()` now
+raises if the publisher will not stop, keeps `_thread` set so `start()` can see
+it via `is_alive()`, and each run owns its own Event. Verified by reviving the
+original bug in full — both new tests go red.
+
+Worth recording precisely: the per-run Event is **defence-in-depth, not the
+load-bearing half**. Mutating just that back to shared-and-cleared does not
+reproduce the bug, because the `is_alive()` guard now catches it. Same shape as
+the M0 review's finding about the fixture writer's two barriers, and the comment
+says which one does the work.
+
+**MINOR fixes.** `errors` returned `[]` the moment the engine was released,
+which is exactly when a caller most wants to know why — measured: a failed start
+gave a correctly rising `age_ms` and an empty error list, so a CHOP could say
+"stale" but never "stale because there is no such camera". Errors are now
+retained across stop and recorded on a failed start. `stop()` nulled `_engine`
+before stopping it, so a raising `engine.stop()` left a live capture session
+permanently unreachable; the reference is now dropped in a `finally`, after.
+`FakeSource.start()` recorded the thread before starting it, so a failed
+`Thread.start()` left `running` reporting True and `stop()` raising on the
+teardown path. `start()`/`stop()` on `InProcessSource` are now guarded by a
+lifecycle lock — never taken by `latest()`, so the read path stays lock-free.
+
+**`age_ms` could go negative, and is now clamped.** It sampled the clock before
+the frame, leaving a window where a newer frame appeared to come from the
+future: 55 negatives in 7.5M reads against a fast synthetic producer, worst
+−6.3 ms. It never happened against the real engine, because Vision's ~3.4 ms
+covers the window — but `FakeSource` is what the CHOP will be developed against,
+and a negative age reads as *fresher than fresh* to any staleness gate. Reading
+the frame first narrows the window; clamping closes it. A negative age can only
+ever be a sampling artifact, since every timestamp comes from one monotonic
+clock in one process, so nothing real is being hidden.
+
+**A correction to my own comment.** I had written that `+=` is not atomic and
+that two writers "would silently lose counts". The reviewer could not lose a
+single count on CPython 3.11 with six threads and a 1 microsecond switch
+interval, because the eval breaker is not polled between those three bytecodes.
+The single-writer rule stays as discipline against an implementation detail
+changing, but the comment now says what was actually measured rather than
+asserting a race nobody can produce.
+
+**A measurement I nearly published as a defect.** My first version of the
+latency test used a producer that published in a tight loop with no yield, and
+measured a worst-case read of 6.3 ms against a median of 0.0001 ms. That is not
+a lock and not a flaw in the box — it is the GIL switch interval, 5 ms by
+default, with a thread that never gives it up. The real capture thread yields
+constantly, because it sits inside AVFoundation and Vision with the GIL
+released. The test now models a yielding producer and measures a worst case of
+~0.03 ms against a 1 ms bound; the pathological number is recorded in
+`DESIGN.md` 2.7 as a property of CPython rather than of this design.
+
+Also worth noting how that near-miss happened: my edit to the test's docstring
+applied while my edit to its body did not, so for two runs I was reading an
+explanation that described code that was not there. Both halves of an edit have
+to be verified, not just the one that shows up in a diff first.

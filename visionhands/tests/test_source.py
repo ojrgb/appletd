@@ -20,11 +20,21 @@ Three properties, in order of how expensive they are to get wrong:
 
 from __future__ import annotations
 
+import dataclasses
+import dis
 import statistics
 import threading
 import time
 
-from visionhands.source import SEQ_NEVER_PUBLISHED, FakeSource, LatestFrameBox
+import pytest
+
+from visionhands.source import (
+    SEQ_NEVER_PUBLISHED,
+    FakeSource,
+    HandSource,
+    InProcessSource,
+    LatestFrameBox,
+)
 from visionhands.types import (
     MAX_HANDS,
     N_JOINTS,
@@ -182,40 +192,65 @@ def test_no_torn_reads_under_contention() -> None:
     assert torn == 0, "%d torn reads out of %d" % (torn, reads)
 
 
-def test_the_reader_never_blocks() -> None:
-    """The contract TouchDesigner depends on (DESIGN.md 4.1).
+def test_read_latency_under_a_realistic_producer() -> None:
+    """What TD's main thread actually experiences (DESIGN.md 4.1).
 
-    A Script CHOP that can wait can freeze TD. There is no lock between reader
-    and writer, so the worst a read can cost is the GIL handoff - measured here
-    as a worst-case rather than an average, because an average would hide
-    exactly the stall this is looking for.
+    The producer here publishes at ~60 Hz and yields in between, which is how
+    the real capture thread behaves: it spends its time blocked inside
+    AVFoundation and Vision, where pyobjc has RELEASED the GIL (MEASURED,
+    DESIGN.md 2.2), and holds it only for the brief Python work around each
+    frame.
+
+    An earlier version of this test used a producer that published in a tight
+    loop with no yield at all, and measured a worst-case read of 6.3 ms against
+    a median of 0.0001 ms. That was not a lock and not a defect in the box - it
+    was the GIL switch interval, 5 ms by default, with a thread that never gave
+    it up. Worth knowing (it is recorded in DESIGN.md 2.7), but it measures
+    CPython's scheduler rather than this module, and a test that fails for a
+    reason it is not testing is a test people learn to ignore.
+
+    Lock-freedom itself is proved structurally, in
+    test_latest_calls_nothing_at_all - a timing test cannot tell an uncontended
+    lock from no lock.
     """
     box = LatestFrameBox()
     stop = threading.Event()
+    published = {"n": 0}
 
     def writer() -> None:
         seq = 0
         while not stop.is_set():
             seq += 1
             box.publish(_checksummed_frame(seq))
+            # Yields, exactly as the capture thread does while it sits inside
+            # AVFoundation and Vision with the GIL released.
+            stop.wait(1.0 / 60.0)
+        published["n"] = seq
 
     thread = threading.Thread(target=writer, daemon=True)
     thread.start()
     try:
         durations_ms = []
-        for _ in range(2000):
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
             started = time.perf_counter()
             box.latest()
             durations_ms.append((time.perf_counter() - started) * 1e3)
+            time.sleep(1.0 / 240.0)     # cook far faster than the producer
     finally:
         stop.set()
         thread.join(timeout=2.0)
 
-    # 5 ms is enormous for an attribute read - the bound is loose on purpose, so
-    # this fails only for a genuine stall and not for a busy CI machine. A lock
-    # held across a Vision inference would show up here as ~3.4 ms.
+    # Guards against the test passing with no contention at all: the M3 review
+    # killed the writer immediately and watched an earlier version go green.
+    assert len(durations_ms) > 50, "not enough reads: %d" % len(durations_ms)
+    assert published["n"] > 10, "producer barely ran (%d)" % published["n"]
+
+    # 1 ms is already enormous for an attribute read - measured worst case is
+    # ~0.03 ms. The bound is loose enough to survive a busy machine and tight
+    # enough that a lock held across a Vision inference (~3.4 ms) fails it.
     worst_ms = max(durations_ms)
-    assert worst_ms < 5.0, ("worst read took %.3f ms (median %.4f) - something "
+    assert worst_ms < 1.0, ("worst read took %.3f ms (median %.4f) - something "
                             "is blocking the reader"
                             % (worst_ms, statistics.median(durations_ms)))
 
@@ -286,3 +321,195 @@ def test_a_source_satisfies_the_protocol_the_chop_will_use() -> None:
     assert isinstance(source.running, bool)
     assert isinstance(source.latest(), LandmarkFrame)
     assert isinstance(source.age_ms(), float)
+
+
+# ---------------------------------------------------------------------------
+# The claims themselves, made checkable.
+#
+# The M3 review mutated the code and found that this milestone's central claims
+# were untested: unfreezing every dataclass, and adding a real lock around both
+# publish() and latest(), each left all 60 tests green. Timing tests cannot
+# distinguish an uncontended lock from no lock - so these check the two
+# structural properties directly instead.
+# ---------------------------------------------------------------------------
+def test_the_frame_types_are_actually_frozen() -> None:
+    """Immutability is not a style choice here, it is the reason no lock is needed.
+
+    A reader holding the previous frame reference must keep a complete, unchanging
+    object. If `Hand` were unfrozen so someone could "just update the confidence
+    in place", a reader could observe a frame mid-mutation and the missing lock
+    would become a real race. Nothing in the repo mutates a frame today, so no
+    behavioural test can catch that change - only this one.
+    """
+    frame = _checksummed_frame(1)
+    for obj, field, value in (
+        (frame, "seq", 2),
+        (frame.hands[0], "found", False),
+        (frame.hands[0].joints[0], "x", NormX(0.9)),
+    ):
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(obj, field, value)
+
+
+def test_latest_calls_nothing_at_all() -> None:
+    """Lock-freedom, checked structurally rather than by timing.
+
+    A timing test cannot tell an uncontended lock from no lock - the M3 review
+    added a real threading.Lock around publish() and latest() and every test
+    stayed green. So this reads the bytecode: `latest()` must contain no CALL of
+    any kind. A lock acquisition is a call. So is a property, a descriptor, a
+    copy, a comparison, or any other way of accidentally introducing something
+    that can block TD's main thread (DESIGN.md 4.1).
+
+    If this fails because latest() legitimately needs to call something, that is
+    a design decision to make deliberately, not a test to relax casually.
+    """
+    instructions = list(dis.get_instructions(LatestFrameBox.latest))
+    calls = [i.opname for i in instructions if "CALL" in i.opname]
+    assert not calls, "latest() calls something: %s" % calls
+
+    # And the box holds no synchronisation primitive at all.
+    box = LatestFrameBox()
+    lock_types = (type(threading.Lock()), type(threading.RLock()), threading.Condition,
+                  threading.Semaphore, threading.Event)
+    held = [name for name, value in vars(box).items() if isinstance(value, lock_types)]
+    assert not held, "the box holds a synchronisation primitive: %s" % held
+
+
+def test_both_sources_satisfy_the_protocol_at_runtime() -> None:
+    """Conformance asserted, not assumed.
+
+    The M3 review deleted `FakeSource.errors` - breaking the interface the CHOP
+    will be written against - and ruff, mypy --strict and all 60 tests stayed
+    green, because nothing in the repo ever bound a HandSource. isinstance
+    against a runtime_checkable Protocol checks that every member EXISTS; the
+    annotated bindings below are what make mypy check the signatures.
+    """
+    fake: HandSource = FakeSource(_checksummed_frame)
+    in_process: HandSource = InProcessSource()
+    for source in (fake, in_process):
+        assert isinstance(source, HandSource), type(source).__name__
+        for member in ("start", "stop", "latest", "age_ms", "running", "errors"):
+            assert hasattr(source, member), "%s lacks %s" % (type(source).__name__, member)
+
+
+# ---------------------------------------------------------------------------
+# The lifecycle defects the M3 review confirmed.
+# ---------------------------------------------------------------------------
+def test_stop_refuses_to_lie_about_a_publisher_that_will_not_stop() -> None:
+    """A test double that misreports its own state is worse than none.
+
+    The old stop() called join(timeout=2) and ignored the result, so a slow
+    frame_factory left it returning cleanly with the thread still writing into
+    the box - while `running` reported False.
+    """
+    release = threading.Event()
+
+    def blocking_factory(seq: int) -> LandmarkFrame:
+        release.wait(10.0)              # refuses to return until released
+        return _checksummed_frame(seq)
+
+    source = FakeSource(blocking_factory, interval_s=0.001)
+    source.JOIN_TIMEOUT_S = 0.2         # keep the test quick
+    source.start()
+    time.sleep(0.05)
+    try:
+        with pytest.raises(RuntimeError, match="did not stop"):
+            source.stop()
+        assert source.running, "a publisher that is still alive must report running"
+    finally:
+        release.set()
+        time.sleep(0.05)
+
+
+def test_a_stalled_publisher_cannot_be_resurrected_by_a_later_start() -> None:
+    """The single-writer invariant, defended.
+
+    With one shared Event, start() cleared it and brought an orphaned publisher
+    back to life alongside the new one - two threads writing one box, which is
+    exactly what LatestFrameBox's correctness argument forbids. Each run now owns
+    its own Event, so an orphan stays stopped.
+    """
+    release = threading.Event()
+    threads_that_ran = set()
+
+    def blocking_factory(seq: int) -> LandmarkFrame:
+        threads_that_ran.add(threading.get_ident())
+        release.wait(10.0)
+        return _checksummed_frame(seq)
+
+    source = FakeSource(blocking_factory, interval_s=0.001)
+    source.JOIN_TIMEOUT_S = 0.2
+    source.start()
+    time.sleep(0.05)
+    try:
+        with pytest.raises(RuntimeError):
+            source.stop()
+        # start() must decline while the first publisher is still alive.
+        source.start()
+        time.sleep(0.05)
+        assert len(threads_that_ran) == 1, (
+            "a second publisher started while the first was still alive: %d"
+            % len(threads_that_ran))
+    finally:
+        release.set()
+        time.sleep(0.1)
+
+
+def test_errors_survive_being_stopped() -> None:
+    """Why a failed start must leave its reason behind.
+
+    `errors` used to return [] the moment the engine was released, so a CHOP
+    could report "stale" but never "stale because there is no such camera".
+    """
+    source = InProcessSource(camera_name="no-such-camera-xyz")
+    with pytest.raises(Exception, match="no capture device"):
+        source.start()
+    assert any("no-such-camera-xyz" in e for e in source.errors), source.errors
+    source.stop()
+    assert source.errors, "the reason vanished when the source was stopped"
+
+
+def test_age_is_never_negative() -> None:
+    """A negative age would sail through every staleness gate.
+
+    Two defences, both needed. `age_ms` reads the frame before the clock, which
+    narrows the window in which a newly published frame can appear to be from
+    the future; and the result is clamped, because "narrow" is not "closed" and
+    a probabilistic test cannot prove otherwise - the M3 review needed 7.5M
+    reads to observe 55 negatives.
+
+    The deterministic half of this test uses an explicitly-passed clock, which
+    is the only way to hit the case reliably.
+    """
+    # Deterministic: a clock reading from before the frame was captured.
+    box = LatestFrameBox()
+    box.mark_started()
+    captured = time.monotonic()
+    box.publish(LandmarkFrame(seq=1, captured_at=captured, width=1280,
+                              height=720, hands=blank_frame().hands))
+    assert box.age_ms(now=captured - 0.5) == 0.0
+    assert box.age_ms(now=captured + 0.5) > 400.0
+
+    # And under real contention, with a producer stamping the future.
+    box = LatestFrameBox()
+    box.mark_started()
+    stop = threading.Event()
+
+    def writer() -> None:
+        seq = 0
+        while not stop.is_set():
+            seq += 1
+            # Stamped in the FUTURE on purpose: the harshest version of the
+            # interleaving, and one a monotonic clock cannot actually produce.
+            box.publish(LandmarkFrame(seq=seq, captured_at=time.monotonic() + 0.001,
+                                      width=1280, height=720, hands=blank_frame().hands))
+
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    try:
+        worst = min(box.age_ms() for _ in range(20000))
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
+    assert worst >= 0.0, "age_ms went negative: %.4f ms" % worst

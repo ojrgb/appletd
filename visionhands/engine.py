@@ -623,7 +623,18 @@ class HandEngine:
                  camera_name: str = DEFAULT_CAMERA_NAME,
                  width_px: int = DEFAULT_WIDTH_PX,
                  height_px: int = DEFAULT_HEIGHT_PX,
-                 max_hands: int = MAX_HANDS) -> None:
+                 max_hands: int = MAX_HANDS,
+                 seq_start: int = 0) -> None:
+        """seq_start continues an existing frame sequence rather than restarting it.
+
+        Why it exists: this engine keeps `_seq` monotonic across its OWN
+        stop/start, but a caller that replaces the engine object - which is what
+        InProcessSource does on a TouchDesigner project reload - would otherwise
+        reset the sequence to 1 while consumers still hold frames numbered in
+        the hundreds. The M3 review caught exactly that, measuring seq going
+        75 -> 2 across a reload, which silently defeats any downstream
+        `seq > last_seq` freshness test until the new engine catches up.
+        """
         self._on_frame = on_frame
         self._camera_name = camera_name
         self._requested_px = (width_px, height_px)
@@ -648,7 +659,7 @@ class HandEngine:
         self._stopping = False
         self._running = False
 
-        self._seq = 0
+        self._seq = seq_start
         self.n_delivered = 0        # every buffer the camera handed us
         self.n_published = 0        # frames that reached on_frame
         self.n_dropped = 0          # buffers with no image, or failed inference
