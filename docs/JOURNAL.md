@@ -38,3 +38,42 @@ standard depends on. `ruff check` is the gate instead.
 does pyobjc load next to TD's Objective-C runtime and its own numpy, and does
 delivery work there. No fixture clip recorded yet, so no honest performance
 number for this repo's own code exists.
+
+---
+
+## Milestone 2a — the pure core: data contract and coordinates
+2026-08-20
+
+**Built.** `visionhands/types.py` (Joint / Hand / LandmarkFrame, the 21-joint
+table, the 135-name channel contract, an import-time self-check),
+`visionhands/coords.py` (three conversions and one clamp, nothing else),
+`visionhands/tests/test_coords.py` and `test_channel_contract.py`. Lint, mypy
+strict and 12 tests green.
+
+**Verified, not transcribed.** All 21 joint codes were read out of pyobjc 12.2.2
+and compared against the table in `DESIGN.md` 2.3: 21 present, all distinct,
+identical to the doc, including the `ThumbIP`=`VNHLKTIP` / `IndexTip`=
+`VNHLKITIP` pair and the pinky's internal `P`. The codes are hardcoded in
+`types.py` so the pure core stays free of pyobjc; `engine.py` will verify each
+one against the framework at start-up rather than trusting the copy.
+
+**Deviations from DESIGN.md 5/6.1, both deliberate.**
+- `channel_names()` and `N_CHANNELS` live in `types.py`, not in
+  `td/hands_chop.py`. The channel list is a contract between the CHOP and
+  everything downstream, and the tests have to assert it without importing
+  TouchDesigner.
+- `LandmarkFrame.hands` is a FIXED-length tuple of `MAX_HANDS`, with a shared
+  frozen `BLANK_HAND` in empty slots — not "0..MAX_HANDS hands" as 6.1 words it.
+  A fixed length makes the fixed channel list in 6.2 unconditionally true rather
+  than something the CHOP has to remember to pad, and the shared blank keeps the
+  no-hand path allocation-free per cook.
+
+**Surprised us.** mypy caught a real mistake in our own test on its first run: a
+comparison between a bottom-left pixel value and a top-left one. That is exactly
+the class of bug `DESIGN.md` 7 warns about, found by the type system before the
+code ever ran. The NewType-per-coordinate-space decision has already paid for
+itself.
+
+**Still unknown.** Everything downstream of the pure core. No engine, no camera
+path in this repo's own code, no fixture clip, and milestone 1 not yet confirmed
+in TD.
