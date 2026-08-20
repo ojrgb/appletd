@@ -104,6 +104,24 @@ CALLBACK_DRAIN_S = 0.2
 # (TouchDesigner.app), never to this code (DESIGN.md 8).
 AUTH_STATUS_AUTHORIZED = 3
 
+# Frames per second to PIN the camera to, both floor and ceiling.
+#
+# MEASURED, and this is the fix for the single most visible quality problem.
+# The built-in camera advertises a 15-30 fps range, and its
+# activeVideoMaxFrameDuration sits at 1/15 s - which means auto-exposure is free
+# to HALVE the frame rate in dim light to buy a longer exposure. It does. A TD
+# session left running for 25 minutes drifted from 25 fps to 13.4 fps with
+# inter-frame gaps swinging from 15 ms to 101 ms: visibly choppy, and nothing to
+# do with our code or with TouchDesigner. Short standalone runs never showed it
+# because the camera had not settled yet.
+#
+# Pinning min == max forces a constant rate. The cost is real and worth stating:
+# in low light the image gets darker rather than slower, because the camera can
+# no longer buy brightness with time. That is the right trade for hand tracking,
+# where a late landmark is worse than a dim one - but it is a trade, and
+# TARGET_FPS is a constructor argument so it can be changed or disabled.
+TARGET_FPS = 30
+
 # kCVPixelBufferLock_ReadOnly.
 LOCK_READ_ONLY = 1
 
@@ -490,6 +508,51 @@ def pick_device(name_substr: str) -> ObjCObject:
                       % (name_substr, [d.localizedName() for d in devices]))
 
 
+def pin_frame_rate(device: ObjCObject, fps: int) -> str | None:
+    """Force a constant frame rate. Returns None on success, or a reason.
+
+    Thread: the starting thread, never the capture queue.
+    Why both min AND max: setting only the minimum duration caps the top speed
+          and leaves the camera free to slow down, which is the behaviour being
+          fixed. Equal min and max is what "constant rate" means to AVFoundation.
+    Order: this must happen AFTER the input is added to the session. Adding an
+          input resets the device to whatever the session preset implies - the
+          same trap that silently reverts setActiveFormat_ (DESIGN.md 3).
+    Traps: lockForConfiguration_ is an out-param selector, and the lock MUST be
+          released on every path or the device stays locked for the life of the
+          process and nothing else can configure it.
+    Returns a string rather than raising: a camera that will not be pinned is
+          still a usable camera, so this is a degradation to report, not a
+          failure to abort on.
+    """
+    ranges = device.activeFormat().videoSupportedFrameRateRanges()
+    supported = [(float(r.minFrameRate()), float(r.maxFrameRate())) for r in ranges]
+    if not any(low <= fps <= high for low, high in supported):
+        return ("cannot pin %d fps; this format supports %s" % (fps, supported))
+
+    ok, err = device.lockForConfiguration_(None)          # TRAP: out-param
+    if not ok:
+        return "could not lock camera for configuration: %s" % (err,)
+    try:
+        duration = CoreMedia.CMTimeMake(1, fps)
+        device.setActiveVideoMinFrameDuration_(duration)
+        device.setActiveVideoMaxFrameDuration_(duration)
+    finally:
+        # Unconditionally: a device left locked cannot be reconfigured by
+        # anything, including us on the next start().
+        device.unlockForConfiguration()
+
+    # Read back rather than trust. The whole reason this function exists is that
+    # the camera quietly ignored what we assumed about frame rate.
+    got_min = CoreMedia.CMTimeGetSeconds(device.activeVideoMinFrameDuration())
+    got_max = CoreMedia.CMTimeGetSeconds(device.activeVideoMaxFrameDuration())
+    want = 1.0 / fps
+    if abs(got_min - want) > 1e-4 or abs(got_max - want) > 1e-4:
+        return ("asked for %d fps but the camera reports min %.4f s / max %.4f s"
+                % (fps, got_min, got_max))
+    return None
+
+
 def video_settings(width_px: int, height_px: int) -> dict[Any, Any]:
     """Output-side scale - the ONLY resolution control that works on macOS.
 
@@ -624,7 +687,8 @@ class HandEngine:
                  width_px: int = DEFAULT_WIDTH_PX,
                  height_px: int = DEFAULT_HEIGHT_PX,
                  max_hands: int = MAX_HANDS,
-                 seq_start: int = 0) -> None:
+                 seq_start: int = 0,
+                 target_fps: int | None = TARGET_FPS) -> None:
         """seq_start continues an existing frame sequence rather than restarting it.
 
         Why it exists: this engine keeps `_seq` monotonic across its OWN
@@ -639,6 +703,8 @@ class HandEngine:
         self._camera_name = camera_name
         self._requested_px = (width_px, height_px)
         self._max_hands = max_hands
+        # None leaves the camera's own adaptive rate alone. See TARGET_FPS.
+        self._target_fps = target_fps
 
         # Built here rather than in start(), so that a joint-table mismatch or a
         # missing framework fails at construction - on the caller's thread,
@@ -849,6 +915,14 @@ class HandEngine:
             # begun-but-uncommitted configuration is a state nothing else here
             # knows how to clean up.
             session.commitConfiguration()
+
+        # Pin the frame rate AFTER addInput_ and commitConfiguration, because
+        # adding an input resets the device's rate to whatever the preset
+        # implies. Reported rather than raised: an unpinnable camera still works.
+        if self._target_fps is not None:
+            problem = pin_frame_rate(device, self._target_fps)
+            if problem is not None:
+                self._record_error("frame rate not pinned: %s" % problem)
 
         # Published only once the session is fully built, so a delegate callback
         # can never observe a half-constructed engine.

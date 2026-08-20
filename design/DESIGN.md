@@ -83,6 +83,13 @@ against a 30 fps requirement.
 This is why the Python route is viable and why a C++ plugin is not needed to
 solve the threading problem. If you change nothing else, keep this measurement.
 
+> **SUPERSEDED IN ONE DIRECTION — read §2.8 before relying on this.** The
+> conclusion above is correct as far as it goes: a background Vision thread
+> cannot stall TD's main thread. The *reverse* is false, and badly so. Measured
+> inside TouchDesigner, TD's main thread starves the background thread by
+> **28×**, not the 2× a Python spinner suggested. The spinner was a poor
+> stand-in: it yields at bytecode boundaries, and TD's frame loop does not.
+
 ### 2.3 Verified Vision API surface
 
 ```python
@@ -277,6 +284,65 @@ even that pathological case still delivers more than the 30 fps we need.
 opened the instant `start()` returned measured 6.5 fps; the same window opened
 1.5 s later measured 30.0 fps. Any figure taken from the moment of start is
 measuring the camera waking up, and reads as a catastrophe that is not there.
+
+
+### 2.8 The GIL, measured inside TouchDesigner — §2.2's conclusion reversed
+
+Everything below was measured in TD 099 while it rendered a real project at
+60 fps, with the same fixture frames throughout.
+
+| where the work runs | `performRequests` | + observation→Hand | throughput |
+|---|---|---|---|
+| separate process | 4.38 ms | — | 30 fps |
+| **TD's main thread** | **2.09 ms** | 5.65 ms (p95 18.3) | cook-rate bound |
+| **TD background thread** | **58.90 ms** | **190.83 ms** | **5.2 fps** |
+
+**A Python background thread inside TouchDesigner cannot do this work.** Vision
+itself pays a 28× penalty there (2.09 → 58.90 ms) purely from reacquiring the
+GIL after each call, and the conversion adds a further 132 ms because it makes
+~126 individual pyobjc property calls per frame — three per joint, 21 joints,
+two hands — and every one of them waits again.
+
+The live engine showed the same thing more gently: inference reported 35–48 ms
+against 3.4 ms standalone, delivery decaying to 13.4 fps, inter-frame gaps
+swinging 15–203 ms (visibly choppy), and `age_ms` at the cook of 100 ms. With
+TD's main thread deliberately blocked, the same engine immediately delivered
+**30.5 fps** and inference fell to 10.8 ms. The camera was never the problem.
+
+Things ruled out along the way, each with a measurement:
+
+- **Not the camera's adaptive frame rate.** The device does advertise 15–30 fps
+  and its `activeVideoMaxFrameDuration` does sit at 1/15 s, so auto-exposure is
+  free to halve the rate in dim light. Pinning min = max = 1/30 s worked (read
+  back and confirmed) and changed delivery not at all.
+- **Not GPU contention.** The same fixture in a separate process while TD
+  rendered: 4.38 ms median against 3.41 ms with TD closed.
+- **Not the cook.** `clear()` plus 137 `appendChan` plus 137 writes measures
+  **0.141 ms** in real TD — under 1% of a 60 fps frame. Writing values without
+  rebuilding is 0.078 ms.
+- **Not the GIL switch interval.** Lowering it from 5 ms to 0.5 ms changed
+  nothing (13.7 fps), so TD holds the lock in long non-yielding stretches rather
+  than releasing it at bytecode boundaries.
+- **Not two camera consumers.** TD's Video Device In TOP and our engine read the
+  built-in camera **simultaneously**, both getting live frames. macOS does not
+  lock us out of each other, which also means TD can display the camera while we
+  track it.
+
+**Consequences for the design.** §9 says "the usual reason to go C++ — escaping
+the GIL — does not apply, per §2.2". That is now wrong: escaping the GIL is
+exactly the problem, and there are two cheaper answers than C++ before it.
+Inference must run either on TD's main thread inside the cook (5.65 ms median,
+p95 18.3 ms — comfortable at a 30 fps cook rate, tight at 60) or in a separate
+process (4.38 ms, unaffected by TD). The `HandSource` seam in §5 was written for
+exactly this, and `IpcSource` is named there already.
+
+**New hard rule, learned the loud way.** Nothing may touch a TouchDesigner
+object from any thread but the main one. A diagnostic of mine called `store()`
+on a DAT from a worker thread and TD put up a THREAD CONFLICT dialog:
+"TouchDesigner objects cannot be referenced from separate threads. Application
+may behave unpredictably or terminate." The shipping code is already safe by
+construction — `engine.py` imports no TD — but any diagnostic must write to a
+file, not to TD storage.
 
 ---
 

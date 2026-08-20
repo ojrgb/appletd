@@ -787,3 +787,75 @@ buffer on the next call. If it is reused, the main thread needs a copy
 (~3.7 MB memcpy) before handing it over. The `delayed=True` semantics — "the
 image that was current on the previous call" — hint at internal buffering, so
 this needs settling rather than assuming.
+
+---
+
+## Why it was choppy: the GIL, and §2.2 was half wrong
+2026-08-20
+
+The user reported the TD output looking choppy and laggy against a smooth
+standalone script. It was not the camera, not the GPU, not the cook, and not
+TouchDesigner doing anything wrong. Full numbers are promoted into `DESIGN.md`
+2.8; the short version is that a Python background thread inside TD gets starved
+by 28x, and `DESIGN.md` 2.2's headline conclusion needed a correction rather than
+a footnote.
+
+**What the sampler showed.** Recording one row per frame inside TD: cooks at a
+steady 60.2/s, but camera frames arriving at 21.4 fps and then 13.4 fps, with
+inter-arrival gaps of median 48 ms swinging from 15 ms to 203 ms and `age_ms` at
+the cook of 100 ms median. Jitter of that size is what "choppy" means - a 203 ms
+gap is three missing frames.
+
+**Four wrong hypotheses, each killed by a measurement**, which is the part worth
+remembering:
+
+1. *My own leftover Video Device In TOP was stealing camera capacity.* Removing
+   it made delivery WORSE (21.4 → 13.4 fps), which killed the theory and
+   revealed the trend was monotonic decay over the session.
+2. *The camera was halving its rate for auto-exposure.* Plausible and half-true:
+   the device really does advertise 15-30 fps with `activeVideoMaxFrameDuration`
+   at 1/15 s. Pinned min = max = 1/30 s, read it back to confirm it took - and
+   delivery did not change at all. Kept the pin anyway, since an adaptive rate is
+   still wrong for tracking, and `TARGET_FPS` now makes it explicit.
+3. *Our own cook was hogging the GIL with 137 appendChan calls.* Measured in real
+   TD: the full rebuild costs **0.141 ms**, under 1% of a frame. Comprehensively
+   wrong, and worth noting the M4 reviewer's 54.6 µs estimate against a fake op
+   was the right order of magnitude.
+4. *GPU/ANE contention with TD's rendering.* The same fixture in a separate
+   process while TD rendered: 4.38 ms against 3.41 ms with TD closed. Real but
+   trivial.
+
+**What it actually is.** The MCP's `execute_python_script` runs on TD's main
+thread, which handed me the decisive contrast: in the *same process at the same
+moment*, `performRequests` costs 2.09 ms on the main thread and 58.90 ms on a
+background thread. Adding the observation→Hand conversion takes the background
+figure to 190.83 ms - 5.2 fps - because it makes ~126 pyobjc property calls per
+frame and each one waits for the GIL again. Blocking TD's main thread for two
+seconds made the live engine deliver 30.5 fps instantly.
+
+Lowering `sys.setswitchinterval` from 5 ms to 0.5 ms changed nothing, so TD is
+not holding the GIL at bytecode boundaries where a shorter quantum would help -
+it holds it across long non-yielding stretches.
+
+**Why §2.2 missed it.** That measurement used a 100%-Python spin loop as "a
+deliberately pathological stand-in for TD's main thread" and found the worker
+halved. The spinner was not pathological enough in the way that matters: it
+yields constantly. TD's frame loop does not. The lesson is about the shape of a
+stand-in rather than its intensity.
+
+**Also disproved, usefully.** TD's Video Device In TOP and our engine read the
+built-in camera *simultaneously*, both receiving live frames - so the user's
+inability to open it was local to their node, and TD can display the camera
+while we track it. That makes an out-of-process design cheaper than expected:
+two independent readers, no pixel transport at all, and only 137 floats
+(548 bytes) per frame to move.
+
+**A dialog I caused.** A diagnostic worker of mine called `store()` on a DAT from
+a background thread and TD raised THREAD CONFLICT - "objects cannot be
+referenced from separate threads. Application may behave unpredictably or
+terminate." My fault, in throwaway code, and the shipping engine is safe by
+construction since it imports no TD at all. Re-ran the measurement writing to a
+file instead. `DESIGN.md` 2.8 now carries this as a hard rule, because the next
+person to write a diagnostic will reach for TD storage exactly as I did.
+
+Cleaned up after myself: diagnostic nodes destroyed, switch interval restored.
