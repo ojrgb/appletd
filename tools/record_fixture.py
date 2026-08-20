@@ -273,7 +273,7 @@ class RecorderDelegate(NSObject):
                 writer = self.ensure_writer(w_px, h_px)
                 writer.write(frame_bgr)
                 self.n_written += 1
-        except Exception as exc:
+        except Exception as exc:            # noqa: BLE001 - see STANDARDS.md 2
             # Swallow-and-record: an exception propagating out of an
             # Objective-C callback unwinds into native frames, which is its own
             # crash. This is the one place swallowing is correct, and the error

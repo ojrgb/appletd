@@ -25,6 +25,11 @@ select = [
     "F",        # pyflakes: unused imports/names, undefined names
     "I",        # isort: deterministic import order
     "B",        # bugbear: mutable defaults, shadowed builtins, silent bugs
+    "BLE",      # blind except. STANDARDS.md 2 allows `except Exception` in
+                # exactly one place - the body of an Objective-C callback - so
+                # this rule turns that from an honour-system rule into a
+                # tool-enforced one: every instance must carry an explicit
+                # `# noqa: BLE001` sitting next to its justification.
     "UP",       # pyupgrade: no legacy syntax
     "RUF",      # ruff's own checks
 ]
@@ -38,7 +43,15 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # The probe deliberately imports pyobjc inside a function, after mutating
 # sys.path at runtime. That is the thing being tested, not an accident.
-"tools/probe_m1_in_td.py" = ["E402"]
+"tools/probe_m1_in_td.py" = [
+    "E402",
+    # The probe's entire purpose is to survive a failing stage and report which
+    # one failed - it is a diagnostic run by hand when something is already
+    # suspected to be wrong, and a stage that raises must not cost us the five
+    # stages after it. Per-file rather than eight separate noqa comments, since
+    # here it is the design of the file rather than an exception to it.
+    "BLE001",
+]
 
 [tool.mypy]
 python_version = "3.11"

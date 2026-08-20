@@ -311,3 +311,61 @@ chiralities appear in it (295 right, 41 left across 336 observations) because
 both hands are in shot at times, so the statistics cannot settle it, and the one
 frame I inspected was too motion-blurred to read handedness off. Deferred to the
 two-hand fixture, where it can be checked against a known pose.
+
+---
+
+## Milestone 2b — engine.py, headless
+2026-08-20
+
+**Built.** `visionhands/engine.py`: joint-table verification against the live
+framework, observation-to-`LandmarkFrame` conversion, `HandDetector` (shared by
+the live and replay paths), `HandEngine` (session lifecycle, idempotent
+start/stop, bounded deduplicated error recording, delivered-dimension
+assertion). Plus `tests/test_engine_replay.py` (12 tests over the fixture) and
+`tests/test_boundaries.py` (the module-boundary rules the M0 review left owed).
+39 tests, ruff and mypy clean.
+
+**Replay, over `fixtures/hand_clip.mp4`.** 284 frames, every frame carrying
+exactly 2 hands x 21 joints, seq monotonic and gapless, dimensions read from the
+buffer rather than from a constant, hand presence 96%, median inference within
+budget, coordinates still normalised and unflipped, empty slots all the shared
+`BLANK_HAND` object. The replay path shares everything downstream of
+`performRequests` with the live path, so this tests the code the camera runs
+rather than a parallel implementation.
+
+**Live camera, verified by hand** (not a committed test - a suite that turns on a
+webcam is a suite people stop running): 37 delivered, 37 published, 0 dropped,
+1280x720 requested and delivered, no recorded errors, no pyobjc object escaping
+the capture thread, `stop()` and `start()` both idempotent, a second engine
+starting and stopping cleanly afterwards.
+
+**A frame worth recording: `found=True`, `score=1.000`, `conf_median=0.000`.**
+Vision returned an observation whose 21 joint confidences were all essentially
+zero. `found` and `score` were simultaneously affirmative and worthless, which is
+the case `DESIGN.md` 6.2's gating rule now exists for - and the strongest single
+argument for having added `h<i>_conf_median` at all. It also sharpens 2.4's "no
+false positives observed": observations with no real hand behind them do occur,
+they simply carry near-zero joint confidence while the per-hand score stays at
+1.0. Whether a hand was genuinely in view during that frame is unknown, so this
+is recorded as "found can be affirmative and meaningless", not as a measured
+false-positive rate.
+
+**Deliberate gap, labelled in the code.** Slot assignment in
+`frame_from_observations` is naive - hands land in whatever order Vision returned
+them. Vision has no tracking IDs and no stable ordering, so `h0` will swap
+between physical hands. `TODO(M5)` in the source, and two-hand output is
+unusable for anything that cares which hand is which until milestone 5.
+
+**Owed item cleared.** `stop()` now calls
+`setSampleBufferDelegate_queue_(None, None)` explicitly before dropping
+references, which the M0 review flagged as owed here rather than inherited from
+the tools' reliance on session release ordering.
+
+**Tooling, tightened as a side effect.** `BLE001` (blind except) is now enabled
+in ruff, which turns `STANDARDS.md` 2's "one exemption, and only one" from an
+honour-system rule into a tool-enforced one: every `except Exception` must carry
+an explicit `# noqa: BLE001` next to its justification. Enabling it immediately
+proved one of my own noqa markers unnecessary - the `startRunning()` handler
+re-raises as `EngineError`, so it was never a blind except. The probe gets a
+documented per-file exemption, since surviving a failing stage to report which
+one failed is that file's design rather than an exception to it.
