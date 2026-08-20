@@ -32,12 +32,25 @@ cost nothing, and which one you want depends entirely on what you hook up:
               space and it is already what TouchDesigner's UVs use, so it maps
               straight onto a TOP without conversion (DESIGN.md 7). Use it for
               texture lookups and for anything expecting UVs.
-    _tx, _ty  centred on zero, x scaled by the aspect ratio. Drop these into a
-              Geometry COMP's translate or an instancing setup and a fingertip
-              lands where the fingertip is, without stretching - which plain
-              normalised coordinates would do on a 16:9 image.
+    _tx, _ty  world units for an ORTHOGRAPHIC camera, matching its Ortho Width
+              parameter. Feed these straight into a Geometry COMP's instance
+              translate. See the Orthowidth parameter below - getting this
+              convention wrong is the one thing that makes an overlay land
+              almost, but not quite, on the hand.
     _px, _py  pixels, for hit-testing against a TOP's resolution or for anything
               that thinks in pixels. Still bottom-left, like TD's TOPs.
+
+THE ORTHO WIDTH PARAMETER, and why it exists rather than a bare aspect scale.
+TouchDesigner's Camera COMP in orthographic mode has an Ortho Width parameter
+that sets the visible WIDTH in world units - default 1.0, so the visible space is
+x from -0.5 to +0.5 and y from -0.5/aspect to +0.5/aspect. An earlier version of
+this COMP normalised to unit HEIGHT instead (y from -0.5 to +0.5, x scaled out to
++/-0.889), which is equally defensible and does not match TD's camera. Against a
+default camera it left an overlay needing a hand-dialled 0.5625 on BOTH axes -
+which is exactly 1/aspect, the conversion between the two conventions.
+
+So the scale is now the camera's own number. Set Orthowidth here to whatever
+cam1's Ortho Width is and the coordinates land exactly, with nothing to tune.
 
 NO PYTHON RUNS IN A COOK. Every operator here is a built-in doing built-in work;
 the joint-name mapping is generated once, at build time, into a Rename CHOP's
@@ -60,6 +73,11 @@ SOURCE_CHOP = "visionhands_osc"
 # would be a contract change to solve something a parameter already solves.
 DEFAULT_WIDTH = 1280
 DEFAULT_HEIGHT = 720
+
+# TouchDesigner's Camera COMP defaults to an Ortho Width of 1.0, so the visible
+# world space is x in [-0.5, +0.5] and y in [-0.5/aspect, +0.5/aspect]. Matching
+# that default means the common case needs no tuning at all.
+DEFAULT_ORTHO_WIDTH = 1.0
 
 
 # The rename approach that is no longer needed, recorded because the knowledge
@@ -104,7 +122,11 @@ def main():
     par_h = page.appendInt("Resh", label="Source Height")[0]
     par_w.default = par_w.val = DEFAULT_WIDTH
     par_h.default = par_h.val = DEFAULT_HEIGHT
-    print("2. parameters: Resw=%d Resh=%d" % (par_w.eval(), par_h.eval()))
+    # Match your Camera COMP's Ortho Width. TD's default is 1.0.
+    par_ortho = page.appendFloat("Orthowidth", label="Camera Ortho Width")[0]
+    par_ortho.default = par_ortho.val = DEFAULT_ORTHO_WIDTH
+    print("2. parameters: Resw=%d Resh=%d Orthowidth=%.3f"
+          % (par_w.eval(), par_h.eval(), par_ortho.eval()))
 
     def make(kind, name, x, y):
         node = comp.create(kind, name)
@@ -137,9 +159,14 @@ def main():
             "_y", "_%s" % suffix)
         return rename
 
-    # Centred and aspect-corrected: ready for a Geometry COMP translate.
-    tx = branch("tx", "*_x", "tx", -0.5, "me.parent().par.Resw / me.parent().par.Resh", -150)
-    ty = branch("ty", "*_y", "ty", -0.5, "1.0", -300)
+    # World units for an orthographic camera of the given Ortho Width. x spans
+    # the full width; y spans width/aspect, because a 16:9 render is shorter than
+    # it is wide and the camera's number describes the WIDTH.
+    tx = branch("tx", "*_x", "tx", -0.5,
+                "me.parent().par.Orthowidth", -150)
+    ty = branch("ty", "*_y", "ty", -0.5,
+                "me.parent().par.Orthowidth * me.parent().par.Resh "
+                "/ me.parent().par.Resw", -300)
     # Pixels.
     px = branch("px", "*_x", "px", 0.0, "me.parent().par.Resw", -450)
     py = branch("py", "*_y", "py", 0.0, "me.parent().par.Resh", -600)

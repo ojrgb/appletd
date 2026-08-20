@@ -1036,3 +1036,47 @@ known coordinates - centre, both edges - and checked all twelve conversions:
 0.5 -> tx 0.0 -> px 640; 1.0 -> tx +0.8889 -> px 1280; 0.0 -> tx -0.8889 -> px 0,
 and the y equivalents. Zero failures. That is a deterministic check of the
 arithmetic, which watching a hand move could never be.
+
+---
+
+## The 0.56 the user had to dial in: unit height versus unit width
+2026-08-20
+
+The user reported having to re-range both `tx` and `ty` by about 0.56 to make the
+overlay land on the hand. Rather than theorise, inspected their network over MCP:
+
+    cam1     projection = ortho, orthowidth = 1.0
+    render1  1280 x 720
+    geo1     instancing, tx = h0_wrist_tx, ty = h0_wrist_ty
+    math1    fromrange -1..1  torange -0.56..0.56
+    math2    fromrange -1..1  torange -0.55..0.55
+
+**TouchDesigner's Ortho Width sets the visible WIDTH in world units.** At the
+default 1.0 on a 16:9 render, the visible space is x in [-0.5, +0.5] and y in
+[-0.28125, +0.28125] - the image normalised to unit WIDTH.
+
+My `tx`/`ty` normalised it to unit HEIGHT: y in [-0.5, +0.5] and x out at
++/-0.8889. Both conventions are aspect-correct and only one matches TD's camera.
+The conversion between them is exactly **1/aspect = 9/16 = 0.5625**, applied to
+BOTH axes - which is why both needed the same fudge, and why 0.56 looked like a
+magic number rather than a ratio.
+
+Fixed by making the scale the camera's own number: an `Orthowidth` parameter,
+defaulting to TD's own default of 1.0, with
+
+    tx = (x - 0.5) * Orthowidth
+    ty = (y - 0.5) * Orthowidth * Resh / Resw
+
+Verified by injection with the sidecar stopped: 0.5 -> 0.0, 1.0 -> tx +0.5 and
+ty +0.28125, 0.0 -> tx -0.5 and ty -0.28125. Zero failures. The builder also now
+reads `cam1`'s actual Ortho Width when there is an orthographic camera to read,
+so the common case needs no tuning at all.
+
+**Worth telling the user: their y fudge was 2.2% out.** 0.55 against the correct
+0.5625, which is invisible in the middle of frame and shows as ~1.5 px of drift
+at the top and bottom edges - exactly the kind of error that hand-dialling
+produces and that a derived number does not. Their x value of 0.56 was within
+0.5% of right.
+
+The lesson for the design: "screen space" is not one space. The COMP now takes
+the parameter that disambiguates it rather than picking a convention and hoping.
