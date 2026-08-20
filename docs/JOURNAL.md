@@ -859,3 +859,57 @@ file instead. `DESIGN.md` 2.8 now carries this as a hard rule, because the next
 person to write a diagnostic will reach for TD storage exactly as I did.
 
 Cleaned up after myself: diagnostic nodes destroyed, switch interval restored.
+
+---
+
+## Out-of-process transport: OSC proven, with three gotchas
+2026-08-20
+
+Prototyped the transport in the live TouchDesigner before designing around it.
+
+**OSC In CHOP works, and needs no Python in TD at all.** Created an
+`oscinCHOP` on port 10000, hand-rolled an OSC bundle from the shell (the
+encoding is 20 lines - padded address, `,f` typetag, big-endian float) and sent
+all 137 contract names. TD received **137 channels with the exact contract names
+in order**, correct values, no errors. No Script CHOP, no callbacks DAT, no cook
+cost: the operator does it natively in C++. Bundle is 3480 bytes, so ~104 KB/s
+at 30 fps, comfortably inside loopback's 16 KB datagram limit.
+
+That is a better outcome than the current in-process design even ignoring the
+GIL: the entire TD-side surface becomes one built-in operator.
+
+Considered and rejected: `sharedmeminCHOP`. Lower latency in principle, but it
+requires reproducing TouchDesigner's shared-memory header layout from Python -
+undocumented and version-sensitive - to move 3.5 KB per frame that UDP loopback
+already delivers in tens of microseconds.
+
+**Three gotchas found by measuring rather than by shipping.**
+
+1. **OSC floats are 32-bit, so raw timestamps are unusable.** `time.monotonic()`
+   IS comparable across processes on macOS - verified, TD read 580737.438
+   bracketed by shell readings either side, same boot epoch - which is a genuinely
+   useful property. But at that magnitude float32 resolution is 1/16 s = 62 ms,
+   so a raw timestamp cannot carry millisecond age. (A first test showed only
+   0.32 ms error, which was luck: 580737.4375 happens to be exactly
+   representable.) The sidecar therefore sends `age_ms` computed at send time,
+   where float32 error is 0.000002 ms.
+
+2. **`seq` is exact in float32 only to 2^24 = 16,777,216**, which is **6.5 days**
+   at 30 fps. After that it silently stops incrementing - the worst kind of
+   failure, since everything keeps working and nothing is wrong until a long
+   installation quietly freezes its own staleness detection. The sidecar will
+   send `seq` modulo 2^23.
+
+3. **A dead sidecar leaves the channels frozen, not zeroed.** The OSC In CHOP
+   holds its last received value indefinitely, so "the process died" looks
+   identical to "nothing is moving" - including `age_ms`, which freezes at
+   whatever it last was. Liveness has to be derived on the TD side: a Slope CHOP
+   on `seq` reads zero when the sidecar stops, which is detectable with no Python
+   at all. Worth stating in the README, because the in-process design got this
+   for free and the out-of-process one does not.
+
+**No pixel transport is needed.** Since TD's Video Device In and our engine read
+the built-in camera simultaneously (measured earlier today), TD can display the
+camera itself while the sidecar tracks it independently. That removes the whole
+Route B frame-pushing problem: two independent readers, 3.5 KB per frame of
+landmarks, and nothing else crossing the boundary.
