@@ -53,10 +53,24 @@ show_error_codes = true
 # here would mean a `# type: ignore` on every native call - noise that hides the
 # real annotations. The pure-Python core stays strict; these are the two places
 # where the outside world is untyped by nature.
-module = ["visionhands.engine", "visionhands.td.*", "tools.*"]
+# NOTE the bare module names alongside "tools.*": tools/ has no __init__.py, so
+# mypy identifies those files as top-level modules named after the file, and the
+# dotted pattern never matched them. The M0 review found them being checked
+# under full strict mode - 88 errors - i.e. effectively not checked at all.
+module = ["visionhands.engine", "visionhands.td.*", "tools.*",
+          "probe_m1_in_td", "record_fixture"]
 disallow_untyped_calls = false
 disallow_any_expr = false
 ignore_missing_imports = true
+# Relaxed for the same reason as the calls: these files are mostly pyobjc, whose
+# selectors carry no type information, so annotating every local that holds an
+# Objective-C object states nothing and reads as noise. The pure-Python core
+# stays fully strict.
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+# pyobjc's NSObject is untyped, so every delegate class is a subclass of Any.
+# Forbidding that would forbid writing an AVFoundation delegate at all.
+disallow_subclassing_any = false
 
 [[tool.mypy.overrides]]
 # The frameworks themselves, wherever they are imported from.

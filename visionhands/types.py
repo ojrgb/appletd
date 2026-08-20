@@ -17,7 +17,9 @@ Ref: DESIGN.md 6.1 (LandmarkFrame), 6.2 (channel contract), 2.3 (joint codes).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final, NewType
 
 # ---------------------------------------------------------------------------
@@ -115,9 +117,15 @@ JOINTS: Final[tuple[JointSpec, ...]] = (
 
 JOINT_NAMES: Final[tuple[str, ...]] = tuple(j.name for j in JOINTS)
 JOINT_CODES: Final[tuple[str, ...]] = tuple(j.code for j in JOINTS)
-# code -> index into a Hand's joints tuple. The engine's hot path does one dict
-# lookup per joint per frame, so it is built once here rather than per frame.
-JOINT_INDEX_BY_CODE: Final[dict[str, int]] = {j.code: i for i, j in enumerate(JOINTS)}
+# code -> index into a Hand's joints tuple. The engine's hot path does one lookup
+# per joint per frame, so it is built once here rather than per frame.
+#
+# MappingProxyType, not a plain dict: this module's docstring promises that
+# everything it defines is immutable and therefore safe to read from any thread,
+# and Final does not freeze a dict's contents - it only stops rebinding the
+# name. A read-only view makes the promise true rather than merely intended.
+JOINT_INDEX_BY_CODE: Final[Mapping[str, int]] = MappingProxyType(
+    {j.code: i for i, j in enumerate(JOINTS)})
 
 # The joints group to ask Vision for: one call returns all 21. MEASURED
 # (DESIGN.md 2.3): the per-finger groups return 4 points each and would need

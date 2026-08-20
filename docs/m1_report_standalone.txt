@@ -12,13 +12,12 @@ visionhands milestone 1 probe
   already on sys.path: /Users/omer/.venvs/visionhands/lib/python3.11/site-packages
   pyobjc      : 12.2.2
   numpy       : 2.2.6  (from venv: /Users/omer/.venvs/visionhands/lib/python3.11/site-packages/numpy/__init__.py)
-  WARNING: numpy resolved to the venv inside the host process. Expected the host's own numpy to win. Check sys.path order.
   request rev : 1  (supported: [1])
   OK pyobjc + Vision loaded in this process
 
 --- stage 3: synthetic inference (no camera)
-  first call  :  4279.24 ms  (includes model load)
-  warm calls  : 1.90, 1.70, 1.74 ms
+  first call  :  4253.27 ms  (includes model load)
+  warm calls  : 1.86, 1.75, 1.84 ms
   observations: 0  (0 is the expected answer for a grey frame)
   OK Vision inference executes in this process
 
@@ -29,10 +28,10 @@ visionhands milestone 1 probe
   devices     : ['MacBook Pro Camera', 'Camo Camera', 'OBS Virtual Camera', "Omer's iPhone Camera"]
   using       : MacBook Pro Camera
   waiting     : 2.0 s via sleep (TD's UI will freeze - expected)
-  delivered   : 48 frames in 2.24 s (21.4 fps)
+  delivered   : 18 frames in 2.27 s (7.9 fps)
   dimensions  : requested 1280x720, delivered 1280x720  <- OK
-  vision      : median 2.12 ms, min 1.96, max 2.82  (48 ok of 48)
-  hands       : 0 frames with >=1 hand, best obs confidence 0.00
+  vision      : median 2.21 ms, min 1.88, max 905.46  (18 ok of 18)
+  hands       : 6 frames with >=1 hand, best obs confidence 1.00
                 (0 is fine if no hand was in shot - this probe
                  is not a detection test. Wave at the camera to
                  make this line interesting.)
@@ -44,7 +43,7 @@ VERDICT
   host                 : standalone
   Q1 pyobjc in-process : PASS
   camera authorised    : yes
-  Q2 run loop needed   : NO - 48 frames arrived with no run loop of
+  Q2 run loop needed   : NO - 18 frames arrived with no run loop of
                          our own. DESIGN.md 4.2 loses a thread.
 ========================================================================
 report written to /Users/omer/Documents/GitHub/visionhands-touchdesigner/docs/m1_report_standalone.txt

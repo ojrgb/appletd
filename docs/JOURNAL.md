@@ -77,3 +77,88 @@ itself.
 **Still unknown.** Everything downstream of the pure core. No engine, no camera
 path in this repo's own code, no fixture clip, and milestone 1 not yet confirmed
 in TD.
+
+---
+
+## Review of M0 + M2a — findings and triage
+2026-08-20
+
+Reviewed by a fresh agent against `DESIGN.md` and `STANDARDS.md`, scope
+correctness + concurrency. No critical defects. Nine findings, all resolved
+below except where stated.
+
+**MAJOR, and the reason the review gate is worth its cost: nothing pinned the
+joint table.** The reviewer mutation-tested `types.py` and all 12 tests passed
+while the table was corrupted three separate ways — the `VNHLKTIP`/`VNHLKITIP`
+pair swapped, the wrist moved from index 0 to index 20, and the pinky's `P`
+changed to an `L`. `_self_check()` only tested distinctness, which every one of
+those mutations preserves. Worse, the start-up check this journal had promised
+for `engine.py` — each row's code against the framework — *cannot* catch a
+reorder, because a reordered row stays internally consistent, and order is what
+`h0_lm00` means. Fixed by `visionhands/tests/test_joint_table.py`, which pins
+both 21-tuples literally, checks the structure finger by finger, and
+cross-checks every row against the live framework under `importorskip`. Verified
+by re-running all three of the reviewer's mutations plus a subtler
+within-finger swap (`index_dip`/`index_tip`): each now fails 3 tests.
+
+**Fixed, correctness.** `startRunning()` moved inside the `try` in both tools —
+a raise there skipped the whole teardown, and in the probe that left stage 6
+opening a second session on the same device, which is precisely `DESIGN.md` 8's
+two-sessions-fighting case. `REPO_ROOT` now really is derived from `__file__`
+with a `NameError` fallback, as its comment had claimed while the code was an
+unconditional hardcoded path.
+
+**Fixed, honesty of the comments.** The `RecorderDelegate` write path credited
+the wrong barrier: the reviewer demonstrated that the `stopping` re-check inside
+the lock is what prevents a late callback truncating the fixture, and the
+`writer is None and n_written > 0` guard is redundant today. Both are kept, with
+the comment now naming the one that does the work. A dead `REPORT_CONF_GATE`
+constant whose comment claimed it was in use was removed, and the unnamed
+`time.sleep(0.2)` drain became `CALLBACK_DRAIN_S` with its provenance stated in
+both tools.
+
+**Fixed, tooling.** The mypy override for `tools/` never bound — `tools/` has no
+`__init__.py`, so mypy names those files as top-level modules and the `tools.*`
+pattern missed them, leaving them under full strict mode and effectively
+unchecked at 88 errors. The bare module names are now listed, with
+`disallow_untyped_defs`, `disallow_incomplete_defs` and `disallow_subclassing_any`
+relaxed (pyobjc's `NSObject` is untyped, so every delegate subclasses `Any`).
+Three real errors surfaced once it bound and all three are fixed:
+`ensure_writer` now returns the writer, so the write holds a local that another
+thread cannot clear underneath it, and `cv2.VideoWriter.fourcc` replaces the
+legacy alias that opencv's stubs do not declare.
+
+**Fixed, standards.** `STANDARDS.md` 2 forbade `except Exception` around native
+calls with no exemption, while both capture callbacks legitimately need one — a
+Python exception unwinding out of an Objective-C callback is its own crash. The
+exemption is now written down, scoped to a callback body, with the obligation
+that the recorded error must surface somewhere a human looks, and with the
+limitation stated plainly: it cannot catch the native crash it sits beside. Also
+added: generated reports are regenerated, never hand-patched.
+
+**Fixed, and it was our own bug report.** `JOINT_INDEX_BY_CODE` is now a
+`MappingProxyType`, so `types.py`'s promise that everything it defines is
+immutable and thread-safe to read is literally true rather than merely intended.
+
+**Not a review finding — found by the user running the probe.** The in-TD run
+produced no report at all. The entry point was guarded by
+`elif hasattr(builtins, "op")`, a guess about where TouchDesigner injects its
+API, and neither branch fired. `main()` is now called unconditionally: a guard
+exists to stop an *imported* module doing work, and nothing imports this file.
+The standalone report was regenerated afterwards, which also re-verified the
+probe end to end after the teardown edits.
+
+**Deferred, recorded here rather than silently.**
+- `STANDARDS.md` 2's module-boundary test (engine ↮ TD, td ↮ pyobjc, no cv2/PIL
+  at module scope) has nothing to test yet. It lands with M2b/M3, which is when
+  the boundaries first exist.
+- Neither tool calls `output.setSampleBufferDelegate_queue_(None, None)` before
+  dropping its delegate; both rely on the session's release ordering. Safe in a
+  hand-run probe. `TODO(M6)`: `engine.py` must unregister explicitly rather than
+  inherit this pattern.
+
+**Also worth recording.** The regenerated standalone run delivered 18 frames in
+its 2 s window against 48 the first time. That is camera cold-start latency, not
+a throughput change — the first run followed a smoke test that had already
+warmed the camera. It is a further illustration of `DESIGN.md` 3: live capture
+cannot produce a comparable number, and nothing in section 2 may come from it.

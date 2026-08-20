@@ -55,9 +55,17 @@ import traceback
 VENV_SITE_PACKAGES = os.path.expanduser(
     "~/.venvs/visionhands/lib/python3.11/site-packages")
 
-# Repo root, used only to place the report. Derived from this file when run
-# from disk; when pasted into a Text DAT __file__ does not exist, so fall back.
-REPO_ROOT = os.path.expanduser("~/Documents/GitHub/visionhands-touchdesigner")
+# Repo root, used only to place the report.
+#
+# Derived from this file's location when there is a file - so a clone at any
+# path reports into its own repo rather than into someone else's. Pasted into a
+# TouchDesigner Text DAT there is no file on disk and `__file__` is not defined
+# at all, which raises NameError rather than returning anything, so that case
+# falls back to the known checkout path.
+try:
+    REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+except NameError:
+    REPO_ROOT = os.path.expanduser("~/Documents/GitHub/visionhands-touchdesigner")
 
 # Matched case-insensitively against AVCaptureDevice.localizedName(). NOT an
 # index: DESIGN.md 3 records that this machine enumerates Camo, OBS Virtual
@@ -83,9 +91,11 @@ DELIVERY_WINDOW_S = 2.0
 # spike's per-frame timings.
 QOS_CLASS_USER_INITIATED = 25
 
-# Vision joint-confidence floor used only for the "did we see a plausible hand"
-# line in the report. Nothing downstream depends on it.
-REPORT_CONF_GATE = 0.3
+# Seconds to let in-flight delegate callbacks finish after stopRunning() before
+# anything they touch is released. Carried over from the spike, which used the
+# same value; not independently measured, and it is a drain rather than a
+# deadline - if a callback needed longer than this we would have a worse problem.
+CALLBACK_DRAIN_S = 0.2
 
 
 # ---------------------------------------------------------------------------
@@ -535,9 +545,14 @@ def _run_delivery_test(rep, mod, wait_style):
 
     rep.line("  waiting     : %.1f s via %s (TD's UI will freeze - expected)"
              % (DELIVERY_WINDOW_S, wait_style))
-    session.startRunning()
     t0_s = time.perf_counter()
     try:
+        # INSIDE the try: if startRunning() raises, the finally below still has
+        # to run. Otherwise `stopping` stays False and stopRunning() is never
+        # called, and the next stage opens a second session on the same device -
+        # two sessions fighting over the camera, exactly what DESIGN.md 8 warns
+        # about.
+        session.startRunning()
         if wait_style == "sleep":
             time.sleep(DELIVERY_WINDOW_S)             # no run loop turned by us
         else:
@@ -549,7 +564,7 @@ def _run_delivery_test(rep, mod, wait_style):
         # already in flight finish before anything gets released. DESIGN.md 8.
         delegate.stopping = True
         session.stopRunning()
-        time.sleep(0.2)                               # MEASURED-adjacent: spike used 0.2
+        time.sleep(CALLBACK_DRAIN_S)
     elapsed_s = time.perf_counter() - t0_s
 
     fps = delegate.n_delivered / elapsed_s if elapsed_s > 0 else 0.0
@@ -661,10 +676,16 @@ def main():
         rep.close()
 
 
-# Run from the shell, __name__ is "__main__". Pasted into a Text DAT it is not,
-# so fall back to detecting TD's injected `op` builtin. The elif keeps main()
-# from running twice in the case where TD does set __name__ to "__main__".
-if __name__ == "__main__":
-    main()
-elif hasattr(__import__("builtins"), "op"):
-    main()
+# Called unconditionally, with no `if __name__ == "__main__"` guard.
+#
+# That is deliberate, and the first version of this file got it wrong. A Text
+# DAT in TouchDesigner does not necessarily set __name__ to "__main__", and the
+# fallback used here - checking for TD's injected `op` in builtins - was a guess
+# about where TD puts its API. It was wrong in practice: the first in-TD run
+# produced no report at all, because neither branch fired.
+#
+# A guard exists to stop a module doing work when it is *imported*. This module
+# is a hand-run diagnostic that nothing imports - `visionhands/` must not touch
+# it, by design - so there is nothing for a guard to protect, and every guard is
+# one more way for the probe to do nothing silently.
+main()

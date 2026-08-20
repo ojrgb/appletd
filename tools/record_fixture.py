@@ -75,6 +75,11 @@ QOS_CLASS_USER_INITIATED = 25
 # that can exceed what it sustains; declaring 30 keeps playback duration honest.
 MAX_WRITER_FPS = 30.0
 
+# Seconds to let in-flight delegate callbacks finish after stopRunning() before
+# the writer is released. Same value and same reasoning as the milestone 1 probe:
+# carried over from the spike, not independently measured.
+CALLBACK_DRAIN_S = 0.2
+
 # mp4v, not avc1. mp4v is always present in the opencv-python wheel; avc1
 # depends on how the wheel was built and fails at runtime with a warning and a
 # zero-byte file rather than an exception.
@@ -204,18 +209,25 @@ class RecorderDelegate(NSObject):
     def ensure_writer(self, w_px, h_px):
         """Open the writer against the size the camera ACTUALLY delivers.
 
+        Contract: RETURNS the writer, rather than only assigning it. The caller
+               then holds a local that is known non-None for the duration of the
+               write, which is both what mypy needs and what makes the write
+               immune to another thread clearing self.writer underneath it.
         Traps: if the writer's declared size and the frames it is given
                disagree, cv2 silently drops every single frame and leaves a
                ~0-byte MP4 with no error anywhere. Opening lazily on the first
                real frame is what makes that impossible.
         """
         if self.writer is not None:
-            return
+            return self.writer
+        # cv2.VideoWriter.fourcc, not the legacy cv2.VideoWriter_fourcc alias:
+        # identical value, but the alias is absent from opencv's type stubs.
         writer = cv2.VideoWriter(
-            self.out_path, cv2.VideoWriter_fourcc(*FOURCC), self.fps, (w_px, h_px))
+            self.out_path, cv2.VideoWriter.fourcc(*FOURCC), self.fps, (w_px, h_px))
         if not writer.isOpened():
             raise RuntimeError("could not open VideoWriter for %s" % self.out_path)
         self.writer = writer
+        return writer
 
     def captureOutput_didOutputSampleBuffer_fromConnection_(self, output, sbuf, conn):
         # INVARIANT: once stopping is set, touch nothing native. A call landing
@@ -241,16 +253,25 @@ class RecorderDelegate(NSObject):
 
             frame_bgr = buffer_to_bgr(pixel_buffer)
             with self.writer_lock:
+                # THIS is the barrier that protects the fixture, and it has to
+                # be re-checked inside the lock: `stopping` is set before
+                # stopRunning(), so a callback that passed the check at the top
+                # of this method and then blocked on the lock while teardown ran
+                # is stopped here instead. Without it, a late callback reopens
+                # the writer after release_writer() and truncates the clip -
+                # demonstrated in the M0 review.
                 if self.stopping:
                     return
-                # The writer is released exactly once, on the main thread, after
-                # the session has stopped. Seeing None here when we have already
-                # written frames means teardown won the race - do NOT reopen the
-                # file, which would truncate the fixture we just recorded.
+                # Belt and braces for the same race, from the other side: the
+                # writer is released exactly once, on the main thread, after the
+                # session has stopped, so a None writer when frames have already
+                # been written means teardown got there first. Redundant with
+                # the check above today; kept because it is the invariant a
+                # reader is most likely to reason about, and it costs nothing.
                 if self.writer is None and self.n_written > 0:
                     return
-                self.ensure_writer(w_px, h_px)
-                self.writer.write(frame_bgr)
+                writer = self.ensure_writer(w_px, h_px)
+                writer.write(frame_bgr)
                 self.n_written += 1
         except Exception as exc:
             # Swallow-and-record: an exception propagating out of an
@@ -317,9 +338,12 @@ def record(device, out_path, w_px, h_px, seconds):
 
     print("recording %.1f s at %dx%d, writer fps %.1f" % (seconds, w_px, h_px, writer_fps))
     print("MOVE YOUR HAND for the whole take - see this file's docstring for what to do.")
-    session.startRunning()
     t0_s = time.perf_counter()
     try:
+        # INSIDE the try: a raise from startRunning() must still reach the
+        # finally below, or the session is left running and the writer is never
+        # released. DESIGN.md 8.
+        session.startRunning()
         # Warm-up frames are discarded inside the delegate, so add their cost
         # back or the clip comes out short.
         time.sleep(seconds + WARMUP_FRAMES / max(writer_fps, 1.0))
@@ -330,7 +354,7 @@ def record(device, out_path, w_px, h_px, seconds):
         # write(). DESIGN.md 8.
         delegate.stopping = True
         session.stopRunning()
-        time.sleep(0.2)                                    # drain in-flight callbacks
+        time.sleep(CALLBACK_DRAIN_S)                       # drain in-flight callbacks
         delegate.release_writer()
     delegate.elapsed_s = time.perf_counter() - t0_s
     return delegate
