@@ -162,3 +162,56 @@ its 2 s window against 48 the first time. That is camera cold-start latency, not
 a throughput change — the first run followed a smoke test that had already
 warmed the camera. It is a further illustration of `DESIGN.md` 3: live capture
 cannot produce a comparable number, and nothing in section 2 may come from it.
+
+---
+
+## Milestone 1 — PASSED, in TouchDesigner
+2026-08-20
+
+Run by the user: `tools/probe_m1_in_td.py` pasted into a Text DAT in
+TouchDesigner 099. Full console output captured in the session; the numbers are
+promoted into `design/DESIGN.md` 2.5, which is now the citable record.
+
+**The answer is yes, and the Python route stands.** pyobjc 12.2.2 loads inside
+TD's own interpreter (3.11.15, cp311, matching the venv's 3.11.9), Vision runs
+in-process at 2.06 ms median on live camera buffers, and 720p is delivered as
+requested. Nothing about being inside TD made Vision slower than the standalone
+spike.
+
+**Two design consequences, both simplifications.**
+
+1. **No run loop, no extra thread.** 48 frames arrived while the main thread sat
+   in a plain `time.sleep()`. The spike's `CFRunLoopRun` was never what made
+   delivery work — `AVCaptureVideoDataOutput` delivers on a GCD queue, which
+   needs no run loop, and the same probe proves it standalone too. Section 4.2's
+   contingency thread is deleted rather than deferred. The system owns exactly
+   two threads of interest: TD's main thread and the capture queue.
+2. **Append-not-insert is now measured rather than argued.** Inside TD, numpy
+   resolved to the host's 2.1.2 and not the venv's 2.2.6. That is the outcome
+   that keeps TD's own extension modules matched to the numpy they were compiled
+   against, and it is the difference between a working install and a crash.
+   `DESIGN.md` 11's venv question is closed on evidence.
+
+**New trap, and it cost us a round trip.** Inside a Text DAT, `__file__` IS
+defined, and it holds the DAT's *operator* path — `/project1/text1` — not a
+filesystem path. The probe's derivation therefore produced `/`, tried to write
+`/docs/m1_report.txt`, and got `Errno 30: read-only file system`. A
+`except NameError` guard is useless against this, because nothing raises: the
+value is simply a path to nowhere. `_repo_root()` now validates that the derived
+path is a real file and that the directory above it contains `design/DESIGN.md`
+before trusting it. Recorded in `DESIGN.md` 2.5 as a trap in its own right,
+because anything else we ever run from a DAT will meet it.
+
+Worth noting what did NOT fail: because `Report` treats an unwritable path as a
+reason to fall back to the Textport rather than to abort, the run still produced
+a complete, readable result on screen. That non-fatal choice is the only reason
+this milestone was answered on the first successful run instead of the second.
+
+**Not measured, deliberately.** The probe's delivered-fps line (21.6) is
+dominated by camera start-up inside a 2 s window and is not a throughput figure
+— a repeat standalone run gave 18 frames rather than 48 for that reason alone.
+No hands were detected because nobody was waving; the probe is a liveness check.
+Neither number may be cited as a measurement.
+
+**Still outstanding.** No fixture clip, so this repo still has no deterministic
+performance number of its own. Two-hand behaviour remains entirely unmeasured.

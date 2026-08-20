@@ -55,17 +55,46 @@ import traceback
 VENV_SITE_PACKAGES = os.path.expanduser(
     "~/.venvs/visionhands/lib/python3.11/site-packages")
 
-# Repo root, used only to place the report.
-#
-# Derived from this file's location when there is a file - so a clone at any
-# path reports into its own repo rather than into someone else's. Pasted into a
-# TouchDesigner Text DAT there is no file on disk and `__file__` is not defined
-# at all, which raises NameError rather than returning anything, so that case
-# falls back to the known checkout path.
-try:
-    REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-except NameError:
-    REPO_ROOT = os.path.expanduser("~/Documents/GitHub/visionhands-touchdesigner")
+# Fallback repo root, for when this file's own location cannot be trusted.
+FALLBACK_REPO_ROOT = os.path.expanduser("~/Documents/GitHub/visionhands-touchdesigner")
+
+
+def _repo_root():
+    """Where to write the report.
+
+    TRAP, learned the hard way in the first successful in-TD run. Inside a
+    TouchDesigner Text DAT, `__file__` IS defined - but it is the DAT's OPERATOR
+    path, not a filesystem path. For a DAT at /project1/text1 the naive
+    derivation used here originally produced dirname(dirname("/project1/text1"))
+    == "/", so the probe tried to write /docs/m1_report.txt and got
+    "[Errno 30] Read-only file system". A `except NameError` guard does not help,
+    because nothing raises: the value is simply a path to somewhere that does
+    not exist.
+
+    So the derivation is validated rather than trusted: the file must actually
+    exist on disk, AND the directory two levels up must look like this repo.
+    Only then is it used. Anything else falls back to the known checkout.
+
+    Contract: returns a directory that exists, or the fallback, which may not -
+              Report handles an unwritable path by printing to the Textport
+              instead of failing, which is why the first in-TD run still
+              produced a complete result on screen.
+    """
+    try:
+        here = os.path.abspath(__file__)
+    except NameError:                      # kept: not every host defines it
+        return FALLBACK_REPO_ROOT
+    if not os.path.isfile(here):           # TD's operator path lands here
+        return FALLBACK_REPO_ROOT
+    candidate = os.path.dirname(os.path.dirname(here))
+    # A marker that identifies this specific repo rather than any directory with
+    # a tools/ subdirectory in it.
+    if os.path.isfile(os.path.join(candidate, "design", "DESIGN.md")):
+        return candidate
+    return FALLBACK_REPO_ROOT
+
+
+REPO_ROOT = _repo_root()
 
 # Matched case-insensitively against AVCaptureDevice.localizedName(). NOT an
 # index: DESIGN.md 3 records that this machine enumerates Camo, OBS Virtual

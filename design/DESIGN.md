@@ -160,6 +160,51 @@ Use the `All` group — one call returns all 21. The per-finger groups return
 - **First call costs ~100 ms–4.3 s** (model load). Always warm up once before
   timing or before going live.
 
+### 2.5 Inside TouchDesigner — milestone 1, answered
+
+TouchDesigner 099, bundled Python **3.11.15**, on the target machine.
+`tools/probe_m1_in_td.py` pasted into a Text DAT. This section replaces the
+guesses that were in §4.2 and §11.
+
+- **pyobjc loads and runs inside TD's process.** The venv's site-packages
+  appended to `sys.path`; pyobjc 12.2.2 imported; `VNDetectHumanHandPoseRequest`
+  instantiated (revision 1, still the only one). TD's interpreter is 3.11.15 and
+  the venv's is 3.11.9 — both cp311, so the wheels load. **No C++ plugin is
+  needed to make this work at all.**
+- **Appending to `sys.path` rather than inserting is validated, not just
+  argued.** numpy resolved to TD's own **2.1.2**, not the venv's 2.2.6. Had it
+  resolved the other way, TD's extension modules would be running against a
+  numpy they were not built for. Append. Never insert.
+- **Vision inference in TD's process:** first call **68.47 ms** (model load,
+  warm OS-side), then **2.80 / 2.86 / 2.80 ms** on a synthetic 720p frame. On
+  live camera buffers, **median 2.06 ms** (min 1.92, max 2.52) over 48 frames.
+  Consistent with the 3.29 ms of §2.1 and no worse for being inside TD.
+- **No run loop of our own is needed. This is the load-bearing answer.** 48
+  frames arrived in 2.23 s while the main thread sat in a plain `time.sleep()`,
+  with nothing turning a run loop on our behalf. The same probe delivered 48
+  frames standalone, in a bare Python process, under the same plain sleep — so
+  the spike's belief that "AVFoundation delivers only while a run loop turns"
+  was simply **wrong**. `AVCaptureVideoDataOutput` delivers on a GCD dispatch
+  queue, which needs no run loop at all. The 28 → 8.4 fps collapse in §3 was
+  *entirely* GIL starvation from the Python polling loop, and had nothing to do
+  with the run loop's presence. §4.2 therefore loses its contingency thread.
+- **Camera authorisation** was already granted to TouchDesigner.app: status 3.
+  The TCC prompt attaches to the host app, as expected.
+- **720p requested, 720p delivered**, via the output's `videoSettings`.
+
+Two things that are *not* measurements. The delivered-fps figure the probe
+prints (21.6 fps) is dominated by camera start-up inside a 2 s window — a
+repeat run showed 18 frames rather than 48 for exactly that reason. And the
+probe detects no hands, because nobody was waving; it is a liveness check, not
+a detection test.
+
+**New trap, found here.** Inside a TouchDesigner Text DAT, `__file__` **is**
+defined — and it is the DAT's *operator* path (`/project1/text1`), not a
+filesystem path. Deriving a directory from it silently produces `/`, so the
+probe tried to write to `/docs` and got `Errno 30, read-only file system`. A
+`except NameError` guard does not help, because nothing raises. Validate that
+the derived path actually exists before using it.
+
 ---
 
 ## 3. Traps — all of these cost real time in the spike
@@ -224,11 +269,13 @@ objects escape this thread**. Never touches the TD API.
 channel set. Never blocks, never waits, never allocates a lock it could contend
 on.
 
-**Run loop.** My standalone spike needed `CFRunLoopRun` for AVFoundation to
-deliver anything. **Inside TD this is probably already satisfied** — TD is a
-Cocoa app whose main run loop is turning, which is the condition a bare Python
-process lacks. Verify at milestone 1. If confirmed, the design loses a thread;
-if not, add a dedicated run-loop thread. Do not assume either way.
+**Run loop — settled, no thread needed.** MEASURED (§2.5): frames arrive with
+no run loop turned by us, both inside TD and in a bare Python process. The
+spike's `CFRunLoopRun` was never the thing making delivery work;
+`AVCaptureVideoDataOutput` delivers on a GCD dispatch queue, which needs no run
+loop. **This design owns exactly two threads of interest: TD's main thread, and
+the capture queue AVFoundation gives us.** What the spike actually needed was
+for its main thread to *block* rather than poll — see §3.
 
 ### 4.3 The handoff is lock-free
 
@@ -419,9 +466,10 @@ than editing a Python DAT live, and harder in-process debugging.
 
 ## 10. Milestones
 
-1. **Go/no-go: pyobjc inside TD.** Boot TD, import `Vision` and run one request
-   from a Text DAT. Also settle whether TD's run loop already serves
-   AVFoundation (§4.2). Cheap, and it gates everything.
+1. ~~**Go/no-go: pyobjc inside TD.**~~ **DONE — passed.** See §2.5: pyobjc
+   loads in TD's process, Vision runs there at 2.06 ms median on live camera
+   buffers, and no run loop of our own is needed. Probe kept at
+   `tools/probe_m1_in_td.py`.
 2. **`engine.py` headless.** Camera → `LandmarkFrame`, no TD. Largely a port of
    `reference/spike_vision_hands_live.py`.
 3. **`HandSource` + lock-free slot.** Tested headless against a fake source, so
@@ -437,12 +485,17 @@ Milestone 1 needs TD running. Everything from 2 onward is headless.
 
 ## 11. Open questions
 
-- Does TD's existing run loop serve AVFoundation delegate callbacks? (M1)
-- Does pyobjc load cleanly inside TD's bundled Python 3.11? Both are cp311, so
-  the wheels are ABI-compatible, but this is untested inside TD's process. (M1)
-- Best venv strategy: append a dedicated venv's `site-packages` to `sys.path`
-  (preferred — survives TD updates) versus installing into the app bundle
-  (pollutes it, does not survive updates).
+- ~~Does TD's existing run loop serve AVFoundation delegate callbacks?~~
+  **CLOSED (§2.5): the question was malformed.** No run loop is involved at all
+  — delivery is on a GCD queue and works with none turning, inside TD or out.
+- ~~Does pyobjc load cleanly inside TD's bundled Python 3.11?~~ **CLOSED
+  (§2.5): yes.** TD 099 ships 3.11.15; pyobjc 12.2.2 imports and runs Vision in
+  TD's process.
+- ~~Best venv strategy~~ **CLOSED (§2.5): a dedicated venv at
+  `~/.venvs/visionhands`, its `site-packages` APPENDED to `sys.path`.** Measured
+  inside TD: numpy correctly resolved to TD's own 2.1.2 rather than the venv's
+  2.2.6, which is the outcome that keeps TD's extension modules matched to the
+  numpy they were built against. Inserting at position 0 would invert that.
 - Two-hand behaviour is entirely unmeasured — throughput, chirality stability
   and slot assignment were all validated single-hand only.
 - Deferred by explicit decision, all cheap to measure once the fixture-replay
