@@ -72,16 +72,31 @@ def main():
         print("1. sys.path already contains %s" % REPO_ROOT)
 
     # -- step 2: start the camera ------------------------------------------
-    # Imported after the path is set, and re-imported fresh each run so an edit
-    # to the repo takes effect without restarting TouchDesigner. bootstrap and
-    # its dependencies are pure Python at module scope, so this is cheap.
-    for module in [m for m in list(sys.modules) if m.startswith("visionhands")]:
-        del sys.modules[module]
+    #
+    # NOTE what this deliberately does NOT do: flush `visionhands` out of
+    # sys.modules to pick up repo edits. An earlier version did, and it was
+    # wrong twice over (both confirmed by running it):
+    #
+    #   * `engine.py` registers an Objective-C class at module scope, and
+    #     re-importing raises `objc.error: _CaptureDelegate is overriding
+    #     existing Objective-C class`. So it worked once and failed every run
+    #     after.
+    #   * Worse, the flush orphans `bootstrap._source` - the new module object
+    #     has its own `_source = None`, so start()'s stop-first logic finds
+    #     nothing to stop while the previous camera session is still running.
+    #     That is precisely the two-sessions-fighting-over-one-camera failure
+    #     DESIGN.md 8 names, caused by the very code meant to be convenient.
+    #
+    # To pick up an edit to the repo, RESTART TOUCHDESIGNER. Python module
+    # caching plus Objective-C class registration means there is no safe
+    # in-process reload, and pretending otherwise costs a camera session.
     from visionhands.td import bootstrap
 
     try:
+        # start() stops any existing source first, so re-running this DAT
+        # restarts the camera rather than adding a second session.
         bootstrap.start()
-        print("2. camera started")
+        print("2. camera started (any previous session was stopped first)")
     except Exception as exc:            # noqa: BLE001 - a setup script reports, see below
         # Not swallowed: printed and then returned on. Every likely cause here -
         # no camera permission for TouchDesigner.app, no matching device, a
