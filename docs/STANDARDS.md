@@ -144,6 +144,15 @@ what was measured with numbers, what surprised us, what is still unknown.
 with their figures. Questions in 11 are closed explicitly with the answer, not
 left to rot. A design change is written into the doc *before* the code changes.
 
+**Fixtures are hands-only.** A fixture is committed to the repo, because it is
+the provenance for every performance number we quote - which means it is a video
+file that goes into version control and stays there. So no fixture may contain an
+identifiable person: frame the shot on hands against a wall or a desk, with faces
+out of it. A clip that shows someone stays out of git and lives in `temp/`
+(ignored), which also means it cannot serve as a citable benchmark input. Check
+before committing, not after - `VNDetectFaceRectanglesRequest` over every 15th
+frame answers it in seconds.
+
 **Measurement honesty.** Performance claims come only from deterministic fixture
 replay. Live-camera timings are never quoted as results — the spike saw an 8x
 spread on identical configs. Anything unmeasured is labelled unmeasured, in code

@@ -215,3 +215,43 @@ Neither number may be cited as a measurement.
 
 **Still outstanding.** No fixture clip, so this repo still has no deterministic
 performance number of its own. Two-hand behaviour remains entirely unmeasured.
+
+---
+
+## Fixture attempt 1 — rejected as a benchmark, kept as a jitter input
+2026-08-20
+
+The user recorded a clip with Photo Booth/QuickTime rather than
+`tools/record_fixture.py`, at `temp/Movie on 8-20-26 at 11.30<U+202F>AM.mov`.
+Measured with a throwaway replay: **1620x1080**, 30 fps, 151 frames (5 s), hand
+present in 150/150, max 1 hand, Vision median **4.86 ms** (p95 6.10).
+
+**Rejected as the benchmark fixture, on resolution.** 1620x1080 costs 4.86 ms
+against the 3.29 ms of `DESIGN.md` 2.1 at 720p, so nothing measured on it is
+comparable to what we already have, and resizing it to 720p would mean the
+benchmark measures a resize - which 3 rules out explicitly. Secondary reasons:
+5 s rather than 10, and the wrist travels only 0.202 of the frame vertically,
+so it exercises almost no pose variety.
+
+**Kept for the jitter measurement that `DESIGN.md` 11 defers.** A near-static
+hand at 100% presence is precisely the right input for per-joint jitter, and
+jitter is what decides whether downstream smoothing is needed.
+
+**Two side findings.** Chirality came back +1 (right) on all 150 consecutive
+frames with no flicker - the first evidence of chirality *stability*, where 2.4
+had only a single still. And whether the clip is horizontally mirrored is
+**UNVERIFIED**: Photo Booth mirrors by default, the user does not recall which
+hand was in shot, so the +1 cannot be checked against ground truth. Not treated
+as evidence that chirality is *correct*, only that it is stable.
+
+**New standard, from a check rather than a hunch.** Sampling every 15th frame
+with `VNDetectFaceRectanglesRequest` found a face in 7 of 10. A fixture is
+committed to the repo by design - it is the provenance for the numbers - so it
+cannot be a video of a person. `STANDARDS.md` 3 now requires fixtures to be
+framed hands-only, and a clip showing someone stays in `temp/` and cannot be
+cited as a benchmark input.
+
+**Also a small trap.** The filename contains U+202F, the narrow no-break space
+macOS puts before "AM". Two shell attempts reported the file as missing, and
+cv2's "couldn't read video stream" for a nonexistent path reads exactly like a
+codec failure. Glob for fixture paths; never retype them.
