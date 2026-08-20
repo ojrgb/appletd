@@ -1,0 +1,72 @@
+# Tooling config. Dev-only: none of this ships into TouchDesigner, and TD's
+# bundled interpreter never reads it. See docs/STANDARDS.md 2.
+
+# `ruff format` is deliberately NOT part of the gate. It is black-compatible and
+# hardcodes exactly two spaces before a trailing comment, with no setting to
+# change it, which collapses the aligned annotation column that STANDARDS.md 1.1
+# tier 4 relies on to keep a why-comment next to the thing it explains. `ruff
+# check` still enforces everything that matters: unused imports, undefined
+# names, line length, import order, bugbear. Formatting is a review concern.
+
+[tool.ruff]
+# 95, not the default 88. The house style puts explanatory comments on the same
+# line as the code they annotate (STANDARDS.md 1.1 tier 4); at 88 those comments
+# wrap and the annotation stops lining up with what it annotates.
+line-length = 95
+target-version = "py311"
+# reference/ is frozen provenance, not maintained code: it is the spike that
+# produced every measurement in DESIGN.md 2, and its value is in being exactly
+# what was run. Linting it would invite edits that break that guarantee.
+exclude = ["reference"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes: unused imports/names, undefined names
+    "I",        # isort: deterministic import order
+    "B",        # bugbear: mutable defaults, shadowed builtins, silent bugs
+    "UP",       # pyupgrade: no legacy syntax
+    "RUF",      # ruff's own checks
+]
+ignore = [
+    # We use %-formatting throughout, matching reference/. It survives being
+    # pasted into a TouchDesigner Text DAT next to TD's own %-heavy examples,
+    # and the spike is the provenance for most of this code.
+    "UP031", "UP032",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The probe deliberately imports pyobjc inside a function, after mutating
+# sys.path at runtime. That is the thing being tested, not an accident.
+"tools/probe_m1_in_td.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+# Frozen dataclasses and NewType carry part of the contract the comments state
+# (STANDARDS.md 1.3); showing the error code makes a violation greppable.
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+# pyobjc's modules are generated at import time and TD's `td`/`op` API does not
+# exist outside TouchDesigner, so neither carries type information. Strict mode
+# here would mean a `# type: ignore` on every native call - noise that hides the
+# real annotations. The pure-Python core stays strict; these are the two places
+# where the outside world is untyped by nature.
+module = ["visionhands.engine", "visionhands.td.*", "tools.*"]
+disallow_untyped_calls = false
+disallow_any_expr = false
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The frameworks themselves, wherever they are imported from.
+module = ["objc", "Vision", "Quartz", "AVFoundation", "CoreMedia",
+          "CoreFoundation", "Foundation", "libdispatch", "cv2", "td"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["visionhands/tests"]
+# Fail on an unraisable exception from a background thread. A test that silently
+# swallows a worker-thread crash is worse than no test, and this whole design
+# hinges on a worker thread behaving (DESIGN.md 4.2).
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]

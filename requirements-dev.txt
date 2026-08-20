@@ -1,0 +1,11 @@
+# Dev-only. NEVER imported at module scope by the package - TouchDesigner's
+# bundled Python has numpy but not cv2 or PIL, so anything here that leaks into
+# an import path breaks the CHOP at cook time. Debug overlays and the fixture
+# tools import these lazily, inside the function that needs them.
+-r requirements.txt
+numpy==2.2.6
+opencv-python==4.11.0.86
+pillow==11.3.0
+pytest==8.4.1
+ruff==0.12.7
+mypy==1.17.1

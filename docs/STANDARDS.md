@@ -93,7 +93,11 @@ equal severity. Comments are updated in the same edit as the code they describe
 distinctions in the core (`NormX`/`NormY` vs `PixelX`/`PixelY`) so the checker
 catches the flip class of bug.
 
-**Tooling.** `ruff` lint and format on everything. `mypy --strict` on the pure
+**Tooling.** `ruff check` on everything (`ruff format` is deliberately not used:
+it hardcodes two spaces before a trailing comment and so destroys the aligned
+annotation column that 1.1 tier 4 depends on. Formatting consistency is a review
+concern instead). `reference/` is excluded from linting entirely - it is frozen
+provenance, and its value is in being exactly what produced the measurements. `mypy --strict` on the pure
 Python core (`types.py`, `coords.py`, `source.py`, slot assignment); relaxed per
 module on `engine.py` and `td/`, where pyobjc and TD's API carry no type
 information. Both are dev-only and never ship into TouchDesigner.

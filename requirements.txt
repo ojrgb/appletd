@@ -1,0 +1,11 @@
+# Runtime, inside TouchDesigner's bundled Python 3.11.
+#
+# Pinned to what the spike in reference/ was measured against (DESIGN.md 2).
+# These wheels are cp311 and TouchDesigner ships Python 3.11, so they load in
+# TD's process; that ABI match is the reason this project is Python and not
+# Objective-C++. Do not bump these casually - a pyobjc that disagrees with TD's
+# interpreter ABI is a crash inside TD, not an ImportError.
+pyobjc-framework-Vision==12.2.2
+pyobjc-framework-Quartz==12.2.2
+pyobjc-framework-AVFoundation==12.2.2
+pyobjc-framework-libdispatch==12.2.2
