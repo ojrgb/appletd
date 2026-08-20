@@ -124,11 +124,15 @@ def test_engine_does_not_import_touchdesigner() -> None:
 def test_td_layer_does_not_import_pyobjc() -> None:
     """The CHOP side must be importable with no pyobjc present.
 
-    Vacuously true until milestone 4 creates td/ - kept now so that the rule
-    exists before the code it constrains, rather than being retrofitted onto a
-    layer that already broke it.
+    This rule was vacuous until milestone 4 created td/ - it existed before the
+    code it constrains, which is the right order, but it also means the first
+    real assertion happens here. The count check is deliberate: a renamed
+    directory would otherwise make it vacuous again without anyone noticing.
     """
     td_files = _package_files("td")
+    assert len(td_files) >= 3, (
+        "expected td/ to contain __init__, bootstrap and hands_chop; found %s"
+        % [p.name for p in td_files])
     for path in td_files:
         offenders = _module_scope_imports(path) & PYOBJC_MODULES
         assert not offenders, "%s imports pyobjc: %s" % (path.name, sorted(offenders))
@@ -258,7 +262,18 @@ def test_source_and_the_pure_core_import_with_no_pyobjc() -> None:
     """
     code, output = _run_without_pyobjc("""
 import visionhands.types, visionhands.coords, visionhands.source
+import visionhands.td.bootstrap, visionhands.td.hands_chop
 from visionhands.source import FakeSource, InProcessSource, LatestFrameBox
+
+# The CHOP layer must cook with no pyobjc, no camera and no bootstrap - that is
+# what makes the fixed channel contract survive a project where nothing is set
+# up yet, and what lets the whole thing be developed against FakeSource.
+from visionhands.td import hands_chop
+names = hands_chop.channel_names()
+values = hands_chop.channel_values(
+    __import__("visionhands.types", fromlist=["blank_frame"]).blank_frame(),
+    hands_chop.AGE_NO_SOURCE_MS, 0)
+assert len(names) == len(values) == 137, (len(names), len(values))
 
 box = LatestFrameBox()
 assert box.latest().seq == 0

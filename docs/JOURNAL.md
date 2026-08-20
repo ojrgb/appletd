@@ -624,3 +624,76 @@ Also worth noting how that near-miss happened: my edit to the test's docstring
 applied while my edit to its body did not, so for two runs I was reading an
 explanation that described code that was not there. Both halves of an edit have
 to be verified, not just the one that shows up in a diff first.
+
+---
+
+## Milestone 4 — the Script CHOP
+2026-08-20
+
+**Built.** `visionhands/td/bootstrap.py` (sys.path wiring, source lifecycle,
+`status()`), `visionhands/td/hands_chop.py` (the callbacks), and
+`tools/td_setup_snippet.py` — a paste-into-a-Text-DAT script that creates both
+operators, wires the callbacks parameter, starts the camera and reports what it
+did. Plus `tests/test_hands_chop.py`: 22 tests against a `FakeScriptOp` double,
+with no TouchDesigner in the process. 88 tests, ruff and mypy clean.
+
+**Reading TouchDesigner's own install saved this milestone from a bug I would
+not have found by testing.** The shipped stub `tdi/ops/chops/scriptCHOP.py`, the
+callback template in `tdutils/DATScripts/`, and the offline help under
+`Samples/Learn/OfflineHelp/` between them settled three things:
+
+1. **`onGetCookLevel` matters, and the default is wrong for us.**
+   `CookLevel.AUTOMATIC` means "inputs changed AND output being used". This CHOP
+   has **no inputs** — landmarks arrive on a background thread — so under the
+   default it would cook once and then serve a frozen frame forever while the
+   camera ran perfectly. `CookLevel.WHEN_USED` is "every frame while the output
+   is being used", which is exactly the semantics wanted: track when something
+   needs the data, cost nothing when nothing does. This would have presented as
+   "the engine works in tests but the CHOP is stuck", and I would have gone
+   looking in the engine.
+2. **Channels must be built inside `onCook`.** TD's own docs: calling
+   `appendChan()` outside the callback "causes random behavior" unless the
+   operator is locked. So the tempting optimisation — append 137 channels once,
+   then only write values — is off the table, and the documented
+   clear-then-append-every-cook pattern is what we do.
+3. **The write idiom.** `scriptOp.clear()`, `numSamples = 1`,
+   `appendChan(name)`, then `chan[0] = value`, which is what TD's own examples
+   use and which avoids allocating a list per channel per cook.
+
+**Testable without TouchDesigner, deliberately.** The cook logic is a pure
+function over a four-method surface — `clear()`, `appendChan()`, `numSamples`,
+`rate` — and `FakeScriptOp` implements exactly that, including rejecting a
+duplicate channel name (TD would silently rename, which is worse). So the whole
+137-channel contract is verified before it ever meets a camera: values aligned
+one-for-one with names, every value a float, absent hands publishing zeros with
+all channels present, the channel set byte-identical with and without a source,
+and no growth across repeated cooks.
+
+**A cook can never raise.** An exception inside `onCook` shows up as a broken
+operator in the project. The useful behaviour when the source is missing or
+misbehaving is a full set of zeros with a telling `age_ms`, so the channel
+references survive and the failure is visible — tested with a source that raises
+from every method.
+
+**New sentinel: `AGE_NO_SOURCE_MS = -1.0`.** A negative age is impossible from a
+real source (`source.py` clamps at zero), so it distinguishes "nothing is wired
+up" from "the camera has gone quiet". Those need different responses — one is a
+project mistake, the other a dead engine — and a downstream gate can now tell
+them apart.
+
+**The `td/` boundary rule stopped being vacuous.** It has existed since M2b with
+nothing to check; it now asserts that all three files import no pyobjc, plus a
+count check so a renamed directory cannot quietly make it vacuous again. The
+subprocess blocker test now also imports the CHOP layer and cooks a full
+137-value channel set with every pyobjc import raising.
+
+**Still needs a human.** That TD calls these callbacks at all, that
+`CookLevel.WHEN_USED` behaves as documented, and that 137 channels actually
+appear in the operator. No amount of test-doubling substitutes for running it.
+
+**Not related to the code: no TouchDesigner MCP is available to this session.**
+Checked `claude mcp list` (39 servers, all claude.ai connectors) and the
+`mcpServers` entries in `~/.claude.json` (`stripe`, `jira`, `atlassian`). A
+newly added server also needs a session restart before it appears, and this
+session cannot run an OAuth flow. So milestone 4's verification stays manual for
+now.

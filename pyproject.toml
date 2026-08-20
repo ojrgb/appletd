@@ -43,6 +43,13 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # The probe deliberately imports pyobjc inside a function, after mutating
 # sys.path at runtime. That is the thing being tested, not an accident.
+# TouchDesigner injects `op`, `me`, `textDAT`, `scriptCHOP` and friends into the
+# namespace of any script it runs. They genuinely do not exist outside TD, so
+# F821 is correct and unhelpful here: this file is only ever executed by
+# TouchDesigner, and importing stand-ins would make it lie about its
+# dependencies. Scoped to this one file rather than disabled globally, so a
+# genuine typo in the package still fails.
+"tools/td_setup_snippet.py" = ["F821"]
 "tools/probe_m1_in_td.py" = [
     "E402",
     # The probe's entire purpose is to survive a failing stage and report which
