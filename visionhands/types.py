@@ -314,6 +314,42 @@ def channel_names() -> tuple[str, ...]:
     return tuple(names)
 
 
+def channel_values(frame: LandmarkFrame, age_ms: float,
+                   n_hands: int) -> list[float]:
+    """The values, in `channel_names()` order. Pure, and therefore testable.
+
+    Lives here, beside `channel_names()`, because names and values are ONE
+    contract and keeping them in separate modules is how they drift. It started
+    in `td/hands_chop.py` and moved when the out-of-process sidecar needed it
+    too - the sidecar must not import the TouchDesigner layer, and neither
+    should have its own copy of the ordering.
+
+    Contract: returns exactly len(channel_names()) floats in the same order as
+              that list. The two are kept in step by a test, not by inspection
+              (`test_hands_chop.py`), because a silent misalignment here would
+              put a joint's y into another joint's x channel and still look
+              plausible on screen.
+    Why floats for everything: a CHOP channel is a float. `found` becomes 1.0 or
+              0.0 and chirality becomes -1.0 / 0.0 / 1.0 rather than being
+              encoded some cleverer way, because the far end is TD arithmetic.
+    """
+    values: list[float] = [float(n_hands), float(frame.seq), float(age_ms)]
+    for hand in frame.hands:
+        values.append(1.0 if hand.found else 0.0)
+        # Vision's own confidence: a MEASURED constant 1.0, published as a
+        # faithful mirror and never to be gated on (DESIGN.md 2.6).
+        values.append(float(hand.confidence))
+        # Ours, and the one to gate on.
+        values.append(float(hand.conf_median))
+        values.append(float(hand.chirality))
+        for joint in hand.joints:
+            # Normalised, bottom-left origin, exactly as Vision produced them.
+            # No flip happens here or anywhere else (DESIGN.md 7).
+            values.append(float(joint.x))
+            values.append(float(joint.y))
+            values.append(float(joint.conf))
+    return values
+
 N_CHANNELS: Final = 3 + MAX_HANDS * (len(_HAND_SCALARS) + N_JOINTS * len(_JOINT_VALUES))
 
 

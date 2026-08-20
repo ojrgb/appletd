@@ -36,6 +36,7 @@ from visionhands.types import (
     NormY,
     blank_frame,
     channel_names,
+    channel_values,
 )
 
 
@@ -129,12 +130,12 @@ def test_values_line_up_with_names_one_for_one() -> None:
     defect in this system. The zip in write_channels is strict for the same
     reason; this asserts it before it can ever be reached.
     """
-    values = hands_chop.channel_values(_frame(), age_ms=12.0, n_hands=1)
+    values = channel_values(_frame(), age_ms=12.0, n_hands=1)
     assert len(values) == len(channel_names()) == N_CHANNELS
 
 
 def test_frame_scalars_come_first_and_carry_the_right_numbers() -> None:
-    values = hands_chop.channel_values(_frame(seq=99), age_ms=7.5, n_hands=1)
+    values = channel_values(_frame(seq=99), age_ms=7.5, n_hands=1)
     assert values[0] == 1.0         # n_hands
     assert values[1] == 99.0        # seq
     assert values[2] == 7.5         # age_ms
@@ -143,13 +144,13 @@ def test_frame_scalars_come_first_and_carry_the_right_numbers() -> None:
 def test_everything_published_is_a_float() -> None:
     """A CHOP channel is a float. `found` is 1.0/0.0 and chirality is -1.0/0.0/1.0
     rather than anything cleverer, because the far end is TD arithmetic."""
-    values = hands_chop.channel_values(_frame(), age_ms=0.0, n_hands=1)
+    values = channel_values(_frame(), age_ms=0.0, n_hands=1)
     assert all(type(v) is float for v in values)
 
 
 def test_a_hand_is_published_in_the_documented_order() -> None:
     named = dict(zip(channel_names(),
-                     hands_chop.channel_values(_frame(), 0.0, 1), strict=True))
+                     channel_values(_frame(), 0.0, 1), strict=True))
     assert named["h0_found"] == 1.0
     assert named["h0_score"] == 1.0          # Vision's constant, mirrored
     assert named["h0_conf_median"] == 0.5    # ours, the one to gate on
@@ -162,7 +163,7 @@ def test_a_hand_is_published_in_the_documented_order() -> None:
 def test_an_absent_hand_publishes_zeros_with_every_channel_present() -> None:
     """The heart of the fixed-contract rule (DESIGN.md 6.2)."""
     named = dict(zip(channel_names(),
-                     hands_chop.channel_values(_frame(n_found=1), 0.0, 1), strict=True))
+                     channel_values(_frame(n_found=1), 0.0, 1), strict=True))
     assert named["h1_found"] == 0.0
     assert named["h1_score"] == 0.0           # NOT 1.0 - an empty slot is not confident
     assert named["h1_conf_median"] == 0.0
@@ -176,7 +177,7 @@ def test_negative_chirality_survives_as_a_float() -> None:
                           hands=(_hand(0.5, chirality=CHIRALITY_LEFT),
                                  blank_frame().hands[0]))
     named = dict(zip(channel_names(),
-                     hands_chop.channel_values(frame, 0.0, 1), strict=True))
+                     channel_values(frame, 0.0, 1), strict=True))
     assert named["h0_chirality"] == -1.0
 
 
@@ -413,6 +414,6 @@ def test_status_never_raises() -> None:
 def test_the_box_and_the_chop_agree_on_an_empty_start() -> None:
     """A freshly-made box and a sourceless cook publish the same shape."""
     frame = LatestFrameBox().latest()
-    values = hands_chop.channel_values(frame, hands_chop.AGE_NO_SOURCE_MS, 0)
+    values = channel_values(frame, hands_chop.AGE_NO_SOURCE_MS, 0)
     assert len(values) == N_CHANNELS
     assert values[0] == 0.0 and values[1] == 0.0

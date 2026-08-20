@@ -913,3 +913,69 @@ the built-in camera simultaneously (measured earlier today), TD can display the
 camera itself while the sidecar tracks it independently. That removes the whole
 Route B frame-pushing problem: two independent readers, 3.5 KB per frame of
 landmarks, and nothing else crossing the boundary.
+
+---
+
+## The sidecar, built and measured: 13 fps → 30 fps
+2026-08-20
+
+**Built.** `visionhands/osc.py` (minimal OSC encoding, no dependency),
+`visionhands/sidecar.py` (the process), `tools/td_setup_osc.py` (the TD side, now
+one operator), and tests: `test_osc.py` pins the wire format byte for byte,
+`test_sidecar.py` binds a real UDP socket and decodes actual datagrams with an
+independently-written decoder. 105 tests, ruff and mypy clean.
+
+**Measured through the same sampler as the complaint, before and after:**
+
+| | in-process | sidecar + OSC |
+|---|---|---|
+| camera | 13.4 fps | **29.8 fps** |
+| inter-arrival median | 69.9 ms | **33.3 ms** |
+| worst gap | 203.4 ms | **55.6 ms** |
+| jitter (sigma) | 20.8 ms | **7.7 ms** |
+| gaps over 60 ms | 70 of 89 | **0 of 198** |
+| `age_ms` | 99.9 ms | **32.3 ms** |
+
+33.3 ms median inter-arrival is exactly 30 fps, and zero gaps over 60 ms is what
+"smooth" means. The engine, capture thread and lock-free box are unchanged - they
+were never the problem, only their host was.
+
+**The TD side shrank to one built-in operator.** No Script CHOP, no callbacks
+DAT, nothing of ours in a cook. `channel_values()` moved from
+`td/hands_chop.py` into `types.py` so names and values live together and the
+sidecar does not import the TouchDesigner layer; `Sidecar` takes an injectable
+`HandSource`, which is the first real payoff of that seam - the whole send path
+is testable with no camera.
+
+**Two defects the gates caught before the user could.**
+
+- `os.kill(pid, 0)` raises `OverflowError`, not `ProcessLookupError`, for a pid
+  outside the OS range. Unhandled, a typo'd `--parent-pid` would have killed the
+  sidecar's main loop. A pid that cannot exist is not a live parent, so it now
+  counts as gone.
+- The Sidecar held its source as a `HandSource`, and mypy correctly refused
+  `source.box` in the tests, since publishing is not part of the interface a
+  consumer sees. The fixture now keeps the concrete `FakeSource`.
+
+**`pin_frame_rate` reported its own failure honestly**, which is exactly why it
+reads back rather than trusting: the camera accepts the minimum frame duration
+and silently keeps its 1/15 s maximum. The sidecar prints
+`frame rate not pinned: asked for 30 fps but the camera reports min 0.0333 s /
+max 0.0667 s` every status line while running at a steady 30 fps. Left as-is:
+the number is honest, the behaviour is fine, and a fix would be guessing at
+AVFoundation's ordering rules.
+
+**A TouchDesigner gotcha worth writing down.** `chop.chan('name')` returns a
+Channel whose **truthiness is its value**, so `x if chop.chan('n_hands') else -1`
+falls through whenever the channel legitimately reads 0.0. It cost me two
+diagnostic round trips convincing myself a working system was broken. Use
+`is not None`.
+
+**Liveness is the one thing this route costs.** An OSC In CHOP holds its last
+value forever, so a dead sidecar looks like a still hand. Both signals are
+available natively: slope of `seq` is zero when the camera stops, slope of
+`age_ms` is zero when the sidecar stops. Documented in `tools/td_setup_osc.py`
+and printed by it.
+
+Cleaned up after myself: prototype and diagnostic nodes destroyed, only
+`visionhands_osc` and the older Script CHOP pair remain in the project.
