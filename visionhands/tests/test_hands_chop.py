@@ -295,42 +295,49 @@ def test_cook_writes_no_channels_twice() -> None:
 # ---------------------------------------------------------------------------
 # The cook level - the detail that would have made this whole CHOP look frozen
 # ---------------------------------------------------------------------------
-def test_cook_level_is_when_used_not_the_default() -> None:
-    """With TD's default AUTOMATIC ("inputs changed and output being used") this
-    CHOP would cook once and then serve a frozen frame forever, because it has
-    no inputs - the camera delivers on a background thread.
+class FakeCookLevel:
+    """TD's CookLevel enum, as `TDDefinitions.py` defines it."""
 
-    TD injects CookLevel into builtins, so the test injects a stand-in the same
-    way rather than mocking the function under test.
+    AUTOMATIC = "AUTOMATIC"
+    ON_CHANGE = "ON_CHANGE"
+    WHEN_USED = "WHEN_USED"
+    ALWAYS = "ALWAYS"
+
+
+def test_cook_level_is_always_not_the_default() -> None:
+    """MEASURED IN TD: with the default AUTOMATIC this CHOP reached
+    `totalCooks = 1` and froze, because it has no inputs to change - the camera
+    delivers on a background thread.
+
+    ALWAYS rather than WHEN_USED because this is a device input: it should track
+    the camera whether or not anything is connected downstream yet. WHEN_USED
+    leaves it frozen until a consumer exists, which is indistinguishable from
+    the bug above while building.
     """
-    class FakeCookLevel:
-        AUTOMATIC = "AUTOMATIC"
-        ON_CHANGE = "ON_CHANGE"
-        WHEN_USED = "WHEN_USED"
-        ALWAYS = "ALWAYS"
-
-    import builtins
-    builtins.CookLevel = FakeCookLevel      # type: ignore[attr-defined]
-    try:
-        assert hands_chop.onGetCookLevel(FakeScriptOp()) == "WHEN_USED"
-    finally:
-        del builtins.CookLevel              # type: ignore[attr-defined]
+    assert hands_chop.cook_level(FakeCookLevel) == "ALWAYS"
 
 
-def test_cook_level_outside_touchdesigner_returns_none() -> None:
-    """No CookLevel means we are not in TD. Returning None lets TD's default
-    apply rather than raising inside a callback."""
-    assert hands_chop.onGetCookLevel(FakeScriptOp()) is None
+def test_cook_level_takes_the_enum_as_an_argument() -> None:
+    """The whole point of the signature, and the bug it fixes.
+
+    VERIFIED LIVE against the running TouchDesigner: `td.CookLevel` is MISSING
+    and `builtins.CookLevel` is absent - TD injects the name into a DAT's
+    globals only. An earlier version of this module looked it up on builtins,
+    found nothing, returned None, and TD silently fell back to AUTOMATIC. So the
+    enum must arrive from the DAT, and this test pins that it does rather than
+    being fetched here.
+    """
+    import inspect
+    assert list(inspect.signature(hands_chop.cook_level).parameters) == \
+        ["cook_level_enum"]
+    assert not hasattr(hands_chop, "onGetCookLevel"), (
+        "onGetCookLevel must live in the callbacks DAT, where CookLevel exists")
 
 
 def test_oncook_is_the_documented_entry_point() -> None:
-    """TD calls these by name, so the names and arity are part of the contract."""
+    """TD calls this by name, so the name and arity are part of the contract."""
     import inspect
-    for name in ("onCook", "onGetCookLevel"):
-        function = getattr(hands_chop, name)
-        assert callable(function), name
-        assert list(inspect.signature(function).parameters) == ["scriptOp"], name
-
+    assert list(inspect.signature(hands_chop.onCook).parameters) == ["scriptOp"]
     script_op = FakeScriptOp()
     hands_chop.onCook(script_op)
     assert len(script_op.names) == N_CHANNELS

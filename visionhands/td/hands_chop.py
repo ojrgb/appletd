@@ -3,9 +3,14 @@
     HOW TO USE IT. Create a Script CHOP, point its `callbacks` parameter at a
     Text DAT containing:
 
-        from visionhands.td.hands_chop import onCook, onGetCookLevel   # noqa
+        from visionhands.td.hands_chop import cook_level, onCook   # noqa
+
+        def onGetCookLevel(scriptOp):
+            return cook_level(CookLevel)
 
     ...having run `visionhands.td.bootstrap.start()` once beforehand.
+    `onGetCookLevel` has to be defined in the DAT rather than imported - see
+    point 2 below, and `cook_level()`.
 
 THREE THINGS ABOUT THIS FILE, all of which come from TouchDesigner rather than
 from us.
@@ -17,13 +22,15 @@ from us.
    takes a lock, and never calls into Vision. Reading the box costs ~0.005 ms
    (MEASURED, DESIGN.md 2.7).
 
-2. THE COOK LEVEL IS NOT THE DEFAULT, AND THAT IS LOAD-BEARING.
+2. THE COOK LEVEL IS NOT THE DEFAULT, AND `onGetCookLevel` CANNOT LIVE HERE.
    `CookLevel.AUTOMATIC` means "inputs changed and output being used". This CHOP
    has NO inputs - its data arrives on a background thread - so under the
-   default it would cook once and then sit there serving a stale frame forever
-   while the camera ran. `WHEN_USED` means "every frame while the output is
-   being used", which is exactly right: track the camera when something
-   downstream needs the landmarks, and cost nothing when nothing does.
+   default it cooks ONCE and then serves a frozen frame forever while the camera
+   runs perfectly. Measured in TD: `totalCooks = 1`.
+   The trap is that `CookLevel` is injected into a DAT's globals only - it is
+   not on `builtins` and not on the `td` module (verified live). So
+   `onGetCookLevel` is defined in the callbacks DAT, which can see the name, and
+   it calls `cook_level()` here for the decision. See that function.
 
 3. CHANNELS ARE BUILT INSIDE `onCook` AND NOWHERE ELSE. TouchDesigner's own
    documentation is explicit that calling `appendChan()` from outside `onCook`
@@ -157,44 +164,38 @@ def write_channels(script_op: Any) -> int:
     return len(names)
 
 
-def _td_builtins() -> Any:
-    """Where TouchDesigner injects its API.
+def cook_level(cook_level_enum: Any) -> Any:
+    """Which cook level this CHOP needs. The DAT passes TD's CookLevel enum in.
 
-    Indirected through a function so a test can substitute it, and so the lookup
-    happens at call time - this module has to stay importable outside TD, where
-    none of these names exist.
+    WHY THE ENUM IS AN ARGUMENT rather than something this module looks up.
+    VERIFIED LIVE against the running TouchDesigner (099, Python 3.11.15):
+
+        import td; td.CookLevel   ->  MISSING
+        builtins.CookLevel        ->  absent
+        builtins.op               ->  absent
+        td.op                     ->  present
+
+    TouchDesigner injects `CookLevel` into a DAT's globals ONLY. A function
+    living in an imported module cannot see it by any route. The first version
+    of this file looked it up on `builtins`, found nothing, and returned None -
+    at which point TD fell back to `AUTOMATIC`, and since this CHOP has no
+    inputs to change, it cooked exactly ONCE and then served a frozen frame
+    forever while the camera ran perfectly. Measured in TD: `totalCooks = 1`.
+
+    So the lookup happens in the callbacks DAT, where the name exists, and the
+    DECISION lives here, where it is version-controlled and testable.
+
+    ALWAYS, not WHEN_USED: this is a device input, like a camera or MIDI
+    operator, and it should track the camera whether or not anything is
+    connected downstream yet. WHEN_USED means "every frame while the output is
+    being used", which leaves the CHOP frozen until a consumer exists - correct
+    in production, actively confusing while building, and indistinguishable from
+    the bug above. A cook costs ~55 microseconds (MEASURED), so cooking
+    unwatched is not worth optimising.
     """
-    import builtins
-    return builtins
+    return cook_level_enum.ALWAYS
 
 
-# ---------------------------------------------------------------------------
-# The TouchDesigner callbacks.
-#
-# camelCase, including the argument names: TouchDesigner calls these by name and
-# passes `scriptOp` positionally. Renaming either to satisfy a naming linter
-# would silently stop TD finding them - pep8-naming is not among our enabled
-# ruff rules, and if anyone adds it, this file wants an exemption rather than a
-# fix.
-# ---------------------------------------------------------------------------
 def onCook(scriptOp: Any) -> None:
-    """Called by TouchDesigner every frame the output is used."""
+    """Called by TouchDesigner every frame, per cook_level()."""
     write_channels(scriptOp)
-
-
-def onGetCookLevel(scriptOp: Any) -> Any:
-    """Cook every frame the output is used, not only when inputs change.
-
-    See this module's docstring, point 2: with the default `AUTOMATIC` this CHOP
-    would cook once and then serve a frozen frame forever, because it has no
-    inputs to change - the camera delivers on a background thread.
-
-    `CookLevel` is injected by TouchDesigner, so it is resolved at call time
-    rather than imported. Outside TD it does not exist, and returning None lets
-    TD's own default apply rather than raising inside a callback, which would
-    leave the operator broken with an error pointing at the wrong thing.
-    """
-    cook_level = getattr(_td_builtins(), "CookLevel", None)
-    if cook_level is None:
-        return None
-    return cook_level.WHEN_USED
