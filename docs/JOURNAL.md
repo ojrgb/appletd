@@ -697,3 +697,93 @@ Checked `claude mcp list` (39 servers, all claude.ai connectors) and the
 newly added server also needs a session restart before it appears, and this
 session cannot run an OAuth flow. So milestone 4's verification stays manual for
 now.
+
+---
+
+## The TouchDesigner MCP, the frozen CHOP, and TOP input measured
+2026-08-20
+
+**We have direct TD access now.** The user had installed `touchdesigner-mcp`
+(8beeeaaat, v1.4.4) as a Claude Desktop extension bundle — which is why
+`claude mcp list` and `claude_desktop_config.json` both showed nothing: UI-installed
+connectors live in `~/Library/Application Support/Claude/Claude Extensions/`.
+TouchDesigner's own web server was already listening on 9981 (`lsof` found it;
+a `/dev/tcp` probe had said otherwise, which was wrong — zsh has no `/dev/tcp`).
+Registered the same server for Claude Code in `.mcp.json`, and verified the
+handshake works: 14 tools including `execute_python_script`, `create_td_node`
+and `get_top_image`. It is also drivable directly over stdio without waiting for
+a session restart, which is how everything below was measured.
+
+**The CHOP was frozen, and the cause was a real trap.** Diagnosed in one query:
+137 correct channels, no errors, `age_ms` = 18 ms — but `totalCooks = 1`. It
+cooked once and served a frozen frame while the camera ran perfectly.
+
+`onGetCookLevel` lived in `hands_chop.py`, an imported module, and looked
+`CookLevel` up on `builtins`. Measured in the live TD:
+
+    import td; td.CookLevel   ->  MISSING
+    builtins.CookLevel        ->  absent
+    builtins.op               ->  absent
+    td.op                     ->  present
+    td.noiseTOP / td.textDAT  ->  present
+
+So **TouchDesigner injects `CookLevel` into a DAT's globals only.** Not builtins,
+not the `td` module — while OP *types* and `op` itself ARE on `td`. A module
+cannot see it by any route, so the function returned None and TD fell back to
+`AUTOMATIC`: "inputs changed and output being used". With no inputs, that is one
+cook, ever. `onGetCookLevel` now lives in the callbacks DAT and calls
+`cook_level()` in the module for the decision. ALWAYS rather than WHEN_USED,
+because this is a device input and should track the camera whether or not a
+consumer is wired up yet. Verified after the fix: **287 cooks in 4 s**, `seq`
+advancing at ~25 fps.
+
+The M4 reviewer's prediction was also correct: creating a Script CHOP
+auto-creates a docked callbacks DAT, and the snippet pointed `par.callbacks` at
+its own, orphaning it. Destroyed.
+
+**End-to-end staleness, measured at the cook: `age_ms` 65–69 ms.** Not yet
+investigated. At ~25 fps delivery that is roughly 1.6 frame intervals, of which
+Vision is ~3.4 ms — so most of it is camera pipeline latency. Worth a look before
+anyone calls this low-latency.
+
+**TOP input: viable, and here are the numbers.** All measured in the live TD.
+
+| operation, 720p | median | p95 | max |
+|---|---|---|---|
+| `TOP.numpyArray()` | 0.203 ms | 0.861 | 4.511 (GPU stall) |
+| `TOP.numpyArray(delayed=True)` | 0.222 ms | 0.262 | 0.316 |
+| float32 RGBA → uint8 BGRA | 4.794 ms | 5.170 | 7.012 |
+
+At 1080p the readback is 0.551 / 0.495 ms respectively — still sub-millisecond.
+`delayed=True` costs one frame of latency and removes the stall entirely, which
+is the better trade for a realtime overlay.
+
+**The readback is cheap; the conversion is not.** TD always returns **float32**
+regardless of the texture's GPU format, so a conversion is unavoidable. The
+cheapest variant measured is 3.65 ms (drop alpha, reverse to BGR). Vision does
+accept float buffers directly — `128RGBAFloat` and `64RGBAHalf` both work — but
+on real frames they are SLOWER than BGRA (6.00 and 7.76 ms against 4.35), so
+converting is still the right move.
+
+A first measurement said float was *faster* at 2.70 ms. That was wrong twice
+over: random-noise input (no hand, so trivial work) and a single
+`VNSequenceRequestHandler` reused across three formats. Which produced its own
+finding: **a sequence handler rejects a change of input pixel format
+mid-sequence** — it returned error -12905 for BGRA purely because float buffers
+had gone through it first. Any code that switches between camera and TOP input
+needs a fresh handler.
+
+**So the architecture for TOP input**: the cook does the readback ONLY (~0.2 ms
+on TD's main thread) and hands the array to the worker thread, which converts
+and runs Vision off-thread, publishing into the same `LatestFrameBox`. That
+keeps the main-thread cost at 0.2 ms against the current camera path's 0.005 ms,
+and both stay far inside a frame budget. Doing the conversion and inference
+inline in the cook instead would cost ~8 ms — half of a 60 fps frame — and
+violate DESIGN.md 4.1.
+
+UNMEASURED and worth checking before building it: whether the array returned by
+`numpyArray()` stays valid once the cook returns, or whether TD reuses that
+buffer on the next call. If it is reused, the main thread needs a copy
+(~3.7 MB memcpy) before handing it over. The `delayed=True` semantics — "the
+image that was current on the previous call" — hint at internal buffering, so
+this needs settling rather than assuming.
