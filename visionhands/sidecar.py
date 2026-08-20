@@ -54,7 +54,7 @@ import time
 from types import FrameType
 
 from visionhands.osc import encode_channels
-from visionhands.source import HandSource, InProcessSource
+from visionhands.source import SEQ_NEVER_PUBLISHED, HandSource, InProcessSource
 from visionhands.types import channel_names, channel_values
 
 # Where TouchDesigner's OSC In CHOP listens. Loopback only: this stream is
@@ -127,8 +127,18 @@ class Sidecar:
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
+        """Open the camera. Does NOT set `running` - see run().
+
+        `running` used to be set here, unconditionally, AFTER source.start().
+        That silently discarded a SIGTERM arriving during start-up, and start-up
+        is where a signal is most likely to land: opening the camera takes ~1.5 s
+        of warm-up (MEASURED, DESIGN.md 2.7). The consequence with TouchDesigner's
+        launcher is not cosmetic - TD calls terminate(), the sidecar ignores it,
+        the 3 s wait expires and TD sends SIGKILL, which skips stop() entirely
+        and leaves the capture session to be reclaimed by process death rather
+        than released (DESIGN.md 8).
+        """
         self.source.start()
-        self.running = True
 
     def stop(self) -> None:
         """Idempotent, and safe from a signal handler.
@@ -139,8 +149,13 @@ class Sidecar:
         waiting for the process to exit at the wrong moment.
         """
         self.running = False
-        self.source.stop()
-        self.socket.close()
+        try:
+            self.source.stop()
+        finally:
+            # In a finally: if stopping the camera raises, the socket must still
+            # be closed, and the original exception must still be the one that
+            # propagates rather than being masked by a second failure here.
+            self.socket.close()
 
     def _parent_is_gone(self) -> bool:
         """True if the process that launched us has exited.
@@ -180,7 +195,18 @@ class Sidecar:
         not to take down a process that is otherwise working.
         """
         frame = self.source.latest()
-        age_ms = self.source.age_ms()
+        # Age derived from the frame IN HAND, not from a second read of the box.
+        # Reading both separately lets a publish land between them, so the
+        # payload carries frame N's seq with frame N+1's age - measured claiming
+        # 100 ms fresher than the frame it carried. That is the same mistake
+        # LatestFrameBox.age_ms was rewritten to avoid ("frame first, clock
+        # second"), one layer up.
+        if frame.seq != SEQ_NEVER_PUBLISHED:
+            age_ms = max(0.0, (time.monotonic() - frame.captured_at) * 1e3)
+        else:
+            # Nothing published yet: the box measures from when the producer
+            # started, which is the only thing that can be meaningful here.
+            age_ms = self.source.age_ms()
         n_hands = sum(1 for hand in frame.hands if hand.found)
 
         values = channel_values(frame, age_ms, n_hands)
@@ -188,8 +214,13 @@ class Sidecar:
         # it is asserted as such by a test rather than trusted here.
         values[1] = float(frame.seq % SEQ_MODULUS)
 
+        # Encoded OUTSIDE the try: a length mismatch here is a ValueError from
+        # encode_channels, and that guard exists to stop a joint's y landing in
+        # another joint's channel (DESIGN.md 7). Catching it alongside socket
+        # errors would swallow exactly the bug it was written to surface.
+        payload = encode_channels(self.names, values)
         try:
-            self.socket.sendto(encode_channels(self.names, values), (self.host, self.port))
+            self.socket.sendto(payload, (self.host, self.port))
             self.n_sent += 1
         except OSError as exc:
             self.n_send_errors += 1
@@ -205,13 +236,27 @@ class Sidecar:
 
     def run(self) -> int:
         """Send until interrupted. Returns a process exit code."""
-        self.start()
+        # Set BEFORE start(), so a signal arriving during camera warm-up clears
+        # it and the loop below never runs. Setting it after start() threw the
+        # request away.
+        self.running = True
         print("visionhands sidecar -> %s:%d at %.0f Hz | %d channels"
               % (self.host, self.port, 1.0 / self.send_interval_s, len(self.names)),
               flush=True)
         if self.parent_pid:
             print("watching parent pid %d; will exit when it does" % self.parent_pid,
                   flush=True)
+
+        try:
+            # INSIDE the try, so a failure to open the camera still reaches the
+            # finally and still calls stop(). HandSource promises stop() is safe
+            # whether or not start() succeeded; that promise exists precisely so
+            # this path can lean on it, and it previously did not - a raising
+            # start() left the socket open and the source never stopped.
+            self.start()
+        except BaseException:
+            self.stop()
+            raise
 
         next_send = time.monotonic()
         next_status = time.monotonic() + STATUS_INTERVAL_S
@@ -230,7 +275,7 @@ class Sidecar:
                     # `now`, so the send rate does not drift with the time each
                     # iteration takes.
                     next_send += self.send_interval_s
-                    if next_send < now:
+                    if next_send < time.monotonic():
                         # We fell behind by more than an interval - skip rather
                         # than burst-send to catch up, which would only make the
                         # backlog worse.
@@ -247,12 +292,22 @@ class Sidecar:
                           flush=True)
                     frames_at_last_status = new_frames
                     next_status += STATUS_INTERVAL_S
+                    if next_status < now:
+                        # Reset rather than catch up. After a long stall - a
+                        # SIGSTOP, a swap storm - incrementing would emit one
+                        # status line per missed interval in a burst, all reading
+                        # 0.0 fps, making the log unreadable at exactly the
+                        # moment it matters. Measured: 300 spurious lines after a
+                        # 600 s stall.
+                        next_status = now + STATUS_INTERVAL_S
 
                 if now >= next_parent_check:
                     if self._parent_is_gone():
                         print("parent process is gone; shutting down", flush=True)
                         break
                     next_parent_check += PARENT_CHECK_INTERVAL_S
+                    if next_parent_check < now:
+                        next_parent_check = now + PARENT_CHECK_INTERVAL_S
 
                 # Sleep to the next deadline instead of spinning. This releases
                 # the GIL and yields the core; a spin here would starve our own
@@ -281,6 +336,12 @@ def main(argv: list[str] | None = None) -> int:
                              "TouchDesigner launcher so a TD crash cannot leave "
                              "an orphan holding the camera.")
     args = parser.parse_args(argv)
+
+    if args.parent_pid is not None and args.parent_pid <= 0:
+        # os.kill(0, 0) signals the entire PROCESS GROUP and always succeeds, so
+        # a pid of 0 would make the parent look alive forever - a watch that runs
+        # and can never fire. Negative pids are process groups too.
+        parser.error("--parent-pid must be a positive pid, got %d" % args.parent_pid)
 
     sidecar = Sidecar(host=args.host, port=args.port, send_fps=args.fps,
                       camera_name=args.camera, parent_pid=args.parent_pid)

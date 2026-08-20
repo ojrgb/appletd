@@ -1129,3 +1129,76 @@ Also worth noting: `par.pulse()` is ASYNCHRONOUS. Reading `Sidecarpid`
 immediately after pulsing Start returns the old value, because the callback has
 not fired yet. That is not a bug, but it made the first verification look like a
 failure when the process had in fact started correctly.
+
+---
+
+## Review of the sidecar: the same aspect mistake, one level deeper
+2026-08-20
+
+Fifteen findings. The wire format came out clean - cross-checked byte-for-byte
+against `python-osc`'s independent encoder with zero mismatches across 40
+address/value combinations, `channel_values()` aligned with `channel_names()` at
+all 137 positions, the `seq` wrap exact at every boundary, and coordinate
+precision worst-case 0.00004 px at 1280 wide. Sixteen mutations of the encoder
+and contract were all caught. What was not clean was the process and the COMP.
+
+**CRITICAL, and it is the 0.56 bug wearing a different hat.** `ty` divided by the
+SOURCE aspect (`Resh/Resw`) where TouchDesigner uses the RENDER aspect. The
+Camera COMP docs derive an ortho camera's vertical extent from the rendered
+view's resolution (`aperture_y = resy/resx * aperture_x`), so the visible
+half-height is `Orthowidth/2 * Renderh/Renderw`. The source image's resolution is
+a different number that belongs only to the pixel branch.
+
+They are equal in the setup this was built against - a 1280x720 camera rendered
+to a 1280x720 TOP - which is exactly why using one for both looked right. Render
+the same source into a square 1080x1080 and `ty` lands at 56% of where it should;
+into portrait 720x1280, at 32%. Fixed with separate `Renderw`/`Renderh`
+parameters, read from `render1` when it exists. Verified by driving all three
+render shapes and checking `ty` at y=1.0: 0.28125, 0.5, 0.888889, all exact.
+
+Twice now the same class of error: two different aspects collapsed into one
+number, invisible because the test setup made them equal. Worth naming as a
+pattern rather than fixing twice and moving on.
+
+**MAJOR: `start()` threw away a shutdown request.** `running = True` was set
+unconditionally after `source.start()`, so a SIGTERM arriving during the ~1.5 s
+camera warm-up was discarded. With TouchDesigner's launcher that is not
+cosmetic: TD calls `terminate()`, the sidecar ignores it, the 3 s wait expires,
+TD sends SIGKILL - which skips `stop()` and leaves the capture session to process
+death rather than releasing it. Exactly the DESIGN.md 8 hazard the flag-only
+handler was built to avoid, reached through the front door on any fast reload.
+
+**MAJOR: `start()` sat outside `run()`'s try**, so a failed camera open never
+reached `stop()` - socket left open, source never stopped, despite HandSource
+promising `stop()` is safe whether or not `start()` succeeded. The promise exists
+so `run()` can lean on it and `run()` did not.
+
+**MAJOR: `run()` has no tests at all.** Five mutations survive with 105/105
+green, including `if False and self.send_once():` - the sidecar can be made to
+send nothing whatsoever and the suite does not notice. Also survivable: deleting
+the parent-pid check from the loop, removing the teardown `finally`, and dropping
+`socket.close()`. Not yet fixed; it is the next piece of work.
+
+**Fixed alongside:** `age_ms` was read from the box separately from the frame, so
+a publish landing between the two lines shipped frame N's seq with frame N+1's
+age - measured claiming 100 ms fresher than the frame it carried, which is the
+mistake `LatestFrameBox.age_ms` was rewritten to avoid, reintroduced one layer
+up. The encode now happens outside the `OSError` guard so a length mismatch
+surfaces instead of being swallowed. `stop()` closes the socket in a `finally`.
+The status and parent deadlines reset instead of catching up (a 600 s stall
+produced 300 spurious log lines). `--parent-pid 0` is rejected, because
+`os.kill(0, 0)` signals the whole process group and always succeeds, making the
+watch unfireable.
+
+**And the builder was resetting the user's tuning.** `appendInt`/`appendFloat`
+replace a parameter's attributes on rebuild, so assigning `.val` unconditionally
+snapped a tuned `Orthowidth` back to 1.0 - putting a correctly-aligned overlay
+back off-target by re-running the tool meant to align it. Defaults are now set
+always, values only on creation, and prior tuning is restored.
+
+**The reviewer also caught the pgrep regex point independently**: `-f` takes a
+regex, so the `.` in `visionhands.sidecar` matches a slash and would hit
+`nvim .../visionhands/sidecar.py`. Already covered by the two-stage `ps` check
+committed earlier - argv[0] must be a python and `-m` must be adjacent to the
+module name - which rejects an editor. Two people finding the same hazard from
+different directions is a good sign about the check that now guards it.

@@ -28,8 +28,20 @@ it never contaminates the Vision figure.
 MEASURED on the 284-frame fixture clip at 1280x720, replay path, all three 2D
 detectors: median 11.1 ms a frame, a ~90 fps ceiling, hands found in 96% of
 frames and a body in 47% (the clip is framed from the chin down, so half of it
-has too little body to pose). --body-3d is a different animal at ~94 ms a frame
-and will not hold 30 fps - see spike_vision_hands.py for that measurement.
+has too little body to pose).
+
+--body-3d is a different animal, and the key is here mostly to show you why.
+It costs ~90 ms a frame, and on the buffer paths this file uses it appears to
+detect NOTHING. Measured on one frame, same pixels, four containers:
+
+    VNImageRequestHandler(CGImage)         1 observation, bodyHeight 1.80 m
+    VNImageRequestHandler(data)            1 observation
+    VNImageRequestHandler(CVPixelBuffer)   0 observations
+    VNSequenceRequestHandler(CMSampleBuffer, hand-built)  0 observations
+
+The face request returned its observation through every one of those, so this is
+not a broken buffer. UNVERIFIED against a real camera buffer - that needs a run
+with the camera free - but expect '3' to cost 90 ms a frame and draw nothing.
 
 Built against pyobjc 12.2.2 / macOS 26.5.2 on Apple silicon.
 """
@@ -213,8 +225,8 @@ def key_reader(toggles):
                 print("  keys> %s -> %s   [%s]"
                       % (name, "ON" if now else "off", toggles.line()))
                 if name == "body3d" and now:
-                    print("  keys> body3d costs ~94 ms a frame on this machine - "
-                          "the fps below will collapse, which is the point")
+                    print("  keys> body3d costs ~90 ms a frame AND detected nothing "
+                          "on every buffer path measured - see the module docstring")
                 break
         else:
             print("  keys> %r does nothing. %s"
@@ -602,8 +614,8 @@ def main():
     ap.add_argument("--no-body", action="store_true", help="start with 2D body pose off")
     ap.add_argument("--no-face", action="store_true", help="start with face landmarks off")
     ap.add_argument("--body-3d", action="store_true",
-                    help="start with the 3D body request ON (~94 ms a frame - it "
-                         "will dominate whatever else is running)")
+                    help="start with the 3D body request ON (~90 ms a frame, and it "
+                         "detected nothing on any buffer path - see the docstring)")
     ap.add_argument("--face-points", type=int, choices=(65, 76), default=76,
                     help="face landmark constellation")
     ap.add_argument("--no-keys", action="store_true",

@@ -28,7 +28,13 @@ for why the live CMSampleBuffer path is roughly half these numbers):
 Two findings worth having before you build on any of this:
 
   * --body-3d costs ~94 ms A FRAME, twenty times the 2D request, whether or not
-    it finds anybody. It cannot hold 30 fps and is not a realtime option.
+    it finds anybody. It cannot hold 30 fps and is not a realtime option. It
+    also only works on THIS path: fed the same pixels as a CVPixelBuffer or a
+    CMSampleBuffer it returns zero observations, while a CGImage or raw file
+    data returns a full skeleton (measured on one frame; the face request
+    returned its observation through all four containers, so the buffers are
+    fine). Whatever it needs, an image handler over a CGImage provides and a
+    camera buffer does not.
   * The 2D body request wants more of a body than a webcam crop shows: on a
     head-and-shoulders frame it returned NOTHING while the 3D request returned a
     full 17-joint skeleton by extrapolating everything below the chin - joints

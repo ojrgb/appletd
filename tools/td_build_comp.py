@@ -33,10 +33,11 @@ cost nothing, and which one you want depends entirely on what you hook up:
               straight onto a TOP without conversion (DESIGN.md 7). Use it for
               texture lookups and for anything expecting UVs.
     _tx, _ty  world units for an ORTHOGRAPHIC camera, matching its Ortho Width
-              parameter. Feed these straight into a Geometry COMP's instance
-              translate. See the Orthowidth parameter below - getting this
-              convention wrong is the one thing that makes an overlay land
-              almost, but not quite, on the hand.
+              parameter and the RENDER's aspect - not the source image's.
+              Feed these straight into a Geometry COMP's instance translate.
+              See the Orthowidth parameter below - getting this convention wrong
+              is the one thing that makes an overlay land almost, but not quite,
+              on the hand.
     _px, _py  pixels, for hit-testing against a TOP's resolution or for anything
               that thinks in pixels. Still bottom-left, like TD's TOPs.
 
@@ -51,6 +52,19 @@ which is exactly 1/aspect, the conversion between the two conventions.
 
 So the scale is now the camera's own number. Set Orthowidth here to whatever
 cam1's Ortho Width is and the coordinates land exactly, with nothing to tune.
+
+TWO ASPECTS, AND THEY ARE NOT THE SAME ONE. This is the same conflation as the
+0.56 problem, one level deeper, and it was caught in review rather than in use.
+TouchDesigner derives an ortho camera's vertical extent from the RENDER's
+resolution (Camera COMP docs: aperture_y = resy/resx * aperture_x), so the
+visible half-height is Orthowidth/2 * Renderh/Renderw. The SOURCE image's
+resolution is a different number entirely - it decides the pixel branch and
+nothing else.
+
+They happen to be equal in the setup this was built against (a 1280x720 camera
+rendered to a 1280x720 TOP), which is exactly why using one for both looked
+correct. Render the same 1280x720 source into a square 1080x1080 TOP and `ty`
+lands at 56% of where it should; into a portrait 720x1280 TOP, 32%.
 
 NO PYTHON RUNS IN A COOK. Every operator here is a built-in doing built-in work;
 the joint-name mapping is generated once, at build time, into a Rename CHOP's
@@ -270,6 +284,14 @@ def main():
         return
 
     comp = parent.op(COMP_NAME)
+    existed = comp is not None
+    previous = {}
+    if existed:
+        # Remember what the user tuned, so a rebuild restores it rather than
+        # resetting it.
+        for name in ("Resw", "Resh", "Orthowidth", "Renderw", "Renderh"):
+            if hasattr(comp.par, name):
+                previous[name] = getattr(comp.par, name).eval()
     if comp is None:
         comp = parent.create(td.baseCOMP, COMP_NAME)
         print("1. created %s" % comp.path)
@@ -285,11 +307,25 @@ def main():
     page = comp.appendCustomPage("Visionhands")
     par_w = page.appendInt("Resw", label="Source Width")[0]
     par_h = page.appendInt("Resh", label="Source Height")[0]
-    par_w.default = par_w.val = DEFAULT_WIDTH
-    par_h.default = par_h.val = DEFAULT_HEIGHT
+    # `.default` always, `.val` only when the parameter is being created.
+    # TD's appendInt/appendFloat replace a parameter's attributes on rebuild, so
+    # assigning .val unconditionally silently snapped a tuned Orthowidth back to
+    # 1.0 and put a correctly-aligned overlay back off-target - the exact failure
+    # this COMP exists to prevent, caused by re-running its own builder.
+    par_w.default = DEFAULT_WIDTH
+    par_h.default = DEFAULT_HEIGHT
+    if not existed:
+        par_w.val, par_h.val = DEFAULT_WIDTH, DEFAULT_HEIGHT
     # Match your Camera COMP's Ortho Width. TD's default is 1.0.
     par_ortho = page.appendFloat("Orthowidth", label="Camera Ortho Width")[0]
-    par_ortho.default = par_ortho.val = DEFAULT_ORTHO_WIDTH
+    par_ortho.default = DEFAULT_ORTHO_WIDTH
+    if not existed:
+        par_ortho.val = DEFAULT_ORTHO_WIDTH
+
+    par_rw = page.appendInt("Renderw", label="Render Width")[0]
+    par_rh = page.appendInt("Renderh", label="Render Height")[0]
+    par_rw.default = DEFAULT_WIDTH
+    par_rh.default = DEFAULT_HEIGHT
 
     lifecycle = comp.appendCustomPage("Sidecar")
     lifecycle.appendPulse("Startsidecar", label="Start Sidecar")
@@ -297,8 +333,30 @@ def main():
     lifecycle.appendPulse("Sidecarstatus", label="Print Status")
     par_pid = lifecycle.appendInt("Sidecarpid", label="Sidecar PID")[0]
     par_pid.readOnly = True
-    print("2. parameters: Resw=%d Resh=%d Orthowidth=%.3f, plus a Sidecar page"
-          % (par_w.eval(), par_h.eval(), par_ortho.eval()))
+    # Read the render's real resolution and the camera's real ortho width when
+    # they are there to read, so the common case needs no tuning at all.
+    render = parent.op("render1")
+    if render is not None:
+        par_rw.val = int(render.par.resolutionw.eval())
+        par_rh.val = int(render.par.resolutionh.eval())
+        print("   (took render %dx%d from %s)" % (par_rw.eval(), par_rh.eval(), render.path))
+    elif not existed:
+        par_rw.val, par_rh.val = DEFAULT_WIDTH, DEFAULT_HEIGHT
+
+    camera = parent.op("cam1")
+    if camera is not None and camera.par.projection.eval() == "ortho":
+        par_ortho.val = float(camera.par.orthowidth.eval())
+        print("   (took Orthowidth %.3f from %s)" % (par_ortho.eval(), camera.path))
+
+    # Anything the user had tuned wins over the defaults above, except where we
+    # just read a better answer from the actual camera and render.
+    for name, value in previous.items():
+        if name not in ("Orthowidth", "Renderw", "Renderh") or (
+                render is None and camera is None):
+            getattr(comp.par, name).val = value
+
+    print("2. parameters: source %dx%d, render %dx%d, Orthowidth=%.3f, plus a Sidecar page"
+          % (par_w.eval(), par_h.eval(), par_rw.eval(), par_rh.eval(), par_ortho.eval()))
 
     def make(kind, name, x, y):
         node = comp.create(kind, name)
@@ -337,8 +395,8 @@ def main():
     tx = branch("tx", "*_x", "tx", -0.5,
                 "me.parent().par.Orthowidth", -150)
     ty = branch("ty", "*_y", "ty", -0.5,
-                "me.parent().par.Orthowidth * me.parent().par.Resh "
-                "/ me.parent().par.Resw", -300)
+                "me.parent().par.Orthowidth * me.parent().par.Renderh "
+                "/ me.parent().par.Renderw", -300)
     # Pixels.
     px = branch("px", "*_x", "px", 0.0, "me.parent().par.Resw", -450)
     py = branch("py", "*_y", "py", 0.0, "me.parent().par.Resh", -600)
