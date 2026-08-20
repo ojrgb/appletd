@@ -369,3 +369,99 @@ proved one of my own noqa markers unnecessary - the `startRunning()` handler
 re-raises as `EngineError`, so it was never a blind except. The probe gets a
 documented per-file exemption, since surviving a failing stage to report which
 one failed is that file's design rather than an exception to it.
+
+---
+
+## Review of M2b — one critical defect, and a test suite that was not testing
+2026-08-20
+
+Twelve findings. The two that matter were both invisible to me and both
+confirmed by the reviewer running code rather than reading it.
+
+**CRITICAL: `time.sleep()` is not a barrier, and the consequence was a hand
+silently vanishing.** `stop()` waited `CALLBACK_DRAIN_S` and declared the queue
+drained. With a consumer slower than 200 ms, `stop()` returned while a delegate
+callback was still executing — `_session` already `None`, `running` already
+`False`. A following `start()`, which is exactly the TD project-reload sequence
+`DESIGN.md` 8 is about, then created a second dispatch queue whose callbacks
+entered the SAME `HandDetector`. The reviewer measured two threads inside it
+concurrently, and then demonstrated the payload: a frame that detects a hand
+single-threaded published `found=False` with all-zero joints, because the other
+thread's request overwrote `self._request` between `performRequests` and
+`results()`. No exception, no `n_dropped`, no error recorded. A hand that was in
+shot simply disappeared.
+
+`HandDetector`'s own docstring warned that sharing it across queues corrupts
+Vision's state; the engine's own stop/start path was doing it. Fixed with
+`dispatch_sync(self._queue, no-op)` after unregistering the delegate — the queue
+is serial, so that is a true barrier rather than a guess, and it needs no
+constant. Verified against the reviewer's own scenario: a callback in flight
+when `stop()` returned is now False, and peak concurrency inside one detector
+across three stop/start cycles is 1 (two distinct OS threads seen over time,
+never overlapping). `CALLBACK_DRAIN_S` is kept as a cheap cover for the window
+before the barrier, and is no longer load-bearing.
+
+**MAJOR: the engine was immortal, so `__del__` could never fire.**
+`AVCaptureVideoDataOutput` does not retain its delegate (measured: retainCount
+unchanged), so the engine had to hold it — and the delegate held the engine
+back, closing a cycle that the garbage collector cannot break, because pyobjc's
+Objective-C subclass instances do not expose their Python attributes to it.
+Measured: `gc.collect()` collected 0 and left the engine alive. So a caller who
+forgot `stop()` leaked the engine, the session and the camera **permanently**,
+which is worse than the "two sessions fighting" `DESIGN.md` 8 predicted, since
+the old one could never be reclaimed. The `__del__` safety net was unreachable
+in the only state it existed for. Fixed by making the delegate hold a weakref;
+verified the engine is now collected when its owner drops it without stopping.
+
+**MAJOR: `start()` reset nothing.** `delivered_px`, `first_frame` and `errors`
+all survived a stop/start cycle, so: the delivered-versus-requested assertion —
+`DESIGN.md` 3's trap, the one that silently lied twice in the spike — ran once
+per ENGINE rather than once per session; `first_frame` gave an immediate false
+liveness signal after a restart, on the very mechanism this class advertises as
+the way to check liveness without polling; and a fault recurring in the new
+session was suppressed as a duplicate of the old one. All three now reset in
+`start()`, verified. `_seq` deliberately does not — a consumer should see a
+restart as a gap, not as time running backwards.
+
+**MAJOR: five mutants survived all 39 tests.** A y-flip, an x/y transpose, a
+joint-index shift, a dropped `float()`, and dimensions read from a constant
+instead of the buffer. Four of those are silent corruptions of exactly the kind
+`DESIGN.md` 7 calls the most dangerous: the landmarks still track a hand, they
+are just wrong. The replay test even claimed the y-flip was covered by
+`test_coords.py`, which was false — that file tests `coords.py`'s functions, and
+the engine never calls them. Six new tests added; four of the five mutants now
+die (2, 3, 2 and 1 failures respectively).
+
+The fifth, dropping `float()`, still survives — **and that is correct.** pyobjc
+already returns exact `float` and `int` for these accessors (verified:
+`type(point.x()) is float`), so the mutant is semantically equivalent on this
+version. The `float()` calls are defensive against a future pyobjc that wraps
+them, and the new test asserts the invariant that actually matters —
+`type(v) is float`, not `isinstance` — which today holds either way. Recorded
+rather than papered over with a test contrived to kill a harmless mutant.
+
+**Fixed, smaller.** A Vision failure raised past the drop counter, so five
+consecutive failed frames reported `n_dropped=0` while nothing was published —
+now caught by type and counted. `verify_joint_table` checked our rows against
+the framework but never the reverse, so a 22nd joint would have been silently
+dropped; the added set comparison found a phantom on its first run, because
+Vision also exports the bare prefix as a type alias. `max_hands=3` was accepted,
+paid for, and silently truncated — now rejected, since MAX_HANDS is the width of
+the channel contract and not a preference. `pixel_buffer_from_bgra` accepted an
+HxWx3 array that Vision then read out of bounds on, returning `found=True` for
+memory it did not own — now validated for shape, dtype and contiguity. The
+boundary detector missed relative imports entirely and reported
+`from visionhands.td import x` as `visionhands`; both fixed and both pinned by
+its own self-test.
+
+**Two comments were confidently wrong, which is worse than missing.** The
+lifetime warning on `pixel_buffer_from_bgra` said callers must keep the array
+alive or risk use-after-free; measured, pyobjc raises the array's refcount and
+it outlives the `del`. True of the C function, false of this binding — and the
+real hazard is the shape validation that was missing. And `video_settings`
+claimed native 420v avoided a conversion: Vision converts internally either way,
+and 420v measured **3.94–4.16 ms against BGRA's 3.26–3.39 ms**, about 20%
+*slower*. 420v is kept, because it avoids a host-side conversion of a buffer
+nothing reads and 0.6 ms is nothing against 33 ms — but the reason is now the
+measured one, and requesting BGRA is recorded as a real option if latency ever
+matters.

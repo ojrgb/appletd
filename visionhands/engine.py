@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from typing import Any
 
@@ -43,7 +44,11 @@ import objc
 import Quartz
 import Vision
 from Foundation import NSObject
-from libdispatch import dispatch_queue_attr_make_with_qos_class, dispatch_queue_create
+from libdispatch import (
+    dispatch_queue_attr_make_with_qos_class,
+    dispatch_queue_create,
+    dispatch_sync,
+)
 
 from visionhands.types import (
     BLANK_HAND,
@@ -83,9 +88,16 @@ DEFAULT_CAMERA_NAME = "MacBook"
 # cores, which was a large part of the run-to-run variance in the spike.
 QOS_CLASS_USER_INITIATED = 25
 
-# Seconds to let in-flight delegate callbacks finish after stopRunning() before
-# anything they touch is released. Carried over from the spike; a drain, not a
-# deadline - a callback needing longer than this means a worse problem exists.
+# Belt, worn with the braces of a dispatch_sync barrier (see _drain_capture_queue).
+#
+# This value used to be the ONLY thing standing between stop() and a callback
+# still running. The M2b review demonstrated that it is not sufficient: with a
+# consumer slower than this, stop() returned while a delegate callback was still
+# executing, and a following start() then put two dispatch queues into the same
+# HandDetector - which was measured publishing found=False for a hand that was
+# in shot, with no error and no dropped-frame count. A guessed duration cannot
+# be a barrier. dispatch_sync is one; this now only covers the window between
+# stopRunning() and the barrier.
 CALLBACK_DRAIN_S = 0.2
 
 # AVAuthorizationStatus.authorized. The TCC prompt attaches to the HOST app
@@ -116,10 +128,12 @@ ObjCObject = Any
 class EngineError(RuntimeError):
     """Raised on the CALLING thread, for faults the caller can act on.
 
-    Never raised from the capture thread - an exception crossing an Objective-C
-    callback boundary unwinds into native frames, which is its own crash
-    (STANDARDS.md 2). Faults detected on the capture thread are recorded in
-    `HandEngine.errors` instead.
+    Raised on the capture thread too, by HandDetector - but never allowed to
+    ESCAPE it. An exception crossing an Objective-C callback boundary unwinds
+    into native frames, which is its own crash (STANDARDS.md 2), so
+    `_on_sample_buffer` catches this type explicitly and counts it, and the
+    delegate's guard catches anything else. What reaches the caller's thread is
+    a recorded string in `HandEngine.errors` and a rising `n_dropped`.
     """
 
 
@@ -156,6 +170,25 @@ def verify_joint_table() -> None:
     if group is None or str(group) != JOINTS_GROUP_ALL_CODE:
         problems.append("joints group All: table says %s, framework says %s"
                         % (JOINTS_GROUP_ALL_CODE, group))
+
+    # The other direction: does Vision know about a joint WE do not? Checking
+    # only our rows against the framework would silently ignore a 22nd joint -
+    # `hand_from_observation` skips unknown codes, so the extra landmark would
+    # simply never reach TD and nothing would say why. Vision exposes exactly 21
+    # of these constants today (MEASURED), so the comparison costs one dir().
+    # `len(name) > len(prefix)` is not defensive padding: Vision also exports
+    # the bare prefix `VNHumanHandPoseObservationJointName` as a type alias, and
+    # without this the check reports a phantom joint whose suffix is the empty
+    # string. Found by this check failing on its first run.
+    framework_suffixes = {
+        name[len(JOINT_CONSTANT_PREFIX):] for name in dir(Vision)
+        if name.startswith(JOINT_CONSTANT_PREFIX) and len(name) > len(JOINT_CONSTANT_PREFIX)
+    }
+    unknown = framework_suffixes - {joint.suffix for joint in JOINTS}
+    if unknown:
+        problems.append(
+            "this Vision has joints our table does not: %s. They would be "
+            "silently dropped rather than published." % sorted(unknown))
 
     if problems:
         raise EngineError(
@@ -267,12 +300,24 @@ def frame_from_observations(observations: list[ObjCObject], seq: int,
               why this is a labelled gap and not a quiet approximation.
     """
     hands: list[Hand] = []
+    n_unreadable = 0
     for observation in observations[:MAX_HANDS]:
         hand = hand_from_observation(observation)
-        if hand is not None:
-            hands.append(hand)
+        if hand is None:
+            n_unreadable += 1
+            continue
+        hands.append(hand)
     while len(hands) < MAX_HANDS:
         hands.append(BLANK_HAND)        # shared, frozen: no allocation
+
+    if n_unreadable:
+        # An observation whose points could not be read is a hand that was
+        # detected and then lost between Vision and the channel list. Rare
+        # enough that it has never been seen, silent enough to be worth
+        # surfacing if it ever happens (STANDARDS.md 2: never silently dropped).
+        raise EngineError(
+            "%d observation(s) had unreadable joint points and were dropped"
+            % n_unreadable)
 
     return LandmarkFrame(
         seq=seq,
@@ -299,6 +344,15 @@ class HandDetector:
     """
 
     def __init__(self, max_hands: int = MAX_HANDS) -> None:
+        # A knob that cannot be honoured is worse than no knob. MAX_HANDS is not
+        # a preference, it is the width of the published channel list
+        # (DESIGN.md 6.2) - asking for three hands would pay Vision's cost for a
+        # third and then drop it with nowhere to put it, which the M2b review
+        # found happening silently.
+        if not 1 <= max_hands <= MAX_HANDS:
+            raise EngineError(
+                "max_hands must be between 1 and MAX_HANDS (%d); the channel "
+                "contract has no room for more" % MAX_HANDS)
         verify_joint_table()            # once, before any frame is trusted
         self._sequence = Vision.VNSequenceRequestHandler.alloc().init()
         self._request = Vision.VNDetectHumanHandPoseRequest.alloc().init()
@@ -367,14 +421,30 @@ def pixel_buffer_from_bgra(bgra: Any) -> ObjCObject:
 
     Used by the replay harness and its tests, never by the live path.
 
-    TRAPS, both of which corrupt silently rather than failing:
-      * CVPixelBufferCreateWithBytes does NOT copy. The caller MUST keep a
-        reference to `bgra` alive for as long as the returned buffer is used.
-        The idiom is to hold both in the same scope; a helper that returned only
-        the buffer would be a use-after-free generator.
-      * The row stride must be the array's real stride, not width*4. Pass
-        `bgra.strides[0]` and never compute it.
+    LIFETIME - and this correction matters, because the obvious worry is the
+    wrong one. The C function does not copy, so in C the caller must outlive the
+    buffer. Through pyobjc it is safe: MEASURED in the M2b review, wrapping an
+    array raises its refcount and the array survives `del` plus a gc pass,
+    dying only when the pixel buffer is released. The cost is the other way
+    round - each live buffer PINS its array, so wrapping a whole clip at once
+    holds every frame in memory (~1 GB for this fixture).
+
+    The real trap is shape. The row stride must be the array's own stride, never
+    width*4, and the array must genuinely be 4-channel: an HxWx3 array is
+    accepted by the C call and Vision then reads past the end of the
+    allocation - measured returning found=True on memory it did not own. Hence
+    the validation below, which is cheap and once per frame.
     """
+    if getattr(bgra, "ndim", None) != 3 or bgra.shape[2] != 4:
+        raise EngineError(
+            "expected an HxWx4 BGRA array, got shape %r - a 3-channel array is "
+            "accepted by CVPixelBufferCreateWithBytes and read out of bounds"
+            % (getattr(bgra, "shape", None),))
+    if str(getattr(bgra, "dtype", "")) != "uint8":
+        raise EngineError("expected uint8, got %s" % getattr(bgra, "dtype", "?"))
+    if not bgra.flags["C_CONTIGUOUS"]:
+        raise EngineError("array must be C-contiguous; use np.ascontiguousarray")
+
     height_px, width_px = bgra.shape[:2]
     rc, pixel_buffer = Quartz.CVPixelBufferCreateWithBytes(
         None, width_px, height_px, Quartz.kCVPixelFormatType_32BGRA,
@@ -429,10 +499,18 @@ def video_settings(width_px: int, height_px: int) -> dict[Any, Any]:
            NSInvalidArgumentException here. Two spike runs silently produced
            1080p while the log claimed 720p, which is why the delegate asserts
            the delivered size instead of trusting this (DESIGN.md 3).
-    Pixel format: deliberately absent. Leaving it unset keeps the camera in its
-           native 420v, which Vision consumes directly - specifying BGRA would
-           buy a full-frame conversion per frame that nothing in the engine
-           reads. Only the recorder, which has to hand pixels to cv2, pays that.
+    Pixel format: deliberately absent, which leaves the camera in its native
+           420v. MEASURED in the M2b review: Vision does consume 420v directly
+           via performRequests_onCMSampleBuffer_error_, with detection identical
+           to BGRA on the same clip (273/284 both).
+           What is NOT true - and the first version of this comment claimed it -
+           is that 420v is cheaper. Vision converts internally, and 420v
+           measured 3.94-4.16 ms against BGRA's 3.26-3.39 ms, about 20% SLOWER.
+           420v is kept because it avoids a host-side conversion of a buffer
+           nothing in the engine reads, and 0.6 ms sits comfortably inside a
+           33 ms budget - but if latency ever matters, requesting BGRA here is a
+           measured improvement in Vision's half, and the camera-side cost of
+           that conversion is still unmeasured.
     """
     return {
         Quartz.kCVPixelBufferWidthKey: width_px,
@@ -463,20 +541,47 @@ class _CaptureDelegate(NSObject):
         self = objc.super(_CaptureDelegate, self).init()
         if self is None:
             return None
-        # A plain reference, not weak: the engine outlives its delegate by
-        # construction (stop() tears the delegate down), and a weakref here
-        # would add a failure mode - a dead engine mid-callback - to solve a
-        # cycle that stop() already breaks.
-        self._engine = engine
+        # WEAK, and this is load-bearing rather than tidy.
+        #
+        # The engine holds the delegate strongly (self._delegate), because
+        # AVCaptureVideoDataOutput does NOT retain its delegate - measured in
+        # the M2b review, retainCount unchanged across
+        # setSampleBufferDelegate_queue_ - so if we did not hold it, nothing
+        # would. A strong reference back to the engine therefore closes a cycle,
+        # and that cycle is NOT collectable: pyobjc's Objective-C subclass
+        # instances do not expose their Python attributes to the garbage
+        # collector, so gc.collect() sees nothing to break. The measured
+        # consequence was that any started engine became immortal, __del__ could
+        # never fire, and forgetting stop() leaked the engine, the session and
+        # the camera permanently - strictly worse than the "two sessions
+        # fighting over the camera" that DESIGN.md 8 anticipated, because the
+        # old one could never be reclaimed.
+        #
+        # The failure mode a weakref introduces - the engine dying mid-callback -
+        # is handled at the top of the callback, and is anyway the state we want
+        # to detect rather than one we want to prevent by keeping a dead engine
+        # alive.
+        self._engine_ref = weakref.ref(engine)
         return self
 
     def captureOutput_didOutputSampleBuffer_fromConnection_(
             self, output: ObjCObject, sample_buffer: ObjCObject,
             connection: ObjCObject) -> None:
-        engine = self._engine
+        engine = self._engine_ref()
+        # A dead engine means its owner dropped it without calling stop(). There
+        # is nothing safe to do with this buffer and nowhere to report it, so
+        # return quietly. The barrier in stop() is what makes this rare rather
+        # than routine.
+        if engine is None:
+            return
         # INVARIANT: once stopping is set, touch nothing native. A Vision call
         # landing on a torn-down session is a process kill, and no `except`
         # catches it (DESIGN.md 8).
+        #
+        # NOTE precisely what this is: a filter on callbacks that have not
+        # started yet. It is NOT a barrier on one already running - the M2b
+        # review confirmed a callback still executing after stop() returned.
+        # The barrier is dispatch_sync, in _drain_capture_queue.
         if engine._stopping:
             return
         try:
@@ -608,8 +713,20 @@ class HandEngine:
                        self._requested_px[0], self._requested_px[1]))
 
         self._seq += 1
-        frame = self._detector.detect_sample_buffer(
-            sample_buffer, self._seq, captured_at)
+        try:
+            frame = self._detector.detect_sample_buffer(
+                sample_buffer, self._seq, captured_at)
+        except EngineError as exc:
+            # Caught here, not left to the delegate's blanket guard, so that a
+            # failing inference COUNTS. The M2b review found five consecutive
+            # failed frames reporting n_dropped=0 while nothing was published:
+            # the error was recorded, but the drop counter a CHOP health channel
+            # would publish read perfectly clean. Narrow except on purpose - an
+            # unexpected exception type is still a bug and still goes to the
+            # delegate's guard.
+            self.n_dropped += 1
+            self._record_error(str(exc))
+            return
         if frame is None:
             self.n_dropped += 1
             return
@@ -651,6 +768,33 @@ class HandEngine:
         """
         if self._running:
             return
+
+        # Per-SESSION state, reset here rather than only in __init__.
+        #
+        # The M2b review found all three of these surviving a stop()/start()
+        # cycle, which is exactly the TD project-reload sequence DESIGN.md 8
+        # cares about:
+        #   * delivered_px is only computed when it is None, so the
+        #     delivered-versus-requested assertion - the trap that silently lied
+        #     twice in the spike - ran once per ENGINE rather than once per
+        #     session. A camera that came back at 1080p after a reload would
+        #     never have been flagged.
+        #   * first_frame stayed set, so a caller waiting on it after a restart
+        #     got an immediate false liveness signal, on the very mechanism this
+        #     class offers as the way to confirm liveness without polling.
+        #   * errors persisted and are deduplicated by message, so a fault
+        #     recurring in the new session was suppressed as a duplicate of the
+        #     old one.
+        #
+        # _seq is deliberately NOT reset: DESIGN.md 6.1 wants it monotonic, and a
+        # consumer should see a restart as a gap in the sequence rather than as
+        # time running backwards.
+        self.delivered_px = None
+        self.first_frame.clear()
+        self.errors.clear()
+        self.n_delivered = 0
+        self.n_published = 0
+        self.n_dropped = 0
 
         status = AVF.AVCaptureDevice.authorizationStatusForMediaType_(AVF.AVMediaTypeVideo)
         if status != AUTH_STATUS_AUTHORIZED:
@@ -706,10 +850,18 @@ class HandEngine:
         try:
             session.startRunning()
         except Exception as exc:
-            # Inside a try so a failure to start cannot leave the engine
-            # believing it is stopped while holding a live session - the same
-            # ordering bug the M0 review found in the tools.
-            self._teardown()
+            # Full shutdown, not a bare _teardown(). The M2b review found this
+            # path calling _teardown() directly, which skips flagging and skips
+            # stopRunning() - on a session that may already have begun
+            # delivering - while _teardown's own contract says it assumes a
+            # stopped session. Every guarantee stop() provides has to hold here
+            # too, because this is precisely when the state is least known.
+            self._shutdown()
+            # Drop the local references before raising. The EngineError chains
+            # this frame, and TouchDesigner keeps sys.last_traceback, so leaving
+            # them bound would keep a dead session and its queue alive for as
+            # long as the caller holds the exception.
+            del session, output, delegate, queue
             raise EngineError("startRunning failed: %r" % (exc,)) from exc
 
         self._running = True
@@ -729,25 +881,63 @@ class HandEngine:
         """
         if not self._running and self._session is None:
             return
+        self._shutdown()
+        self._running = False
+
+    def _shutdown(self) -> None:
+        """Flag, stop, drain, unregister, release. The whole sequence, one place.
+
+        Called by stop() and by start()'s failure path, because both need every
+        step and neither can be trusted to remember them separately.
+        """
         self._stopping = True
         if self._session is not None:
             self._session.stopRunning()
+        # Covers the gap between stopRunning() returning and the barrier below:
+        # cheap, and it means the barrier usually has nothing left to wait for.
         time.sleep(CALLBACK_DRAIN_S)        # blocking, and deliberately not a poll
+        self._drain_capture_queue()
         self._teardown()
-        self._running = False
 
-    def _teardown(self) -> None:
-        """Release native objects. Assumes the session is already stopped.
+    def _drain_capture_queue(self) -> None:
+        """Block until any in-flight delegate callback has finished. A REAL barrier.
 
-        The explicit setSampleBufferDelegate_queue_(None, None) is the part the
-        M0 review flagged as owed here: the probe and the recorder both rely on
-        the session's own release ordering, which is fine for a hand-run script
-        and not fine for something that starts and stops repeatedly across TD
-        project reloads. Unregistering first means the output cannot be holding
-        our delegate when we drop our last reference to it.
+        Why this exists, and why the sleep above it is not enough. The capture
+        queue is serial, so a no-op submitted with dispatch_sync cannot begin
+        until everything already on the queue has finished - which is precisely
+        the guarantee "wait 200 ms and hope" does not give. The M2b review
+        confirmed the old code returning from stop() with a callback still
+        running, and confirmed the consequence: a following start() built a
+        second queue whose callbacks entered the SAME HandDetector, and two
+        threads in one detector was measured publishing found=False for a hand
+        that was in shot - no exception, no dropped-frame count, just a hand
+        that quietly vanished.
+
+        Thread: called from the stopping thread, never from the capture queue.
+                Calling dispatch_sync ON the queue you are running on is an
+                instant deadlock; this is only ever reached from stop() or from
+                start()'s failure path, both on the caller's thread.
+        Cost: microseconds when the queue is idle, up to one frame's inference
+              (~3.4 ms) when it is not.
         """
+        if self._queue is None:
+            return
+        # Unregister FIRST, so no new callback can be scheduled behind the one
+        # we are about to wait for. AVCaptureVideoDataOutput does not retain its
+        # delegate, so this also has to happen before we drop our reference to
+        # it, or the output would be left pointing at a freed object.
         if self._output is not None:
             self._output.setSampleBufferDelegate_queue_(None, None)
+        dispatch_sync(self._queue, lambda: None)
+
+    def _teardown(self) -> None:
+        """Drop references to the native objects.
+
+        Contract: the session must already be stopped, the delegate already
+                  unregistered, and the queue already drained - all of which
+                  _shutdown() guarantees by calling this last. Called on its own,
+                  this is just a way to lose track of a live capture session.
+        """
         self._session = None
         self._output = None
         self._delegate = None

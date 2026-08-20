@@ -36,6 +36,7 @@ from visionhands.types import (
     CHIRALITY_UNKNOWN,
     MAX_HANDS,
     N_JOINTS,
+    Hand,
 )
 
 # What the `replay` fixture hands each test. Not a TypedDict: two of the values
@@ -167,9 +168,11 @@ def test_coordinates_stay_normalised_and_unflipped(replay: Replay) -> None:
     part way out of frame, and that overshoot is real information, so the bound
     is generous rather than exact (coords.py).
 
-    The unflipped part is checked by wrist-versus-fingertip ordering in
-    test_coords.py; here the point is only that nobody has scaled these into
-    pixels or clamped them on the way through.
+    The DIRECTION of y is checked by test_y_is_not_flipped_anywhere_in_the_engine
+    below. An earlier version of this docstring claimed test_coords.py covered
+    it, which was false: that file tests coords.py's own functions, and the
+    engine never calls them. The M2b review found a y-flip mutant surviving the
+    entire suite because of exactly that gap.
     """
     for frame in replay["frames"]:
         for hand in frame.hands:
@@ -239,3 +242,171 @@ def test_chirality_is_one_of_the_three_constants(replay: Replay) -> None:
     seen = {hand.chirality for f in replay["frames"] for hand in f.hands if hand.found}
     assert seen <= {CHIRALITY_LEFT, CHIRALITY_UNKNOWN, CHIRALITY_RIGHT}
     assert seen, "no hands at all in the fixture"
+
+
+# ---------------------------------------------------------------------------
+# The invariants the module docstring calls load-bearing.
+#
+# Added after the M2b review mutation-tested the engine and found FIVE mutants
+# surviving all 39 tests: a y-flip, an x/y swap, a joint-index shift, a dropped
+# float() conversion, and dimensions read from a constant instead of the buffer.
+# Every one of those is a silent corruption - the landmarks still track a hand,
+# they are just wrong - which is the exact failure class DESIGN.md 7 says is
+# most dangerous. Tests that cannot fail are worse than no tests, because they
+# are cited as evidence.
+# ---------------------------------------------------------------------------
+def _confident_hands(replay: Replay, floor: float = 0.4) -> list[Hand]:
+    """Hands we can reason about geometrically.
+
+    A hand at conf_median 0.0 has coordinates that mean nothing - Vision returns
+    positions for joints it cannot see (DESIGN.md 2.6) - so a geometric
+    assertion over every "found" hand would be asserting on noise. 0.4 keeps
+    208 of the fixture's 336 hands.
+    """
+    return [hand for frame in replay["frames"] for hand in frame.hands
+            if hand.found and hand.conf_median > floor]
+
+
+def test_y_is_not_flipped_anywhere_in_the_engine(replay: Replay) -> None:
+    """The single most dangerous silent defect in this system (DESIGN.md 7).
+
+    In the fixture the hand is held up, fingers above the wrist. Vision's origin
+    is BOTTOM-left with y increasing upwards, and nothing in the pipeline may
+    flip it, so the middle fingertip must have a LARGER y than the wrist. A
+    `1 - y` anywhere between the observation and the frame inverts this while
+    leaving every other property intact.
+
+    MEASURED: true for 208 of 208 hands above the confidence floor.
+    """
+    hands = _confident_hands(replay)
+    assert len(hands) > 100, "too few confident hands to assert on: %d" % len(hands)
+    wrist_below = sum(1 for h in hands if h.joints[12].y > h.joints[0].y)
+    assert wrist_below == len(hands), (
+        "middle fingertip is below the wrist in %d of %d hands - y is flipped"
+        % (len(hands) - wrist_below, len(hands)))
+
+
+def test_x_and_y_are_not_transposed(replay: Replay) -> None:
+    """Swapping x and y survives every shape and range test, and is visible only
+    as a hand rotated 90 degrees.
+
+    Discriminated by aspect: the clip is 1280x720 and the hand moves mostly
+    horizontally, covering 0.930 of x against 0.704 of y (DESIGN.md 2.6). A
+    transpose exchanges those spans.
+    """
+    xs = [h.joints[0].x for h in _confident_hands(replay)]
+    ys = [h.joints[0].y for h in _confident_hands(replay)]
+    assert max(xs) - min(xs) > max(ys) - min(ys), (
+        "wrist spans more y than x - are the axes transposed?")
+
+
+def test_joint_zero_really_is_the_wrist(replay: Replay) -> None:
+    """Pins the joint INDEX mapping against Vision itself, independently.
+
+    An off-by-one in JOINT_INDEX_BY_CODE shifts every landmark by one joint:
+    h0_lm00 stops being the wrist, every downstream reference in a TD project
+    silently addresses its neighbour, and nothing raises. The mutant survived
+    all 39 tests.
+
+    This asks Vision for the wrist point BY NAME, through a different selector
+    from the one the engine uses, and requires the engine's joint 0 to match. It
+    is the only test here that re-derives the mapping rather than trusting it.
+    """
+    Vision = pytest.importorskip("Vision")
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    from visionhands.engine import HandDetector, pixel_buffer_from_bgra
+
+    capture = cv2.VideoCapture(str(FIXTURE))
+    checked = 0
+    detector = HandDetector()
+    frame_index = 0
+    while checked < 5:
+        ok, bgr = capture.read()
+        if not ok:
+            break
+        frame_index += 1
+        bgra = np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2BGRA))
+        frame = detector.detect_pixel_buffer(
+            pixel_buffer_from_bgra(bgra), seq=frame_index, captured_at=0.0)
+        hand = frame.hands[0]
+        if not hand.found or hand.conf_median < 0.4:
+            continue
+        # A different selector: one named point, rather than the whole group.
+        observation = detector._request.results()[0]
+        point, err = observation.recognizedPointForJointName_error_(
+            Vision.VNHumanHandPoseObservationJointNameWrist, None)   # out-param
+        assert err is None and point is not None
+        assert abs(float(point.x()) - hand.joints[0].x) < 1e-6, "joint 0 is not the wrist"
+        assert abs(float(point.y()) - hand.joints[0].y) < 1e-6, "joint 0 is not the wrist"
+        checked += 1
+    capture.release()
+    assert checked == 5, "only cross-checked %d frames" % checked
+
+
+def test_no_pyobjc_object_reaches_the_frame(replay: Replay) -> None:
+    """The invariant the whole threading design rests on (DESIGN.md 4.2).
+
+    A pyobjc object referenced from a LandmarkFrame would be released by
+    whichever thread happened to drop the last reference. `type(v) is float` and
+    not isinstance(): a pyobjc float subclass would pass isinstance and is
+    exactly what this is looking for.
+    """
+    for frame in replay["frames"][:50]:
+        assert type(frame.seq) is int
+        assert type(frame.captured_at) is float
+        assert type(frame.width) is int and type(frame.height) is int
+        for hand in frame.hands:
+            assert type(hand.chirality) is int
+            assert type(hand.confidence) is float
+            assert type(hand.conf_median) is float
+            assert type(hand.found) is bool
+            for joint in hand.joints:
+                assert type(joint.x) is float
+                assert type(joint.y) is float
+                assert type(joint.conf) is float
+
+
+def test_dimensions_are_read_from_the_buffer(replay: Replay) -> None:
+    """Replaces a test that could not fail.
+
+    The old version asserted 1280x720 against a 1280x720 fixture while
+    DEFAULT_WIDTH_PX/HEIGHT_PX are also 1280x720, so hardcoding the constants
+    passed it. Feeding a deliberately different size is the only way to tell the
+    two apart - and it matters because DESIGN.md 3 requires delivered dimensions
+    to be observed rather than assumed.
+    """
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    from visionhands.engine import HandDetector, pixel_buffer_from_bgra
+
+    capture = cv2.VideoCapture(str(FIXTURE))
+    ok, bgr = capture.read()
+    capture.release()
+    assert ok
+
+    odd_size_px = (640, 360)          # not the fixture's size, not the default
+    resized = cv2.resize(bgr, odd_size_px)
+    bgra = np.ascontiguousarray(cv2.cvtColor(resized, cv2.COLOR_BGR2BGRA))
+    frame = HandDetector().detect_pixel_buffer(
+        pixel_buffer_from_bgra(bgra), seq=1, captured_at=0.0)
+    assert (frame.width, frame.height) == odd_size_px
+
+
+def test_pixel_buffer_rejects_the_shape_that_reads_out_of_bounds() -> None:
+    """A 3-channel array is accepted by the C call and read past its allocation.
+
+    The M2b review measured Vision returning found=True on memory it did not
+    own. Validation is cheap and happens once per frame; the alternative is a
+    corruption that depends on what the allocator happened to leave nearby.
+    """
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("Vision")
+    from visionhands.engine import EngineError, pixel_buffer_from_bgra
+
+    with pytest.raises(EngineError, match="BGRA"):
+        pixel_buffer_from_bgra(np.zeros((8, 8, 3), dtype=np.uint8))
+    with pytest.raises(EngineError, match="uint8"):
+        pixel_buffer_from_bgra(np.zeros((8, 8, 4), dtype=np.float32))
+    with pytest.raises(EngineError, match="contiguous"):
+        pixel_buffer_from_bgra(np.zeros((8, 16, 4), dtype=np.uint8)[:, ::2])

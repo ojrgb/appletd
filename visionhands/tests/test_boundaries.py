@@ -46,17 +46,42 @@ DEV_ONLY_MODULES = frozenset({"cv2", "PIL"})
 
 
 def _module_scope_imports(path: Path) -> set[str]:
-    """Top-level names imported when this file is loaded.
+    """Every name-ish token an import at module scope pulls in.
 
-    Contract: returns root module names only - `Quartz` for
-              `import Quartz.CoreGraphics`, `cv2` for `from cv2 import imread`.
-              Imports inside a function body are EXCLUDED, because those run
-              only when the function is called, which is the whole point of a
-              lazy import. Imports inside a class body or a module-level
-              try/if ARE included: those execute at import time.
+    Contract: returns a generous token set, not just root modules - for
+              `from visionhands.td import bootstrap` it yields `visionhands`,
+              `visionhands.td`, `td` and `bootstrap`. Callers intersect it with
+              a set of forbidden module names, so over-collecting costs nothing
+              and under-collecting is a silent hole.
+
+              Imports inside a FUNCTION body are excluded - those run only when
+              called, which is exactly what makes a lazy `import cv2` legal.
+              Imports inside a class body or a module-level `try`/`if` ARE
+              included: they execute at import time.
+
+    Two blind spots the M2b review found in the first version, both fixed here
+    and both pinned by test_the_detector_itself_catches_a_violation:
+      * `level == 0` skipped every RELATIVE import, so `from .td import x` in
+        engine.py was invisible to the rule that forbids exactly that.
+      * root-name-only matching meant `from visionhands.td import bootstrap`
+        reported `visionhands`, which is in no forbidden set, so it passed.
     """
     tree = ast.parse(path.read_text(), filename=str(path))
     found: set[str] = set()
+
+    def record(dotted: str) -> None:
+        """Record a dotted path as all the tokens a rule might match on."""
+        if not dotted:
+            return
+        parts = dotted.split(".")
+        found.add(dotted)                       # the full path
+        # EVERY component, not just the root and the leaf: `import
+        # visionhands.td.bootstrap` hides the forbidden name in the middle, and
+        # a root/leaf-only version of this passed that case (caught by this
+        # test's own `import visionhands.td.bootstrap` line).
+        found.update(parts)
+        for i in range(1, len(parts)):
+            found.add(".".join(parts[:i + 1]))  # every prefix
 
     def visit(node: ast.AST, inside_function: bool) -> None:
         for child in ast.iter_child_nodes(node):
@@ -64,9 +89,13 @@ def _module_scope_imports(path: Path) -> set[str]:
             if not inside_function and not is_function:
                 if isinstance(child, ast.Import):
                     for alias in child.names:
-                        found.add(alias.name.split(".")[0])
-                elif isinstance(child, ast.ImportFrom) and child.module and child.level == 0:
-                    found.add(child.module.split(".")[0])
+                        record(alias.name)
+                elif isinstance(child, ast.ImportFrom):
+                    # child.module is None for `from . import x`; the names are
+                    # the only signal there, and they are what matters.
+                    record(child.module or "")
+                    for alias in child.names:
+                        record(alias.name)
             visit(child, inside_function or is_function)
 
     visit(tree, False)
@@ -145,7 +174,7 @@ def test_the_detector_itself_catches_a_violation() -> None:
     """
     import tempfile
 
-    cases = {
+    dev_cases = {
         "import cv2\n": {"cv2"},
         "from cv2 import imread\n": {"cv2"},
         "import cv2.aruco\n": {"cv2"},
@@ -153,12 +182,23 @@ def test_the_detector_itself_catches_a_violation() -> None:
         "try:\n    import cv2\nexcept ImportError:\n    pass\n": {"cv2"},
         "def f():\n    import cv2\n    return cv2\n": set(),   # lazy: allowed
         "def f():\n    from cv2 import imread\n": set(),
+        "async def f():\n    import cv2\n": set(),
     }
-    for source, expected in cases.items():
-        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as handle:
-            handle.write(source)
-            temp_path = Path(handle.name)
-        try:
-            assert _module_scope_imports(temp_path) & DEV_ONLY_MODULES == expected, source
-        finally:
-            temp_path.unlink()
+    # The two forms the M2b review found slipping past the first version.
+    td_cases = {
+        "from .td import bootstrap\n": {"td"},          # relative: was invisible
+        "from . import td\n": {"td"},                   # module is None here
+        "from visionhands.td import bootstrap\n": {"td"},  # was reported as `visionhands`
+        "import visionhands.td.bootstrap\n": {"td"},
+        "import td\n": {"td"},
+        "def f():\n    from .td import bootstrap\n": set(),
+    }
+    for cases, forbidden in ((dev_cases, DEV_ONLY_MODULES), (td_cases, TD_MODULES)):
+        for source, expected in cases.items():
+            with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as handle:
+                handle.write(source)
+                temp_path = Path(handle.name)
+            try:
+                assert _module_scope_imports(temp_path) & forbidden == expected, source
+            finally:
+                temp_path.unlink()
