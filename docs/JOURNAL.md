@@ -465,3 +465,60 @@ and 420v measured **3.94–4.16 ms against BGRA's 3.26–3.39 ms**, about 20%
 nothing reads and 0.6 ms is nothing against 33 ms — but the reason is now the
 measured one, and requesting BGRA is recorded as a real option if latency ever
 matters.
+
+---
+
+## Milestone 3 — the lock-free handoff
+2026-08-20
+
+**Built.** `visionhands/source.py`: `LatestFrameBox` (the single-slot lock-free
+box), the `HandSource` protocol, `InProcessSource` (camera-backed) and
+`FakeSource` (thread-backed, no hardware). Plus `tests/test_source.py` — 13
+tests, all with real threads — and two additions to `test_boundaries.py`. 58
+tests total, ruff and mypy clean.
+
+**`source.py` imports no pyobjc at module scope**, and `InProcessSource` imports
+the engine lazily inside `start()`. That is what keeps the `HandSource`
+interface free of a hard pyobjc dependency, so `td/hands_chop.py` can be written
+and tested against it with no camera in the process, and so an out-of-process or
+C++ backend stays a transport change rather than a rewrite (`DESIGN.md` 9). The
+`HandEngine` type still type-checks properly via a `TYPE_CHECKING` import, which
+does not execute at runtime.
+
+Proved rather than asserted: a subprocess test installs a meta-path finder that
+raises on every pyobjc import, then imports `source.py`, constructs an
+`InProcessSource`, reads from it and calls `stop()`. It also asserts that
+`engine.py` FAILS to import under the same blocker — without that, the test
+would pass forever if the blocker ever stopped blocking, which is the same
+vacuous-test failure the M2b review found in the dimensions test.
+
+**Measured, and promoted into `DESIGN.md` 2.7.**
+
+- Reading the box: median **0.0047 ms**, worst **0.0591 ms** — the worst case
+  about 58x cheaper than one Vision inference, which is what a lock held across
+  inference would have cost.
+- Delivered frame rate by what the main thread is doing: idle **30.0 fps**,
+  reading at 60 Hz and yielding **30.0 fps (zero cost)**, tight Python spin with
+  no sleep **18.5 fps (−38%)**. So a realistic cook loop is free, and only a
+  main thread that never yields degrades delivery.
+- Camera warm-up is **~1.5 s**, not the ~15 frames `DESIGN.md` 3 suggests. My
+  first end-to-end run measured 6.5 fps and I nearly reported it as starvation;
+  it was a 2 s window opened the instant `start()` returned. Re-measuring after
+  discarding warm-up gave 30.0 fps. Worth recording as a near-miss: the wrong
+  conclusion there would have been "the architecture starves the camera", which
+  is both alarming and false.
+
+**Design decision recorded: the age of a source that has never delivered.** If
+`age_ms` returned 0 until the first frame, a camera that started and then never
+produced anything would look perfectly healthy forever — the opposite of what a
+staleness channel is for. So the box records when the producer started, and
+`age_ms` measures from the last frame's capture time OR from that start time,
+whichever applies. It returns 0.0 only when the producer was never started at
+all, which is the one case where "no data" honestly means "none expected yet".
+
+**Test design worth keeping.** The no-torn-reads test embeds a checksum in every
+frame — every joint value is derived from `seq` — so a reader that ever observed
+a frame assembled from two different writes would see the fields disagree. Zero
+torn reads over ~1000s of reads under contention, which is what immutability
+guarantees. The value is not today's result, it is that the day someone unfreezes
+`Hand` for convenience, this is the test that notices.

@@ -202,3 +202,79 @@ def test_the_detector_itself_catches_a_violation() -> None:
                 assert _module_scope_imports(temp_path) & forbidden == expected, source
             finally:
                 temp_path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# The strongest form of the boundary check: actually run it without pyobjc.
+# ---------------------------------------------------------------------------
+_BLOCKER = """
+import sys, importlib.abc
+
+FORBIDDEN = {%s}
+
+class Blocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".")[0] in FORBIDDEN:
+            raise ImportError("blocked for the boundary test: " + fullname)
+        return None
+
+sys.meta_path.insert(0, Blocker())
+sys.path.insert(0, %r)
+"""
+
+
+def _run_without_pyobjc(body: str) -> tuple[int, str]:
+    """Run `body` in a subprocess where importing pyobjc raises ImportError."""
+    import subprocess
+    import sys
+
+    forbidden = ", ".join(repr(name) for name in sorted(PYOBJC_MODULES))
+    program = (_BLOCKER % (forbidden, str(PACKAGE_ROOT.parent))) + body
+    result = subprocess.run([sys.executable, "-c", program],
+                            capture_output=True, text=True, timeout=60)
+    return result.returncode, (result.stdout + result.stderr)
+
+
+def test_the_pyobjc_blocker_actually_blocks() -> None:
+    """Proves the harness below is not vacuous.
+
+    A boundary test that silently stopped blocking anything would pass forever
+    while enforcing nothing - the same failure mode as a mutation-proof test
+    suite. So: engine.py MUST fail to import under the blocker.
+    """
+    code, output = _run_without_pyobjc("import visionhands.engine\n")
+    assert code != 0, "engine.py imported with pyobjc blocked - the blocker is broken"
+    assert "blocked for the boundary test" in output
+
+
+def test_source_and_the_pure_core_import_with_no_pyobjc() -> None:
+    """`source.py` must stay importable, and usable, without pyobjc present.
+
+    This is what lets `td/hands_chop.py` be written and tested against
+    `HandSource` with no camera and no AVFoundation in the process, and what
+    keeps an out-of-process or C++ backend (DESIGN.md 9) a transport change
+    rather than a rewrite. `InProcessSource` imports the engine inside `start()`
+    for exactly this reason, so constructing one must not pull pyobjc in either.
+    """
+    code, output = _run_without_pyobjc("""
+import visionhands.types, visionhands.coords, visionhands.source
+from visionhands.source import FakeSource, InProcessSource, LatestFrameBox
+
+box = LatestFrameBox()
+assert box.latest().seq == 0
+assert box.age_ms() == 0.0
+
+# Constructing an InProcessSource must not import the engine - only start() may.
+source = InProcessSource()
+assert not source.running
+assert source.latest().seq == 0
+assert source.errors == []
+source.stop()                      # safe before start, and must not import either
+
+import sys
+assert "Vision" not in sys.modules, "pyobjc was imported after all"
+assert "visionhands.engine" not in sys.modules, "engine imported at module scope"
+print("ok")
+""")
+    assert code == 0, output
+    assert "ok" in output

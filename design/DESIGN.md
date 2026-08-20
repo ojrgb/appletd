@@ -249,6 +249,35 @@ still handing back coordinates that will look perfectly plausible on screen. The
 §2.4 figure of 0.77–0.92 was one clean unoccluded palm and is not
 representative of a moving hand.
 
+### 2.7 The handoff, measured — the reader really is free
+
+Milestone 3. `InProcessSource` driving the real camera, with the main thread
+reading the single-slot box.
+
+**Reading the latest frame costs nothing.** Over 103 reads taken while capture
+and Vision ran behind them: median **0.0047 ms**, worst **0.0591 ms**. That
+worst case is ~58× cheaper than a single Vision inference, which is roughly what
+a lock held across inference would have cost. There is no code path from reader
+to writer, and the numbers agree.
+
+**A realistic TD cook loop does not starve the camera.** Delivered frame rate in
+steady state, measured after discarding camera warm-up:
+
+| main thread is doing | delivered |
+|---|---|
+| nothing (one blocking sleep) | **30.0 fps** |
+| reading the box at 60 Hz, yielding between reads | **30.0 fps** (0% cost) |
+| a tight Python spin with no yield at all | 18.5 fps (−38%) |
+
+This is §2.2's GIL finding from the reader's side. A cook loop that reads and
+then yields is free; only a main thread that never yields degrades delivery, and
+even that pathological case still delivers more than the 30 fps we need.
+
+**Camera warm-up is ~1.5 s**, which refines §3's "skip ~15 frames". A 2 s window
+opened the instant `start()` returned measured 6.5 fps; the same window opened
+1.5 s later measured 30.0 fps. Any figure taken from the moment of start is
+measuring the camera waking up, and reads as a catastrophe that is not there.
+
 ---
 
 ## 3. Traps — all of these cost real time in the spike
@@ -258,6 +287,11 @@ representative of a moving hand.
 the capture thread: delivered frame rate went from 28 fps to **8.4 fps**. One
 long blocking call fixed it. Anything that busy-waits in Python next to a pyobjc
 callback thread will do this.
+
+Refined by §2.7: the trap is *never yielding*, not *reading often*. A main
+thread reading the frame box at 60 Hz and yielding between reads costs **zero**
+delivered frames. A tight spin with no yield at all costs 38%. So a Script CHOP
+cooking normally is free, and this trap is about poll loops specifically.
 
 **Resolution control does not work the documented way.** `setActiveFormat_` is
 silently reverted by the session preset (default `High` = 1080p) regardless of
@@ -285,7 +319,10 @@ to index 0 is a good way to debug black frames from OBS. Match on `uniqueID`,
 or on `localizedName` with an assertion.
 
 **Camera warm-up.** The first frames off a cold camera are near-black while
-exposure ramps and detect nothing. Skip ~15 frames before counting anything.
+exposure ramps and detect nothing. Skip ~15 frames before counting anything —
+and note §2.7 measured the ramp at **~1.5 s**, so a short window opened at
+`start()` reports a frame rate several times too low. A 2 s window measured
+6.5 fps starting immediately and 30.0 fps starting 1.5 s in.
 
 **Pixel format.** Leave `AVCaptureVideoDataOutput` at native `420v` unless you
 need RGB on the host; Vision consumes it directly. Set
