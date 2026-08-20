@@ -1,25 +1,47 @@
 #!/usr/bin/env python
-"""Spike: Apple Vision hand landmarks on a LIVE camera feed, via pyobjc.
+"""Spike: Apple Vision hand, body and face landmarks on a LIVE camera feed, via pyobjc.
 
 Follow-on from spike_vision_hands.py (single still). Same Vision calls, new
 frame source. Purpose here is THROUGHPUT only - latency, dropout, jitter and
 chirality stability are explicitly out of scope for this pass.
 
-    ~/.venvs/vision-spike/bin/python tools/spike_vision_hands_live.py --seconds 10
+    ~/.venvs/vision-spike/bin/python reference/spike_vision_hands_live.py --seconds 10
+
+Detectors are switched WITH THE KEYBOARD while the camera runs, because the
+question this spike answers - what does adding face landmarks cost - is answered
+by toggling one detector against an otherwise identical live scene, not by
+comparing two runs of a room that moved in between:
+
+    h hands   b body   3 body3d   f face   o overlay   q quit
+
+Every timing sample is filed under the set that was live when the frame was
+captured, so one run prints a table of hands / hands+face / hands+body+face and
+the fps each of them sustained. The same flags exist for the starting state
+(--no-hands, --no-body, --no-face, --body-3d), and for --source file, which has
+no keyboard because a fixed clip is a measurement, not a session.
 
 Capture is AVFoundation -> CMSampleBuffer -> VNSequenceRequestHandler, so the
 buffer the camera produces goes into Vision with no conversion at all. The only
 numpy/OpenCV work is drawing the annotated MP4, and that is timed separately so
 it never contaminates the Vision figure.
 
+MEASURED on the 284-frame fixture clip at 1280x720, replay path, all three 2D
+detectors: median 11.1 ms a frame, a ~90 fps ceiling, hands found in 96% of
+frames and a body in 47% (the clip is framed from the chin down, so half of it
+has too little body to pose). --body-3d is a different animal at ~94 ms a frame
+and will not hold 30 fps - see spike_vision_hands.py for that measurement.
+
 Built against pyobjc 12.2.2 / macOS 26.5.2 on Apple silicon.
 """
 
 import argparse
+import select
 import statistics
 import sys
+import termios
 import threading
 import time
+import tty
 from pathlib import Path
 
 import AVFoundation as AVF
@@ -34,12 +56,20 @@ from Foundation import NSObject
 from libdispatch import dispatch_queue_attr_make_with_qos_class, dispatch_queue_create
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from spike_vision_hands import CHIRALITY, FINGERS, JOINTS, PALM, to_pixels  # noqa: E402
+from spike_vision_hands import (BODY3D_BONES, BODY_BONES, BODY_JOINTS,  # noqa: E402
+                               DETECTOR_ORDER, FACE_REGIONS, FINGERS, JOINTS,
+                               PALM, body3d_points, body_points_for,
+                               face_landmarks, make_requests, to_pixels)
 
 PIXEL_FORMATS = {
     "bgra": Quartz.kCVPixelFormatType_32BGRA,
     "420v": Quartz.kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 }
+
+# key -> what it flips. Deliberately not configurable: a spike with a settings
+# file for its keybindings has lost the plot.
+KEYMAP = (("h", "hands"), ("b", "body"), ("3", "body3d"), ("f", "face"),
+          ("o", "overlay"))
 
 
 # ---------------------------------------------------------------------------
@@ -124,14 +154,145 @@ def buffer_to_bgr(pb):
 
 
 # ---------------------------------------------------------------------------
-# vision
+# which detectors are live
 # ---------------------------------------------------------------------------
-def make_request(max_hands):
-    req = Vision.VNDetectHumanHandPoseRequest.alloc().init()
-    req.setMaximumHandCount_(max_hands)
-    return req
+class Toggles:
+    """Detector on/off state: written by the keyboard thread, read per frame by
+    the capture queue.
+
+    No lock, on purpose. The state is one flat dict of bools and a read is a
+    dict.copy(), which is a single bytecode and therefore atomic under the GIL,
+    so a keypress landing mid-frame takes effect on the next frame rather than
+    tearing. A lock here would have to be taken on the capture queue every
+    frame, and that queue is the one place this spike must not add contention -
+    starving it is exactly the failure that cost 3x the delivered fps when an
+    earlier version spun the run loop from Python.
+    """
+
+    def __init__(self, state):
+        self._state = dict(state)
+        self.quit = threading.Event()
+        self.changes = 0
+
+    def snapshot(self):
+        return self._state.copy()
+
+    def flip(self, name):
+        self._state[name] = not self._state[name]
+        self.changes += 1
+        return self._state[name]
+
+    def line(self):
+        st = self._state
+        return "  ".join("%s %s" % (name, "ON " if st[name] else "off")
+                         for _key, name in KEYMAP)
 
 
+def key_reader(toggles):
+    """Read single keypresses until quit. Runs in a daemon thread.
+
+    stdin is already in cbreak mode (see raw_keys) so this gets one character at
+    a time with no echo and no Enter. select() rather than a bare read() so the
+    thread notices quit and exits instead of blocking on a dead terminal.
+
+    Note what this thread does NOT do: touch CoreFoundation. Waking the main run
+    loop is the timer's job in main(), so every CF call in this program stays on
+    the thread that owns the run loop.
+    """
+    while not toggles.quit.is_set():
+        if not select.select([sys.stdin], [], [], 0.2)[0]:
+            continue
+        ch = sys.stdin.read(1)
+        if ch in ("q", "\x03", "\x04"):        # q, ctrl-C, ctrl-D
+            print("\n  keys> quit")
+            toggles.quit.set()
+            return
+        for key, name in KEYMAP:
+            if ch == key:
+                now = toggles.flip(name)
+                print("  keys> %s -> %s   [%s]"
+                      % (name, "ON" if now else "off", toggles.line()))
+                if name == "body3d" and now:
+                    print("  keys> body3d costs ~94 ms a frame on this machine - "
+                          "the fps below will collapse, which is the point")
+                break
+        else:
+            print("  keys> %r does nothing. %s"
+                  % (ch, "  ".join("%s %s" % (k, n) for k, n in KEYMAP)))
+
+
+class raw_keys:
+    """Put the terminal in cbreak mode for the life of a block, and put it back.
+
+    The restore lives here, on the MAIN thread, rather than in the reader
+    thread: a daemon thread's finally: does not run at interpreter exit, and
+    leaving a terminal in cbreak mode means the user's next shell prompt has no
+    echo and no line editing. Not a tty (piped stdin, a cron run) is not an
+    error, it just means no keys.
+    """
+
+    def __init__(self, enabled=True):
+        self.enabled = enabled and sys.stdin.isatty()
+        self.fd = None
+        self.saved = None
+
+    def __enter__(self):
+        if self.enabled:
+            self.fd = sys.stdin.fileno()
+            self.saved = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)             # char at a time, ECHO and ICANON off
+        return self.enabled
+
+    def __exit__(self, *exc):
+        if self.saved is not None:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
+        return False
+
+
+def apply_max_dim(requests, max_dim):
+    """maximumProcessingDimensionOnTheLongSide, where the request has it.
+
+    It is a VNImageBasedRequest property, so most requests take it, but do not
+    assume: hasattr rather than a try/except, so a request that lacks it is
+    skipped rather than raising mid-frame.
+    """
+    if not max_dim:
+        return
+    for req in requests:
+        if hasattr(req, "setMaximumProcessingDimensionOnTheLongSide_"):
+            req.setMaximumProcessingDimensionOnTheLongSide_(max_dim)
+
+
+def build_detectors(max_hands, face_points, max_dim=0):
+    """{detector name: [request, ...]} - built ONCE, for the whole session.
+
+    Toggling includes or excludes these request objects; it never rebuilds them.
+    A VNSequenceRequestHandler carries Vision's inter-frame state per request,
+    and handing it a freshly allocated request every frame throws that state
+    away (DESIGN.md 2.3) - which is also why the objects outlive being switched
+    off.
+
+    MEASURED, because the keyboard depends on it: handing ONE sequence handler a
+    DIFFERENT request array on different frames is fine. Cycling five sets
+    (hands / hands+body / body / hands+body+face / nothing) every 10 frames over
+    a 284-frame clip gave 0 failures and kept detecting throughout.
+
+    Also measured, and worth knowing before crediting the sequence handler for
+    anything: over that same clip the 2D body request found a body in 132 of 284
+    frames with a shared handler and in exactly 132 with a fresh handler per
+    frame. Its inter-frame state buys nothing for body pose here.
+    UNVERIFIED: whether a request that sits out a few hundred frames and comes
+    back keeps or resets that state.
+    """
+    reqs = {k: make_requests(k, max_hands, face_points) for k in DETECTOR_ORDER}
+    for group in reqs.values():
+        apply_max_dim(group, max_dim)
+    return reqs
+
+
+# ---------------------------------------------------------------------------
+# vision -> pixels
+# ---------------------------------------------------------------------------
 def landmarks(obs, w, h):
     pts, err = obs.recognizedPointsForJointsGroupName_error_(
         Vision.VNHumanHandPoseObservationJointsGroupNameAll, None)   # <- out-param
@@ -146,19 +307,36 @@ def landmarks(obs, w, h):
     return out
 
 
+def body_landmarks(obs, w, h):
+    pts = body_points_for(obs)
+    out = {}
+    for label, key in BODY_JOINTS:
+        p = pts.get(key)
+        if p is not None:
+            px, py = to_pixels(p.x(), p.y(), w, h)
+            out[label] = (px, py, p.confidence())
+    return out
+
+
+# ---------------------------------------------------------------------------
+# drawing (cv2 - BGR, hence every colour[::-1])
+# ---------------------------------------------------------------------------
+def _pt(xy):
+    return (int(xy[0]), int(xy[1]))
+
+
+def draw_chain(frame, coords, chain, colour_bgr, width):
+    for a, b in zip(chain, chain[1:]):
+        if a in coords and b in coords:
+            cv2.line(frame, _pt(coords[a]), _pt(coords[b]), colour_bgr, width, cv2.LINE_AA)
+
+
 def draw(frame, hands, conf_gate):
     r = max(3, int(min(frame.shape[:2]) * 0.008))
     for coords in hands:
         for _, colour, chain in FINGERS:
-            bgr = colour[::-1]
-            for a, b in zip(chain, chain[1:]):
-                if a in coords and b in coords:
-                    cv2.line(frame, tuple(map(int, coords[a][:2])),
-                             tuple(map(int, coords[b][:2])), bgr, max(2, r // 2), cv2.LINE_AA)
-        for a, b in zip(PALM, PALM[1:]):
-            if a in coords and b in coords:
-                cv2.line(frame, tuple(map(int, coords[a][:2])),
-                         tuple(map(int, coords[b][:2])), (220, 220, 220), max(2, r // 2), cv2.LINE_AA)
+            draw_chain(frame, coords, chain, colour[::-1], max(2, r // 2))
+        draw_chain(frame, coords, PALM, (220, 220, 220), max(2, r // 2))
         for label, (px, py, conf) in coords.items():
             if conf < conf_gate:
                 continue
@@ -172,21 +350,72 @@ def draw(frame, hands, conf_gate):
             cv2.circle(frame, (int(px), int(py)), int(r * 1.6), (20, 20, 20), 2, cv2.LINE_AA)
 
 
+def draw_bodies(frame, bodies, conf_gate, bones=BODY_BONES):
+    r = max(3, int(min(frame.shape[:2]) * 0.008))
+    for coords in bodies:
+        for colour, chain in bones:
+            draw_chain(frame, coords, chain, colour[::-1], max(2, r // 2))
+        for _label, xy in coords.items():
+            # A 2D joint carries a confidence; a projected 3D joint does not, so
+            # the gate is only applied where there is something to gate on.
+            if len(xy) > 2 and xy[2] < conf_gate:
+                continue
+            cv2.circle(frame, _pt(xy), max(2, int(r * 0.8)), (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, _pt(xy), max(2, int(r * 0.8)), (20, 20, 20), 1, cv2.LINE_AA)
+
+
+def draw_faces(frame, faces):
+    """faces: [(observation, {region: [(px, py), ...]}), ...]."""
+    h, w = frame.shape[:2]
+    r = max(3, int(min(h, w) * 0.008))
+    for obs, regions in faces:
+        box = obs.boundingBox()
+        x0, x1 = int(box.origin.x * w), int((box.origin.x + box.size.width) * w)
+        y0 = int((1.0 - box.origin.y - box.size.height) * h)
+        y1 = int((1.0 - box.origin.y) * h)
+        cv2.rectangle(frame, (x0, y0), (x1, y1), (160, 220, 120), max(1, r // 3), cv2.LINE_AA)
+        for name, colour, closed in FACE_REGIONS:
+            pts = regions.get(name)
+            if not pts:
+                continue
+            bgr = colour[::-1]
+            if len(pts) > 1:
+                cv2.polylines(frame, [np.array([_pt(p) for p in pts], np.int32)],
+                              bool(closed), bgr, max(1, r // 3), cv2.LINE_AA)
+            for p in pts:
+                cv2.circle(frame, _pt(p), max(1, int(r * 0.35)), bgr, -1, cv2.LINE_AA)
+
+
+def hud(frame, lines):
+    """Text twice, black then white: a HUD that is unreadable against a bright
+    wall is a HUD that gets ignored."""
+    for i, text in enumerate(lines):
+        y = 30 + i * 30
+        for colour, thick in (((0, 0, 0), 4), ((255, 255, 255), 2)):
+            cv2.putText(frame, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                        colour, thick, cv2.LINE_AA)
+
+
 # ---------------------------------------------------------------------------
 # capture delegate
 # ---------------------------------------------------------------------------
 class HandDelegate(NSObject):
     """Runs on the capture dispatch queue, never the main thread."""
 
-    def initWithConfig_(self, cfg):
+    def initWithConfig_toggles_(self, cfg, toggles):
         self = objc.super(HandDelegate, self).init()
         self.cfg = cfg
+        self.toggles = toggles
         self.seq = Vision.VNSequenceRequestHandler.alloc().init()   # once, not per frame
-        self.req = make_request(cfg["max_hands"])
-        self.vision_ms = []
+        self.reqs = build_detectors(cfg["max_hands"], cfg["face_points"], cfg["max_dim"])
+        # Timings are filed under the detector set that was live for that frame.
+        # One dict rather than one list, because the whole point of the keyboard
+        # is that a run contains several configurations.
+        self.vision_ms = {}
         self.draw_ms = []
         self.n_frames = 0
-        self.n_with_hand = 0
+        self.n_seen = {}                 # detector -> frames with >=1 observation
+        self.n_counted = {}              # detector -> frames it actually ran on
         self.writer = None
         self.want_video = False
         self.out_path = None
@@ -219,36 +448,59 @@ class HandDelegate(NSObject):
             self.delivered = (w, h)
             self.ensure_writer(w, h)
 
-        t0 = time.perf_counter()
-        ok, err = self.seq.performRequests_onCMSampleBuffer_error_(   # <- out-param
-            [self.req], sbuf, None)
-        dt = (time.perf_counter() - t0) * 1e3
+        # Read the switches ONCE per frame. Reading them again further down could
+        # draw a detector that did not run, or file a timing under a set that was
+        # not the set that produced it.
+        state = self.toggles.snapshot()
+        active = [k for k in DETECTOR_ORDER if state.get(k)]
+        requests = [r for k in active for r in self.reqs[k]]
 
         self.n_frames += 1
         # Skip the exposure ramp: the first frames off a cold camera are black
         # and detect nothing, which would drag the throughput stats.
         counted = self.n_frames > self.cfg["warmup"]
-        if not ok:
-            if counted:
-                print("  performRequests failed: %s" % err)
-            return
-        if counted:
-            self.vision_ms.append(dt)
 
-        obs = self.req.results() or []
-        if obs and counted:
-            self.n_with_hand += 1
+        dt = 0.0
+        if requests:
+            t0 = time.perf_counter()
+            ok, err = self.seq.performRequests_onCMSampleBuffer_error_(   # <- out-param
+                requests, sbuf, None)
+            dt = (time.perf_counter() - t0) * 1e3
+            if not ok:
+                if counted:
+                    print("  performRequests failed (%s): %s" % ("+".join(active), err))
+                return
+            if counted:
+                self.vision_ms.setdefault("+".join(active), []).append(dt)
+
+        obs = {k: list(self.reqs[k][0].results() or []) for k in active}
+        if counted:
+            for k in active:
+                self.n_counted[k] = self.n_counted.get(k, 0) + 1
+                if obs[k]:
+                    self.n_seen[k] = self.n_seen.get(k, 0) + 1
 
         if self.writer is not None:
             t1 = time.perf_counter()
             frame = buffer_to_bgr(pb)
-            if self.cfg["overlay"]:
-                hands = [landmarks(o, w, h) for o in obs]
-                draw(frame, hands, self.cfg["conf_gate"])
-                cv2.putText(frame, "%5.1f ms  hands:%d" % (dt, len(obs)), (12, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4, cv2.LINE_AA)
-                cv2.putText(frame, "%5.1f ms  hands:%d" % (dt, len(obs)), (12, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            if state["overlay"]:
+                if "body" in obs:
+                    draw_bodies(frame, [body_landmarks(o, w, h) for o in obs["body"]],
+                                self.cfg["conf_gate"])
+                if "body3d" in obs:
+                    # metres=False: the overlay only needs the projection, and
+                    # the metric read is another selector call per joint.
+                    draw_bodies(frame, [body3d_points(o, w, h, metres=False)
+                                        for o in obs["body3d"]],
+                                self.cfg["conf_gate"], bones=BODY3D_BONES)
+                if "face" in obs:
+                    draw_faces(frame, [(o, face_landmarks(o, w, h)) for o in obs["face"]])
+                if "hands" in obs:
+                    draw(frame, [landmarks(o, w, h) for o in obs["hands"]],
+                         self.cfg["conf_gate"])
+                hud(frame, ["%5.1f ms  %s" % (dt, "+".join(active) or "nothing running"),
+                            "  ".join("%s:%d" % (k, len(v)) for k, v in obs.items())
+                            or "no detectors"])
             with self.lock:
                 if self.writer is not None:
                     self.writer.write(frame)
@@ -257,13 +509,15 @@ class HandDelegate(NSObject):
 
 
 # ---------------------------------------------------------------------------
-def replay(path, size, max_hands, max_dim, reps):
+def replay(path, size, active, max_hands, face_points, max_dim, reps):
     """Run the identical Vision path over a FIXED clip.
 
     The live camera cannot give a comparable throughput number: the cost per
     frame depends on what is in shot, and a moving person makes every run a
     different workload. Replaying one recorded clip holds the content constant
-    so a resolution or max-dim change is the only variable.
+    so a resolution, detector or max-dim change is the only variable. No
+    keyboard here for the same reason - a set that changes halfway through is a
+    session, not a measurement.
     """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -285,16 +539,17 @@ def replay(path, size, max_hands, max_dim, reps):
 
     h, w = frames[0].shape[:2]
     seq = Vision.VNSequenceRequestHandler.alloc().init()
-    req = make_request(max_hands)
-    if max_dim:
-        req.setMaximumProcessingDimensionOnTheLongSide_(max_dim)
+    built = build_detectors(max_hands, face_points, max_dim)
+    requests = [r for k in active for r in built[k]]
 
     print("clip   : %s" % path)
     print("frames : %d at %dx%d, %d rep(s)" % (len(frames), w, h, reps))
-    print("maxProcessingDim: %d (0 = unset)" % req.maximumProcessingDimensionOnTheLongSide())
+    print("running: %s" % "+".join(active))
+    print("maxProcessingDim: %d (0 = unset)"
+          % requests[0].maximumProcessingDimensionOnTheLongSide())
 
-    ms, n_hand, seen = [], 0, 0
-    for rep in range(reps):
+    ms, seen, n_seen = [], 0, {}
+    for _rep in range(reps):
         for arr in frames:
             seen += 1
             r, pb = Quartz.CVPixelBufferCreateWithBytes(
@@ -303,29 +558,33 @@ def replay(path, size, max_hands, max_dim, reps):
             if r != 0:
                 raise SystemExit("CVPixelBufferCreateWithBytes failed: %d" % r)
             t0 = time.perf_counter()
-            ok, err = seq.performRequests_onCVPixelBuffer_error_([req], pb, None)  # <- out-param
+            ok, err = seq.performRequests_onCVPixelBuffer_error_(requests, pb, None)  # <- out-param
             dt = (time.perf_counter() - t0) * 1e3
             if not ok:
                 raise SystemExit("performRequests failed: %s" % err)
             if seen == 1:
-                continue          # first call carries the ~100 ms model load
+                continue          # first call carries the model load
             ms.append(dt)
-            if req.results():
-                n_hand += 1
-    print("\n%dx%d replay" % (w, h))
+            for k in active:
+                if built[k][0].results():
+                    n_seen[k] = n_seen.get(k, 0) + 1
+    print("\n%dx%d replay, %s" % (w, h, "+".join(active)))
     print(stats("vision", ms))
-    print("  vision-only ceiling ~%.0f fps (median)  |  frames with >=1 hand: %d/%d (%.0f%%)"
-          % (1000.0 / statistics.median(ms), n_hand, len(ms), 100.0 * n_hand / len(ms)))
+    print("  vision-only ceiling ~%.0f fps (median)" % (1000.0 / statistics.median(ms)))
+    for k in active:
+        print("  frames with >=1 %-7s %d/%d (%.0f%%)"
+              % (k, n_seen.get(k, 0), len(ms), 100.0 * n_seen.get(k, 0) / len(ms)))
     return ms
 
 
 def stats(name, xs, unit="ms"):
     if not xs:
-        return "  %-14s (no samples)" % name
+        return "  %-16s (no samples)" % name
     xs = sorted(xs)
     p95 = xs[min(len(xs) - 1, int(len(xs) * 0.95))]
-    return ("  %-14s mean %6.2f  median %6.2f  p95 %6.2f  min %6.2f  max %6.2f %s"
-            % (name, statistics.mean(xs), statistics.median(xs), p95, xs[0], xs[-1], unit))
+    return ("  %-16s mean %6.2f  median %6.2f  p95 %6.2f  min %6.2f  max %6.2f %s  n=%d"
+            % (name, statistics.mean(xs), statistics.median(xs), p95, xs[0], xs[-1],
+               unit, len(xs)))
 
 
 def main():
@@ -339,6 +598,16 @@ def main():
     ap.add_argument("--conf-gate", type=float, default=0.3, help="min joint confidence to draw")
     ap.add_argument("--max-dim", type=int, default=0,
                     help="maximumProcessingDimensionOnTheLongSide (0 = leave unset)")
+    ap.add_argument("--no-hands", action="store_true", help="start with hands off")
+    ap.add_argument("--no-body", action="store_true", help="start with 2D body pose off")
+    ap.add_argument("--no-face", action="store_true", help="start with face landmarks off")
+    ap.add_argument("--body-3d", action="store_true",
+                    help="start with the 3D body request ON (~94 ms a frame - it "
+                         "will dominate whatever else is running)")
+    ap.add_argument("--face-points", type=int, choices=(65, 76), default=76,
+                    help="face landmark constellation")
+    ap.add_argument("--no-keys", action="store_true",
+                    help="do not touch the terminal; detectors stay as the flags left them")
     ap.add_argument("--no-video", action="store_true", help="pure throughput, no MP4")
     ap.add_argument("--no-overlay", action="store_true",
                     help="write the MP4 WITHOUT landmarks - use this to record a clean "
@@ -349,11 +618,19 @@ def main():
     ap.add_argument("-o", "--out", default="temp/hand_live.mp4")
     args = ap.parse_args()
 
+    start_state = {"hands": not args.no_hands, "body": not args.no_body,
+                   "body3d": args.body_3d, "face": not args.no_face,
+                   "overlay": not args.no_overlay}
+    active = [k for k in DETECTOR_ORDER if start_state[k]]
+    if not active:
+        raise SystemExit("every detector starts switched off - nothing to measure")
+
     if args.source == "file":
         if not args.input:
             raise SystemExit("--source file needs --input PATH")
         size = tuple(int(v) for v in args.size.lower().split("x")) if args.size else None
-        replay(args.input, size, args.max_hands, args.max_dim, args.reps)
+        replay(args.input, size, active, args.max_hands, args.face_points,
+               args.max_dim, args.reps)
         return
 
     if args.list_devices:
@@ -394,12 +671,12 @@ def main():
     out.setVideoSettings_(video_settings(w, h))
 
     cfg = {"max_hands": args.max_hands, "warmup": args.warmup,
-           "conf_gate": args.conf_gate, "overlay": not args.no_overlay}
-    delegate = HandDelegate.alloc().initWithConfig_(cfg)
-    if args.max_dim:
-        delegate.req.setMaximumProcessingDimensionOnTheLongSide_(args.max_dim)
+           "conf_gate": args.conf_gate, "face_points": args.face_points,
+           "max_dim": args.max_dim}
+    toggles = Toggles(start_state)
+    delegate = HandDelegate.alloc().initWithConfig_toggles_(cfg, toggles)
     print("maxProcessingDim: %d (0 = unset)"
-          % delegate.req.maximumProcessingDimensionOnTheLongSide())
+          % delegate.reqs["hands"][0].maximumProcessingDimensionOnTheLongSide())
 
     if not args.no_video:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -418,18 +695,45 @@ def main():
     sess.commitConfiguration()
 
     print("capturing %.1f s ... (camera is live)" % args.seconds)
-    sess.startRunning()
-    t0 = time.perf_counter()
-    # AVFoundation delivers frames via the delegate only while a run loop turns.
-    # ONE long call, not a tight poll loop. CFRunLoopRunInMode releases the GIL
-    # while it waits; spinning it at 0.05 s from Python holds the GIL and starves
-    # the capture queue - that alone cut delivered fps by ~3x.
-    while True:
-        remaining = args.seconds - (time.perf_counter() - t0)
-        if remaining <= 0:
-            break
-        CF.CFRunLoopRunInMode(CF.kCFRunLoopDefaultMode, remaining, False)
-    elapsed = time.perf_counter() - t0
+    print("start  : [%s]" % toggles.line())
+    with raw_keys(not args.no_keys) as keys_live:
+        if keys_live:
+            print("keys   : %s   q quit"
+                  % "   ".join("%s %s" % (k, n) for k, n in KEYMAP))
+            threading.Thread(target=key_reader, args=(toggles,), daemon=True).start()
+        else:
+            print("keys   : disabled (%s)"
+                  % ("--no-keys" if args.no_keys else "stdin is not a tty"))
+
+        sess.startRunning()
+        t0 = time.perf_counter()
+
+        # A timer on THIS run loop, rather than a short CFRunLoopRunInMode from
+        # Python, is how the keyboard's q gets to interrupt the wait. The one
+        # long call below is load-bearing: AVFoundation delivers frames via the
+        # delegate only while a run loop turns, and CFRunLoopRunInMode releases
+        # the GIL while it waits, so spinning it at 0.05 s from Python holds the
+        # GIL and starves the capture queue - that alone cut delivered fps by
+        # ~3x. A 4 Hz timer callback costs a few microseconds of GIL instead,
+        # and keeps every CF call on the thread that owns the loop.
+        def tick(timer, info):
+            if toggles.quit.is_set():
+                CF.CFRunLoopStop(CF.CFRunLoopGetCurrent())
+
+        timer = CF.CFRunLoopTimerCreate(
+            None, CF.CFAbsoluteTimeGetCurrent() + 0.25, 0.25, 0, 0, tick, None)
+        CF.CFRunLoopAddTimer(CF.CFRunLoopGetCurrent(), timer, CF.kCFRunLoopDefaultMode)
+        try:
+            while not toggles.quit.is_set():
+                remaining = args.seconds - (time.perf_counter() - t0)
+                if remaining <= 0:
+                    break
+                CF.CFRunLoopRunInMode(CF.kCFRunLoopDefaultMode, remaining, False)
+        finally:
+            CF.CFRunLoopRemoveTimer(CF.CFRunLoopGetCurrent(), timer,
+                                    CF.kCFRunLoopDefaultMode)
+            toggles.quit.set()          # release the key thread's select loop
+        elapsed = time.perf_counter() - t0
 
     delegate.stop = True
     sess.stopRunning()
@@ -439,22 +743,33 @@ def main():
             delegate.writer.release()
             delegate.writer = None
 
-    counted = len(delegate.vision_ms)
+    counted = sum(len(v) for v in delegate.vision_ms.values())
     got = delegate.delivered or (0, 0)
     if got != (w, h):
         print("\nWARNING: requested %dx%d but camera delivered %dx%d" % (w, h, got[0], got[1]))
     print("\n%dx%d delivered, %.2f s wall" % (got[0], got[1], elapsed))
-    print("  frames delivered %d  (%.1f fps delivered, %d counted after warmup)"
-          % (delegate.n_frames, delegate.n_frames / elapsed, counted))
-    print(stats("vision", delegate.vision_ms))
+    print("  frames delivered %d  (%.1f fps delivered, %d counted after warmup, "
+          "%d detector changes)"
+          % (delegate.n_frames, delegate.n_frames / elapsed, counted, toggles.changes))
+    print("  ended with [%s]" % toggles.line())
+
+    # One row per detector set that was live at some point, biggest sample first,
+    # because with the keyboard in play a run is several measurements.
+    print("\nvision, by detector set:")
+    for label, xs in sorted(delegate.vision_ms.items(), key=lambda kv: -len(kv[1])):
+        print(stats(label, xs))
+        print("      -> ~%.0f fps ceiling  (%.0f%% of a 33.3 ms/30fps budget)"
+              % (1000.0 / statistics.mean(xs), 100.0 * statistics.mean(xs) / 33.3))
     if delegate.draw_ms:
         print(stats("draw+encode", delegate.draw_ms))
-    if counted:
-        mean_ms = statistics.mean(delegate.vision_ms)
-        print("  vision-only ceiling ~%.0f fps  (%.1f%% of a 33.3 ms/30fps budget)"
-              % (1000.0 / mean_ms, 100.0 * mean_ms / 33.3))
-        print("  frames with >=1 hand: %d / %d (%.0f%%)"
-              % (delegate.n_with_hand, counted, 100.0 * delegate.n_with_hand / counted))
+    if delegate.n_counted:
+        print("\ndetection rate, over the frames each one actually ran on:")
+        for k in DETECTOR_ORDER:
+            ran = delegate.n_counted.get(k, 0)
+            if ran:
+                print("  %-7s %d/%d frames with >=1 observation (%.0f%%)"
+                      % (k, delegate.n_seen.get(k, 0), ran,
+                         100.0 * delegate.n_seen.get(k, 0) / ran))
     if not args.no_video:
         print("\nwrote %s" % args.out)
 

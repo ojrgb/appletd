@@ -1080,3 +1080,52 @@ produces and that a derived number does not. Their x value of 0.56 was within
 
 The lesson for the design: "screen space" is not one space. The COMP now takes
 the parameter that disambiguates it rather than picking a convention and hoping.
+
+---
+
+## Sidecar lifecycle on the COMP, and a process-matching bug I shipped and caught
+2026-08-20
+
+The user asked whether the sidecar can be stopped from the components we built.
+It could not - TouchDesigner did not own the process - so the COMP now has a
+Sidecar parameter page: **Start Sidecar**, **Stop Sidecar**, **Print Status**,
+and a read-only **Sidecar PID**. An Execute DAT inside the COMP also stops it on
+project exit, which pairs with the sidecar's own parent-pid watch: that one
+handles a TouchDesigner crash, this one handles a clean quit.
+
+Stop deliberately finds ANY running sidecar rather than only one this COMP
+started, because during development it gets started from a terminal, and that is
+exactly when being able to stop it from the UI matters.
+
+**The bug: my first version SIGTERMed the shell that was grepping for it.**
+`pgrep -f visionhands.sidecar` matches the pattern anywhere in a full command
+line, so it matched the very `pgrep` invocation I was using to check on it - and
+`stop()` killed it. My own tool call died with exit code 144. On a user's machine
+that could have been their terminal, their editor with the file open, or a `tail`
+on the log.
+
+Fixed with a two-stage match, and it took three attempts, each caught by testing
+against deliberate decoys rather than by reasoning:
+
+1. Confirm each candidate with `ps -p PID -o comm=,command=` - **wrong**, because
+   macOS truncates `comm` to 16 characters. A venv interpreter comes back as
+   `/Users/omer/.ven`, whose basename is `.ven`, so "python" matched nothing and
+   Stop silently found no processes at all. That failure is invisible: a Stop
+   button that never finds anything looks like a Stop button on an already-stopped
+   process.
+2. Use `command=` alone and substring-test for `-m visionhands.sidecar` -
+   **still wrong**: a python running `-c "x='-m visionhands.sidecar'"` matches.
+3. Require `-m` and the module name to be **adjacent argv tokens**, with argv[0]
+   a python. Verified against three decoys - a shell echoing the string, a python
+   with it inside a `-c`, and a `tail` on a path containing it - all rejected,
+   the real sidecar found.
+
+The lesson is not "be careful with pgrep". It is that a function whose job is to
+send signals to processes it identified by string matching deserves adversarial
+tests before it runs anywhere near a user's machine, and that I only found the
+first bug because I ran it.
+
+Also worth noting: `par.pulse()` is ASYNCHRONOUS. Reading `Sidecarpid`
+immediately after pulsing Start returns the old value, because the callback has
+not fired yet. That is not a bug, but it made the first verification look like a
+failure when the process had in fact started correctly.
