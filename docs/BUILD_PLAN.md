@@ -170,7 +170,33 @@ contract as one table with an import-time self-check. `synth.py` and
 `sequences.py` mean a stream can be tested with no camera at all. The OSC encoder
 is contract-agnostic.
 
-**What does not, and needs deciding first:**
+**SETTLED 2026-08-21, so not open questions any more:**
+
+- **The toggles are launch flags, not live control.** The sidecar is a separate
+  process that TouchDesigner starts with `subprocess.Popen`, and the Start button
+  already builds a command line - so a stream toggle is a flag appended in
+  `start()`, read once at initialisation. Flipping a toggle takes effect on the
+  next restart. That removes the whole hard part: no control channel into the
+  sidecar, no live reconfiguration of a running capture session, no
+  partial-reconfiguration state machine.
+- **The channel contract stays CONSTANT whatever is enabled.** A disabled stream
+  sends zeros; it does not stop sending. TouchDesigner's OSC In CHOP creates
+  channels as they arrive, so omitting them makes them VANISH from the CHOP - and
+  DESIGN.md 6.2 records why that is the dangerous failure: an operator referencing
+  a missing channel silently stops receiving, with no error anywhere. The saving
+  that matters is the inference, not the 4 bytes per channel.
+- **The sidecar reports which streams it actually started**, as channels. Otherwise
+  the panel lies after someone flips a toggle without restarting; with them, TD can
+  say "toggle on, sidecar off - restart needed".
+- **Segmentation goes down the C++ path**, and is deferred. It is a mask rather than
+  floats, so no toggle scheme changes the fact that it breaks the "137 floats and no
+  pixels" property (DESIGN.md 4.2). Datum worth having before starting: a C++
+  segmentation plugin for TouchDesigner already exists and reportedly **pins the
+  frame rate at 50 fps**. So the question is not whether it can be done but whether
+  10 fps is an acceptable price, and that is worth measuring against our own
+  requirements rather than inheriting someone else's implementation.
+
+**Still to decide:**
 
 - **One process or several?** One sidecar running several requests shares the
   camera and one capture queue, which is cheaper and keeps frames aligned across
@@ -194,9 +220,10 @@ is contract-agnostic.
   Worth separating from face and pose, which are both landmark streams and fit the
   existing shape.
 
-**Suggested order:** decide the process/port/control questions first, then pose
-(closest to hands, same `VNRecognizedPointsObservation` shape), then face, then
-segmentation last as its own decision.
+**Suggested order:** pose first (closest to hands - the same
+`VNRecognizedPointsObservation` shape, so `types.py`'s joint-table pattern and
+`derive()`'s structure both carry over), then face, then segmentation separately
+down the C++ path.
 
 ## Deferred by the user, so not oversights
 
@@ -204,12 +231,55 @@ Raised and explicitly set aside on 2026-08-20, listed so nobody re-raises them a
 gaps:
 
 - **README** - later.
-- **Two-hand behaviour and slot assignment** (milestone 11) - later; still needs a
-  two-hand fixture.
+- **Two-hand behaviour of the TRACKER** - later; needs a two-hand fixture to
+  measure throughput, chirality stability and behaviour under occlusion. Note that
+  this is NOT the same as slot assignment, which is not blocked - see below.
 - **Per-joint jitter measurement** - not wanted for now. It is what should set
   `Beta` and `Velocityfilter`, so those defaults stay labelled guesses.
 - **`Sidecar.run()` tests** - later. Five mutations still survive a green suite,
   including one where the loop sends nothing.
+
+## Step 6 — slot assignment, and it is NOT blocked on a fixture
+
+I have been repeating that milestone 11 needs a two-hand fixture. That is half
+wrong, and the half that is wrong is the half that matters.
+
+**Chirality already works.** `engine.py` reads `observation.chirality()` and maps
+it to `CHIRALITY_LEFT/_UNKNOWN/_RIGHT`, and it is published as `h{i}_chirality`.
+DESIGN.md 2.3 records it verified against a real hand. So the input the algorithm
+needs is already in the stream, at no extra inference cost.
+
+**What is missing is using it.** DESIGN.md 6.3 specifies the algorithm - match by
+chirality when both hands are confident and distinct, then wrist proximity, then a
+grace period - and none of it is implemented, so `h0` can swap to the other
+physical hand between frames.
+
+**Why this is the biggest outstanding correctness gap.** Every per-hand temporal
+channel now depends on `h0` meaning the same hand from one frame to the next:
+`h0_vel_x`, `h0_speed`, `h0_held`, `h0_dwell`, and every per-hand latch and its
+counters. With two hands in shot and no slot assignment, all of them are measuring
+a hand that may have changed identity. The caveat is documented in
+docs/ATTRIBUTES.md, which is honest but not a fix - and the temporal work since has
+made the exposure much larger than it was when that caveat was written.
+
+**And it is testable with no fixture and nobody in frame.** `HandPose.chirality` is
+already a field, `synthetic_frame` takes a list of poses, and `sequences.py` is
+built for exactly this: a sequence with a left and a right hand crossing over,
+asserting that `h0` stays the left hand throughout, and a second with chirality
+forced to UNKNOWN to exercise the proximity fallback. The algorithm is pure Python
+in the package, so it is unit-testable the way `derive()` is.
+
+The fixture is still wanted, but for a different question: how real Vision behaves
+- whether chirality flickers, and what it reports during occlusion. That validates
+the assumptions the algorithm rests on. It does not gate writing it.
+
+**Suggested as the next thing to build**, ahead of the rest of step 2, because
+several remaining channels (`dwell`, `steadiness`, the wave and swipe events) are
+per-hand and inherit the same unreliability.
+
+Cheap to bundle while in there: `h{i}_e_grab` / `h{i}_e_release` are latches on
+`openness` with `Grabon`/`Graboff` - two more rows in the latch table, no new
+machinery.
 
 ## TouchDesigner facts that cost time to learn
 
