@@ -28,6 +28,21 @@ points, and they all use one mechanism:
 
     start pulse = rising edge of state       end pulse = falling edge
 
+**Two rules that are not optional.** An absent hand publishes every joint at
+(0, 0), so every distance is 0 - below every `on` threshold - and `size` is 0 too,
+making every normalised distance 0/0. Without these, losing a hand fires pinch,
+snap and clap simultaneously and floods the output with NaN, which spreads
+silently through TouchDesigner maths:
+
+    state = h{i}_active AND ( below_on OR (prev AND NOT above_off) )
+    size  = max(raw_size, Sizefloor)
+
+The `active` gate is on the STATE, not just on the pulses. Gate only the pulses
+and the latch sits quietly engaged while the hand is gone, then emits a spurious
+`end` pulse when it comes back. Derived channels for an inactive hand are forced
+to 0 rather than left at their last value, so nothing downstream mistakes a stale
+reading for a live one.
+
 That is a Schmitt trigger, and the gap between `on` and `off` does two jobs at
 once. It stops the state chattering when a distance sits near the threshold, and
 it **is** the re-arm rule: the start pulse cannot fire again until the points have
@@ -50,6 +65,29 @@ What remains true, and is the only residual caveat: the pulse lands on the frame
 where the crossing is first observed, so its timing is accurate to +/- one frame
 (33 ms). That is irrelevant for triggering an event and would matter for
 sample-accurate audio, which is not what this is for.
+
+### Why a latch and not a pulse counter
+
+The obvious alternative - and a common one - is to accumulate edges: a Count CHOP
+looping 0..1, incremented by the engage crossing and again by the release
+crossing, with the input gated to prevent double-counting. TouchDesigner's Logic
+CHOP has the same thing built in as `preop = Toggle`.
+
+It works, and it has one structural weakness: it stores the PARITY of the pulses
+it has seen. Miss a pulse - a dropped frame, or a distance that crosses both
+thresholds inside a single frame - and the state is inverted permanently, until
+some later pulse happens to flip it back. Nothing in the topology can detect
+that it is wrong, which is why such designs end up needing a reset path.
+
+The recurrence above is level-driven instead. `d < on` forces the state true and
+`d > off` forces it false, both regardless of history; history is consulted only
+inside the dead band, where the input genuinely is ambiguous. So every kind of
+desynchronisation - a missed edge, a double crossing, an odd startup state -
+corrects itself on the next frame where the distance is unambiguous. There is no
+accumulated state to get out of step, and no reset to wire.
+
+A Count CHOP is still worth having alongside it, for what it is actually good at:
+`h{i}_pinch_count`, how many times the gesture has fired. Just not as the state.
 
 ## Why every distance is normalised by hand size
 
@@ -302,6 +340,7 @@ are excluded from the output rather than left stale.
 | `Activateframes` | int | 3 | consecutive good frames before `active` turns on |
 | `Deactivateframes` | int | 6 | consecutive bad frames before it turns off. Higher than activate on purpose: losing a hand mid-gesture is worse than gaining one late |
 | `Sizejoint` | menu | middle_mcp | what defines `h{i}_size`: middle_mcp distance, or bbox diagonal |
+| `Sizefloor` | units | 0.01 | minimum divisor for `h{i}_size`. Guards 0/0 when a hand is absent or degenerate |
 | `Curlmin` | ratio | 0.35 | tip-to-mcp over finger length that maps to curl 1.0 |
 | `Curlmax` | ratio | 0.95 | and to curl 0.0. Calibrates the curl range to a hand |
 | `Extendedbelow` | 0..1 | 0.30 | curl below this counts as extended for gesture states |
@@ -369,3 +408,47 @@ sin/cos are filtered and recombined.
 **Per-joint jitter is still unmeasured** (`DESIGN.md` 11). It determines how much
 smoothing the temporal groups need, and it is measurable from the fixture without
 a person present. Worth doing before tuning any velocity threshold.
+
+---
+
+## Implementation
+
+**Stateless maths in one Script CHOP; everything temporal in native CHOPs.**
+
+Every distance, angle, curl, palm centre, bounding box, openness and two-hand
+geometry is a pure function of one frame's 137 channels. Built from native CHOPs
+that would be hundreds of operators of Shuffle and Rename gymnastics purely to
+align channel names before subtracting them, and testable only by eye. Written as
+Python it is one operator whose code reads like this document.
+
+The decisive reason is testability. The Script CHOP's cook is a thin wrapper
+around a pure function in `visionhands/derive.py`:
+
+    derive(values: dict[str, float], params, groups) -> dict[str, float]
+
+which needs no TouchDesigner at all. Feed it a synthetic fist and assert
+`h0_openness == 0`; feed it a hand rotated 30 degrees and assert `h0_rotation`
+is 30. Every formula above becomes an assertion, checked with no camera and
+nobody in frame.
+
+Everything with memory stays native, because TouchDesigner does it properly, it
+is inspectable in the network, and it keeps no hidden Python state for a project
+reload to treat unpredictably:
+
+| need | operator |
+|---|---|
+| velocity, acceleration | Slope |
+| smoothing | Lag, Filter |
+| Schmitt latches and their edge pulses | Feedback + Logic |
+| debounce (`Activateframes`, `Gestureframes`) | Count or Trail + Logic |
+| refractory windows, dwell | Timer, Count |
+| steadiness | Trail + Analyze |
+| group gating | `allowCooking` per group COMP, plus a Select on the output |
+
+Cost: the Script CHOP runs main-thread Python, which was never the problem - the
+28x starvation measured in `DESIGN.md` 2.8 was a BACKGROUND thread. Comparable
+work measured 0.141 ms for 137 channels, and numpy arithmetic over ~40 arrays adds
+microseconds. To be measured rather than assumed once built.
+
+`derive()` takes the set of enabled groups so a disabled group costs nothing
+inside the Script CHOP as well as outside it.
