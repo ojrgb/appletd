@@ -260,6 +260,81 @@ downstream, and in chirality mode the hazard cannot arise.
   how often the proximity fallback is reached, and it is the last thing standing
   between the fallback being tested and being merely written.
 
+## Step 7 — cook time: 1.8 ms is too much, and here is where it goes
+
+Raised after the first live session: the COMP's CPU cook time is about 1.5-1.8 ms,
+which is 9-11% of a 16.7 ms frame for what is mostly arithmetic on 15 channels.
+Three separate asks, and the profile below decides the order.
+
+**MEASURED**, `cookTime` summed over the COMP's 152 operators, Smoothing on:
+
+| group | ms | share |
+|---|---|---|
+| one-euro filter (`oef_*`) | 0.612 | 33.5% |
+| latch bank (`lat_*`) | 0.370 | 20.3% |
+| `derive_chop` (Python) | 0.368 | 20.1% |
+| temporal (`tmp_*`) | 0.241 | 13.2% |
+| other | 0.138 | 7.5% |
+| coordinate branches | 0.099 | 5.4% |
+| **total** | **1.828** | |
+
+And the single most useful reading: **with `Smoothing` OFF the filter still costs
+0.609 ms.** The toggle switches which channels reach the output; it does not stop
+the chain cooking, because the Switch CHOP pulls both its inputs and the group
+clock pulls the Switch. So the most expensive thing in the COMP is not gated by its
+own toggle.
+
+### 7.1 Non-destructive optimisations — do these first
+
+- **`lat_on` and `lat_off` cost 0.110 ms between them, for six numbers.** They are
+  Constant CHOPs whose 15 values are each a Python EXPRESSION on a Tuning
+  parameter, so that is 30 expression evaluations per frame to deliver thresholds
+  that only change when somebody drags a slider. Replace with static values
+  rewritten by a Parameter Execute DAT on change. Same channels, same values, no
+  per-frame Python.
+- **`lat_live5` and `lat_active13` are two 15-channel broadcasts of two booleans**,
+  0.074 ms together, and they are ANDed into the same gate. Compute `live AND
+  active` per hand first (one native Logic CHOP, 2 channels) and broadcast ONCE.
+  Halves it.
+- **The tail is 130 operators summing 0.628 ms**, about 0.005 ms each. That is the
+  floor for this many operators and it is the strongest argument for 7.3: fewer,
+  wider operators rather than more, narrower ones.
+- Worth checking but probably not worth doing: the filter runs on all 84 position
+  channels. Nothing needs the confidences filtered and few consumers need all 21
+  joints smoothed, but narrowing it trades a real property - that everything
+  downstream inherits one filter - for a fraction of 0.6 ms.
+
+### 7.2 Put the expensive things behind toggles that actually gate them
+
+The filter is the case in point: 0.6 ms that a project not using smoothing pays
+anyway. A Switch CHOP cannot gate cost, because it pulls both inputs. Two ways:
+
+- **`allowCooking` on a group COMP** — measured to work, and it stops the clock
+  inside too (docs/BUILD_PLAN step 3). Needs 7.3 first.
+- **A Select CHOP whose `chops` parameter is an expression** naming either the raw
+  or the filtered source. Nothing references the branch that is not named, so it is
+  not pulled. Cheaper to build than 7.3 and worth measuring against it.
+
+Either way the consequence is the same and needs writing down: a filter that stops
+cooking has a stale `x_hat_prev`, so re-enabling it has a settling transient. It
+self-converges, and it is the same trade `allowCooking` makes everywhere else.
+
+### 7.3 Group the network into COMPs
+
+152 operators in one flat network is spaghetti, and it is also why the tail costs
+0.6 ms. One base COMP per concern - `filter`, `latches`, `temporal`, `coords` -
+each with its inputs and outputs on connectors, gives:
+
+- something a person can read;
+- `allowCooking` gating per group, which is 7.2 done properly;
+- and the clock question already answered: Cook Type = Always does NOT run inside
+  a COMP with cooking disabled, so each group's clock must sit inside the group it
+  clocks - which is what makes disabling a group actually free.
+
+The channel-to-group registry that step 3 wants for output trimming is the same
+refactor: once the latch table lives in `visionhands/` rather than in a builder
+script, both the registry and the builders can import it.
+
 ## TouchDesigner facts that cost time to learn
 
 - `CookLevel` exists ONLY in a DAT's globals. Not `builtins`, not the `td` module.
