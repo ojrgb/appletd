@@ -93,17 +93,49 @@ and a smoothed signed velocity of an oscillation averages toward zero - 0.037
 units/s against 1.43 for a traverse - so the motion thresholds would have had
 nothing to fire on.
 
-## Step 3 — groups and parameters
+## Step 3 — groups and parameters — PARTLY DONE 2026-08-21
 
-- One base COMP per group; `allowCooking` bound to its toggle so a disabled group
-  costs nothing.
-- `select_out.channames` as an expression assembling the enabled groups' patterns,
-  so a disabled group's stale channels are excluded rather than published.
-- Both are needed: cooking gated by one, channel list by the other.
-- Five pages exactly as tabulated in `docs/ATTRIBUTES.md`.
-- Pass the parameters into `derive()` via the existing `_params()` reader in
-  `tools/td_add_derive.py`; it already falls back to spec defaults with `getattr`,
-  so adding a parameter needs no code change there.
+`tools/td_add_groups.py` builds the Attributes page: a `Verbosity` menu with the
+three presets and a toggle per group.
+
+**What works, and it is the part that matters for compute.** The toggles reach
+`derive()` through the `_groups()` reader that has been in
+`tools/td_add_derive.py` all along - it just fell back to "all enabled" because the
+parameters did not exist. Measured: `Verbosity = Minimal` takes `derive_chop` from
+**171 channels to 0** and the COMP output from 561 to 393. That is the one operator
+in the COMP where per-channel cost is real, so the compute worth saving is saved.
+
+**The `allowCooking` question is answered by measurement.** A Feedback counter and
+a Cook Type = Always Null inside a base COMP, `allowCooking` set False: the counter
+**froze** and its cook count stopped, and on re-enabling it resumed at the next
+value rather than jumping. So the mechanism works, disabling a group stops all of
+its cost including its clock, and a group with memory PAUSES rather than resetting
+- which means re-enabling one resumes with a `prev` from whenever it was switched
+off. For the latches that is a stale state for one frame (self-correcting, since
+the recurrence is level-driven) and possibly one wrong edge pulse across the gap.
+Bounded and acceptable - and it is why the clock must sit OUTSIDE any gated group.
+
+**Two things deliberately not done, with the reasons.**
+
+*Wrapping the native groups in base COMPs.* The mechanism is proven, but it is
+~150 operators of restructuring to save native CHOP cost on 1-sample inputs, which
+is negligible next to the Python cook the toggles already gate. Worth doing when
+the groups need to be relocatable for some other reason, not for the cost.
+
+*Trimming the output channel list for the native groups.* A disabled DERIVE group's
+channels genuinely vanish; the latch, trigger and motion channels keep their last
+value, because nothing gates them. `docs/ATTRIBUTES.md` suggests a Select whose
+`channames` is assembled from the enabled groups, and **wildcard patterns cannot
+partition these channels**: `h?_*_x` matches both the raw `h0_wrist_x` (Landmarks)
+and the derived `h0_palm_x` (Core), and `h?_e_*` matches both the Events pulses and
+the Triggers pulses. It needs an exact channel-to-group map.
+
+The sound way to get one, when it is time: a registry in the package. `derive()`
+can already report a group's channels by being called with just that group, so the
+derive side is free; the latch table moves from `tools/td_add_latches.py` into
+`visionhands/` so both the builder and the registry import it. That also fixes a
+smell noted in the journal - liveness is a property of the stream and currently
+lives in the latch builder, which two other builders now reach into.
 
 ## Step 4 — `tools/send_synthetic.py` — DONE 2026-08-20
 

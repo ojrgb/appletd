@@ -1627,3 +1627,55 @@ release (two more latch rows, not new machinery), and the swipe/wave/cross/twist
 events.
 
 181 tests, ruff and mypy clean.
+
+---
+
+## Group toggles, and the allowCooking question settled by measurement
+2026-08-21
+
+**Built.** `tools/td_add_groups.py`: the Attributes page, a `Verbosity` menu with
+the three presets from the spec, and a toggle per group.
+
+**The toggles gate the compute that actually costs.** They reach `derive()` through
+the `_groups()` reader that `tools/td_add_derive.py` has had all along - it fell
+back to "all enabled" only because the parameters did not exist. Measured:
+`Verbosity = Minimal` takes `derive_chop` from **171 channels to 0**, and the COMP
+output from 561 to 393. That is the one operator in the COMP where per-channel cost
+is real (main-thread Python, 0.210 ms for 171 channels), so the compute worth
+saving is saved by a page of toggles and no restructuring at all.
+
+**The `allowCooking` question, answered rather than argued.** A Feedback counter
+plus a Cook Type = Always Null inside a base COMP, then `allowCooking = False`: the
+counter **froze at 275** and its cook count stopped dead. Re-enabled, it resumed at
+276 - it paused, it did not reset. So:
+
+- disabling a group really does stop all of its cost, its clock included;
+- a group with memory resumes with a `prev` from whenever it was switched off, so
+  the latches would be stale for one frame (self-correcting, being level-driven)
+  and one edge pulse across the gap could be wrong. Bounded, acceptable, and the
+  reason the clock must live outside any gated group.
+
+**Two things I did not do, and would rather say why than pretend otherwise.**
+Wrapping the native groups in base COMPs is ~150 operators of restructuring to
+save native CHOP cost on 1-sample inputs - negligible against the Python cook the
+toggles already gate. And trimming the output list for the native groups needs an
+exact channel-to-group map: wildcard patterns provably cannot partition these
+channels, because `h?_*_x` matches the raw `h0_wrist_x` and the derived
+`h0_palm_x`, and `h?_e_*` matches both the Events and the Triggers pulses. The
+registry that would fix it is designed in `docs/BUILD_PLAN.md` step 3, and it also
+resolves a smell: liveness is a property of the stream and currently lives in the
+latch builder, which two other builders now reach into.
+
+**The same-frame trap, twice more, on the same mechanism.** Setting `Verbosity` and
+reading the toggles in one script showed the preset doing nothing three times in a
+row - the Parameter Execute callback runs after the script. Read one call later,
+`Minimal` correctly left exactly `Landmarks` and `Coordstx` on. This is the third
+distinct thing that a same-frame read has lied about today, after the cook-count
+comparison and the velocity distribution. Worth stating as a rule: nothing that
+crosses a frame boundary can be verified inside one script.
+
+**Not started: visionface, visionpose and person segmentation.** The two hours went
+on the filter, the triggers, the temporal channels and the three bugs each turned
+up. The plumbing is well-shaped for it - the sidecar takes any `HandSource` and the
+channel contract is one table - but it is a real piece of work and starting it
+badly would be worse than not starting.
