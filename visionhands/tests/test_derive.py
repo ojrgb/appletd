@@ -297,3 +297,72 @@ def test_params_are_honoured() -> None:
     loose = derive(channels(open_hand(confidence=0.5)), Params(confthreshold=0.1))
     assert strict["h0_valid"] == 0.0
     assert loose["h0_valid"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Handedness: a left hand is the mirror image, not a relabelled right one
+# ---------------------------------------------------------------------------
+def test_a_left_hand_is_mirrored_and_a_right_one_is_not() -> None:
+    """Caught by the user reading the generator: both thumbs pointed the same way.
+
+    `_FINGERS` describes a right hand, so before this a left hand came out with
+    identical geometry and only a different `chirality` label. That made the label
+    cosmetic, and it meant anything handedness-sensitive - `rotation`,
+    `point_angle`, `pinch_angle`, `spread`, the pose descriptor - was silently
+    testing a right hand twice.
+
+    The property asserted is the one that defines handedness: which side of the
+    little finger the thumb is on.
+    """
+    from visionhands.types import CHIRALITY_LEFT, CHIRALITY_RIGHT, JOINT_NAMES
+
+    thumb, little = JOINT_NAMES.index("thumb_tip"), JOINT_NAMES.index("little_tip")
+    sides = {}
+    for chirality in (CHIRALITY_RIGHT, CHIRALITY_LEFT):
+        hand = synthetic_frame([open_hand(palm_x=0.5, palm_y=0.5, size=0.12,
+                                          rotation=90.0, chirality=chirality),
+                                None]).hands[0]
+        sides[chirality] = hand.joints[thumb].x - hand.joints[little].x
+
+    assert sides[CHIRALITY_RIGHT] < 0.0, "a right hand's thumb sits left of its little finger"
+    assert sides[CHIRALITY_LEFT] > 0.0, "a left hand's thumb must sit on the OTHER side"
+    # And a true reflection, not merely a different sign.
+    assert sides[CHIRALITY_LEFT] == pytest.approx(-sides[CHIRALITY_RIGHT])
+
+
+def test_mirroring_leaves_every_scalar_attribute_alone() -> None:
+    """A reflection must not change size, rotation, curl, openness or spread.
+
+    `size` and `rotation` are both defined off the wrist-to-middle-MCP vector, and
+    middle_mcp sits at local x = 0, so reflecting x cannot move it - which is what
+    keeps every exactness assertion in this file true for either hand. If this ever
+    fails, the mirror has been applied somewhere that also moves middle_mcp.
+    """
+    from visionhands.types import CHIRALITY_LEFT, CHIRALITY_RIGHT
+
+    def attributes(chirality: int) -> dict[str, float]:
+        return derive(channels(peace(palm_x=0.4, palm_y=0.6, size=0.14,
+                                     rotation=35.0, chirality=chirality)))
+
+    right, left = attributes(CHIRALITY_RIGHT), attributes(CHIRALITY_LEFT)
+    for name in ("h0_size", "h0_rotation", "h0_openness", "h0_spread",
+                 "h0_curl_index", "h0_curl_middle", "h0_curl_ring",
+                 "h0_curl_little", "h0_curl_thumb", "h0_g_peace"):
+        assert left[name] == pytest.approx(right[name], abs=1e-6), name
+
+
+def test_mirroring_DOES_flip_the_directional_attributes() -> None:
+    """The negative control: a reflection has to change something, or it did nothing.
+
+    `pinch_angle` is the thumb->index vector's angle, which is exactly the kind of
+    quantity a reflection must change. Without this, the test above would pass on a
+    mirror that was not applied at all.
+    """
+    from visionhands.types import CHIRALITY_LEFT, CHIRALITY_RIGHT
+
+    def angle(chirality: int) -> float:
+        return derive(channels(open_hand(palm_x=0.5, palm_y=0.5, size=0.12,
+                                         rotation=90.0,
+                                         chirality=chirality)))["h0_pinch_angle"]
+
+    assert angle(CHIRALITY_LEFT) != pytest.approx(angle(CHIRALITY_RIGHT), abs=1.0)

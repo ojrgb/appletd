@@ -35,6 +35,10 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+# visionhands.slots depends only on visionhands.types - no pyobjc - so importing
+# it at module scope does not compromise this module's promise to be importable,
+# and testable, with no frameworks present. test_boundaries.py enforces that.
+from visionhands.slots import SLOT_MODE_CHIRALITY
 from visionhands.types import LandmarkFrame, blank_frame
 
 if TYPE_CHECKING:
@@ -226,7 +230,9 @@ class InProcessSource:
 
     def __init__(self, camera_name: str | None = None,
                  width_px: int | None = None,
-                 height_px: int | None = None) -> None:
+                 height_px: int | None = None,
+                 slot_mode: str = SLOT_MODE_CHIRALITY) -> None:
+        self._slot_mode = slot_mode
         self.box = LatestFrameBox()
         # Guards start()/stop() against each other. It is NEVER taken by
         # latest() or age_ms() - the read path stays lock-free, which is the
@@ -278,6 +284,9 @@ class InProcessSource:
                 # silently defeats every downstream `seq > last_seq` check until
                 # the new engine catches up. DESIGN.md 6.1 says monotonic.
                 seq_start=self.box.latest().seq,
+                # Which physical hand lands in which slot - see
+                # visionhands/slots.py.
+                slot_mode=self._slot_mode,
             )
             # Marked before starting, so the age of a camera that never delivers
             # is measured from the attempt rather than from the first success.

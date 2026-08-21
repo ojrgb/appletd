@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from visionhands.types import (
+    CHIRALITY_LEFT,
     CHIRALITY_RIGHT,
     JOINT_NAMES,
     MAX_HANDS,
@@ -157,6 +158,26 @@ def synthetic_hand(pose: HandPose) -> Hand:
     local: list[tuple[float, float]] = [(0.0, 0.0)]      # wrist at the origin
     for finger in ("thumb", "index", "middle", "ring", "little"):
         local.extend(_finger_chain(finger, pose))
+
+    # MIRROR A LEFT HAND. `_FINGERS` describes a right hand - the thumb sits at
+    # x = -0.42 and the little finger at +0.36 - and a left hand is that reflected,
+    # not the same shape with a different label. Without this, `chirality` was
+    # cosmetic: both hands came out with the thumb on the same side, so anything
+    # handedness-sensitive was silently testing a right hand twice. That is
+    # `rotation`, `point_angle`, `pinch_angle`, `spread` and the whole pose
+    # descriptor.
+    #
+    # Applied in local space BEFORE normalising, rotating or pinching, so
+    # everything downstream inherits it - including the pinch, which reaches for a
+    # fingertip that has already moved.
+    #
+    # `pose.rotation` and `pose.size` survive exactly, which the tests depend on:
+    # both are defined off the wrist-to-middle-MCP vector, and middle_mcp sits at
+    # x = 0 (the comment on `_FINGERS` explains why), so reflecting x does not move
+    # it. Reflection does reverse the winding order thumb->little, which is
+    # precisely what distinguishes a left hand from a right one.
+    if pose.chirality == CHIRALITY_LEFT:
+        local = [(-x, y) for x, y in local]
 
     # Normalise so the wrist-to-middle-MCP distance is exactly 1 in local space.
     # Without this, `pose.size` is a scale factor rather than the hand size that

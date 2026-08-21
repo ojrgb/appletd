@@ -174,11 +174,21 @@ def start():
     pressing a button twice.
     """
     stop()
+    # The toggle reaches the sidecar as a LAUNCH FLAG, read once at startup.
+    # That is the whole mechanism, and it is why the toggle says "restart to
+    # apply": the sidecar is a separate process and there is no control channel
+    # into it. Adding one to change a hand partition would be a great deal of
+    # machinery for something nobody changes mid-session. The same pattern is
+    # settled for the future stream toggles - docs/BUILD_PLAN.md step 5.
+    comp = op(%(comp)r)
+    assign = comp is None or bool(comp.par.Slotassign.eval())
     process = subprocess.Popen(
         [SIDECAR_PYTHON, "-m", "visionhands.sidecar",
-         "--port", str(PORT), "--parent-pid", str(os.getpid())],
+         "--port", str(PORT), "--parent-pid", str(os.getpid()),
+         "--slots", "chirality" if assign else "off"],
         cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("[visionhands] sidecar started, pid %%d" %% process.pid)
+    print("[visionhands] sidecar started, pid %%d, slots=%%s"
+          %% (process.pid, "chirality (h0=right, h1=left)" if assign else "off"))
     return process.pid
 
 
@@ -328,6 +338,18 @@ def main():
     par_rh.default = DEFAULT_HEIGHT
 
     lifecycle = comp.appendCustomPage("Sidecar")
+    # Slot assignment: h0 = the right hand, h1 = the left, whichever order Vision
+    # reports them in (visionhands/slots.py). On the Sidecar page rather than with
+    # the attribute toggles, because it is a property of the PROCESS and only takes
+    # effect when one is started - putting it beside Start is what makes that
+    # obvious. NOTE the behavioural consequence: with this on, a single LEFT hand
+    # puts nothing in h0, so every h0_* channel reads zero and h1_* carries the
+    # hand. That is what "h0 is always the right hand" means.
+    par_slots = lifecycle.appendToggle("Slotassign",
+                                       label="Assign Slots (restart to apply)")[0]
+    par_slots.default = True
+    if not existed:
+        par_slots.val = True
     lifecycle.appendPulse("Startsidecar", label="Start Sidecar")
     lifecycle.appendPulse("Stopsidecar", label="Stop Sidecar")
     lifecycle.appendPulse("Sidecarstatus", label="Print Status")
@@ -412,7 +434,8 @@ def main():
     control = comp.create(td.textDAT, "sidecar_control")
     control.nodeX, control.nodeY = -600, 200
     control.text = SIDECAR_CONTROL_SOURCE % {
-        "python": SIDECAR_PYTHON, "repo": REPO_ROOT, "port": OSC_PORT}
+        "python": SIDECAR_PYTHON, "repo": REPO_ROOT, "port": OSC_PORT,
+        "comp": comp.path}
 
     callbacks = comp.create(td.parameterexecuteDAT, "sidecar_callbacks")
     callbacks.nodeX, callbacks.nodeY = -350, 200

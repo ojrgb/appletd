@@ -768,18 +768,68 @@ than silent.
 
 Publish `age_ms` and treat a rising value as engine death.
 
-### 6.3 Slot assignment — new work, not inherited from the spike
+### 6.3 Slot assignment — DONE, and simpler than planned
 
-Vision gives no tracking ID, so `h0` can swap to the other physical hand between
-frames unless we prevent it. Algorithm:
+Vision gives no tracking ID and its observation order is not stable, so `h0` swaps
+to the other physical hand between frames unless we prevent it.
+`visionhands/slots.py` prevents it, and the algorithm collapsed to almost nothing
+because Vision already tells us which hand is which.
 
-1. Match by `chirality` when both hands have confident and distinct handedness.
-2. Otherwise match by wrist proximity to the previous frame's slots.
-3. Hold a slot through brief dropouts (N-frame grace) before releasing it.
+**The assignment is a partition, not a tracking problem.**
+`VNHumanHandPoseObservation.chirality` reports left or right; `engine.py` has read
+it since it was written and §2.3 records it verified against a real hand. So:
 
-This needs its own test with a two-hand fixture. Silent slot-swapping looks
-fine on screen and corrupts everything downstream, which makes it the most
-dangerous defect in the system.
+    slot 0 = the RIGHT hand,   slot 1 = the LEFT hand
+
+fixed by anatomy rather than by Vision's whim, which makes it stable across
+dropouts, occlusion and reordering with no history at all. Vision reports the
+ANATOMICAL hand, not which side of the frame it appeared on, so this is unaffected
+by mirroring — which is a separate question about the x coordinate.
+
+The fallbacks the original plan specified are still there and still needed, but
+only for the cases chirality cannot decide:
+
+1. **Chirality**, when both hands are confidently and distinctly handed. `all`
+   rather than `any`: one confident hand and one UNKNOWN is not enough, because
+   placing one and guessing the other produces a guess that looks like an
+   assignment.
+2. **Wrist proximity** to the previous frame's slots otherwise — two hands both
+   reported RIGHT, or UNKNOWN. With two slots there are exactly two pairings, so it
+   enumerates both and takes the cheaper.
+3. **The N-frame grace period is NOT implemented, and should not be.** The original
+   plan wanted a slot held through brief dropouts. The Presence group's debounce
+   (`Activateframes` / `Deactivateframes`, docs/ATTRIBUTES.md) already does exactly
+   that job, downstream and per hand — and in chirality mode the hazard does not
+   arise anyway, because a left hand can never land in slot 0 no matter how many
+   frames the right hand is missing. Building it here would have been a second
+   mechanism for one problem.
+
+**MEASURED end to end, with an unstable synthetic stream** — a left and a right
+hand crossing over, with the hand order reversed every frame the way Vision
+reorders (`sequences.py`'s `crossing`, sent with `--unstable`):
+
+| | assignment on | assignment off |
+|---|---|---|
+| `h0_chirality` | +1 throughout | alternates |
+| `h0_size` | **0.1200** | **0.1322** |
+| `h1_size` | 0.1440 | 0.1318 |
+
+The two hands were generated at sizes 0.1200 and 0.1440, whose mean is 0.1320. So
+with assignment off, `h0` is **neither hand** — the smoothing filter averages both
+into one slot, because the slot changes identity every frame. That is what "silent
+slot swapping looks fine on screen" means concretely, and it is the clearest
+demonstration of the defect this section was written about.
+
+**It is a toggle** (`--slots off`, or `Slotassign` on the COMP's Sidecar page,
+read at launch) because it has a real behavioural consequence: with assignment on,
+a single LEFT hand puts nothing in slot 0. Every `h0_*` channel reads zero and
+`h1_*` carries the hand. That is the correct reading of "h0 is always the right
+hand" and it will surprise anyone who has been treating `h0` as "the hand".
+
+**What is still unmeasured** is how real Vision behaves: whether chirality flickers
+frame to frame, and what it reports during occlusion or when a hand is edge-on.
+Both determine how often the proximity fallback is actually reached. That needs a
+two-hand fixture, and it validates the assumptions rather than gating the code.
 
 ---
 
@@ -936,8 +986,9 @@ predates both the sidecar and the attribute layer.
 9. **The rest of the temporal channels** — velocity, smoothing, debounce, dwell,
    steadiness, motion events. `docs/BUILD_PLAN.md` step 2.
 10. **Groups and parameter pages**, gated by `allowCooking`. Step 3.
-11. **Slot assignment**, which needs a two-hand fixture. The only milestone
-    blocked on something outside the repo.
+11. ~~**Slot assignment.**~~ **DONE** — see §6.3. It did not need the fixture:
+    chirality was already in the stream, and the algorithm is testable with
+    synthetic hands. The fixture is still wanted, for how real Vision behaves.
 12. **README**, and fold anything newly measured back into §2.
 
 ---

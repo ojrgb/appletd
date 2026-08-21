@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from visionhands.osc import encode_channels
 from visionhands.sequences import SEQUENCES, frames
 from visionhands.sidecar import DEFAULT_HOST, DEFAULT_PORT, SEQ_MODULUS
+from visionhands.slots import SLOT_MODE_CHIRALITY, SLOT_MODES, SlotAssigner
 from visionhands.types import channel_names, channel_values
 
 # Frames per second to send at, and seconds per sweep. 30 fps matches what the
@@ -129,7 +130,8 @@ def _runs_module(words: list[str], module: str) -> bool:
 
 
 def send(sequence_name: str, host: str, port: int, fps: float,
-         period_s: float, cycles: float, quiet: bool = False) -> int:
+         period_s: float, cycles: float, quiet: bool = False,
+         slot_mode: str = SLOT_MODE_CHIRALITY, unstable: bool = False) -> int:
     """Stream one sequence. Returns the number of frames sent.
 
     Thread: the calling thread, which it blocks for the duration. This is a
@@ -137,6 +139,11 @@ def send(sequence_name: str, host: str, port: int, fps: float,
     """
     sequence = SEQUENCES[sequence_name]
     names = channel_names()
+    # The SAME assigner the sidecar uses, so this stream is what the sidecar would
+    # produce. Without it, slot assignment would be the one thing in the pipeline
+    # that no end-to-end test could reach - it lives in the engine, and this tool
+    # bypasses the engine entirely.
+    assigner = SlotAssigner(slot_mode)
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sent = 0
     started = time.monotonic()
@@ -157,6 +164,18 @@ def send(sequence_name: str, host: str, port: int, fps: float,
             # this frame is by the time it goes on the wire. Small and honest
             # rather than zero, so a downstream staleness gate behaves as it
             # would in production instead of seeing an impossibly fresh frame.
+            if unstable:
+                # Vision reorders its observations between frames and gives no
+                # tracking ID (DESIGN.md 6.3). Reversing every other frame
+                # simulates that, which is what makes the assignment observable:
+                # with it on, `h0_chirality` holds steady; with it off, it
+                # alternates. A stream that never reorders cannot tell them apart.
+                if frame.seq % 2:
+                    frame = type(frame)(seq=frame.seq, captured_at=frame.captured_at,
+                                        width=frame.width, height=frame.height,
+                                        hands=tuple(reversed(frame.hands)))
+            frame = assigner.assign(frame)
+
             age_ms = max(0.0, (time.monotonic() - due) * 1000.0)
             n_hands = sum(1 for hand in frame.hands if hand.found)
             values = list(channel_values(frame, age_ms, n_hands))
@@ -193,6 +212,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cycles", type=float, default=4.0,
                         help="how many sweeps; fractional is allowed")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--slots", default=SLOT_MODE_CHIRALITY, choices=SLOT_MODES,
+                        help="slot assignment, matching the sidecar's own flag")
+    parser.add_argument("--unstable", action="store_true",
+                        help="reverse the hand order every other frame, the way "
+                             "Vision does. Use with `crossing` to see whether "
+                             "assignment is working")
     parser.add_argument("--force", action="store_true",
                         help="send even if the sidecar is running (interleaves)")
     args = parser.parse_args(argv)
@@ -221,7 +246,8 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     try:
         sent = send(args.sequence, args.host, args.port, args.fps,
-                    args.period, args.cycles, args.quiet)
+                    args.period, args.cycles, args.quiet,
+                    slot_mode=args.slots, unstable=args.unstable)
     except KeyboardInterrupt:
         print("\ninterrupted")
         return 130

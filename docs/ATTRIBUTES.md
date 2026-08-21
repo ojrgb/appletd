@@ -512,12 +512,18 @@ a rapid tap.
 
 ## Two caveats that are properties of the system, not of this list
 
-**Per-hand identity is not yet trustworthy.** Slot assignment is milestone 5;
-until it lands, `h0` can swap to the other physical hand between frames
-(`DESIGN.md` 6.3). Symmetric two-hand attributes — `hands_distance`,
-`hands_center`, `hands_angle`, `e_clap` — are unaffected. Anything that cares
-which hand is which, including `hands_symmetry` and every per-hand channel over
-time, is unreliable until then.
+**Per-hand identity depends on the `Slotassign` toggle.** With it ON — the default
+— `h0` is the right hand and `h1` the left, every frame, so every per-hand channel
+means what it says. With it OFF, `h0` can swap to the other physical hand between
+frames and anything with memory measures a hand that changed identity: velocity,
+`held`, `dwell`, and every per-hand latch and counter. Measured (`DESIGN.md` 6.3):
+with assignment off and two hands crossing, `h0_size` reads the MEAN of the two
+hands' sizes, because the smoothing filter averages both into one slot.
+
+Note the consequence of it being on: a single LEFT hand puts nothing in `h0`. Every
+`h0_*` channel reads zero and `h1_*` carries the hand. Symmetric two-hand
+attributes — `hands_distance`, `hands_center`, `hands_angle`, `e_clap` — are
+unaffected either way.
 
 **Angles wrap, and filtering them naively produces spikes.** A hand crossing
 ±180° makes a smoothed `hands_angle` swing through zero, which reads as a violent

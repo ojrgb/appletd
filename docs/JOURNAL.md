@@ -1679,3 +1679,82 @@ on the filter, the triggers, the temporal channels and the three bugs each turne
 up. The plumbing is well-shaped for it - the sidecar takes any `HandSource` and the
 channel contract is one table - but it is a real piece of work and starting it
 badly would be worse than not starting.
+
+---
+
+## Slot assignment, and a left hand that was never a left hand
+2026-08-21
+
+**Built.** `visionhands/slots.py` plus 17 tests, wired through `engine.py`,
+`source.py` and `sidecar.py`, with a `--slots` flag and a `Slotassign` toggle on
+the COMP's Sidecar page. Milestone 11, closed - and it did not need the two-hand
+fixture everyone including me kept saying it was blocked on.
+
+**The algorithm collapsed to a partition.** Vision already reports which hand is
+which: `engine.py` has read `observation.chirality()` since it was written and
+DESIGN.md 2.3 records it verified against a real hand. So slot 0 is the right hand
+and slot 1 the left, fixed by anatomy rather than by Vision's ordering, which makes
+it stable across dropouts, occlusion and reordering with **no history at all**.
+Proximity against the previous frame is still there, but only for the cases
+chirality cannot decide - two hands both reported RIGHT, or UNKNOWN.
+
+**The N-frame grace period specified in 6.3 is deliberately NOT built.** The
+Presence debounce added yesterday already holds a hand through brief dropouts,
+downstream and per hand - and in chirality mode the hazard cannot arise anyway,
+because a left hand never lands in slot 0 however many frames the right one is
+missing. Building it would have been a second mechanism for one problem.
+
+**The measurement that shows what the defect actually was.** A left and a right
+hand crossing over, with the hand order reversed every frame the way Vision
+reorders (`sequences.py`'s `crossing`, sent with `--unstable`). The two hands were
+generated at sizes 0.1200 and 0.1440.
+
+| | assignment on | assignment off |
+|---|---|---|
+| `h0_chirality` | +1 throughout | alternates |
+| `h0_size` | **0.1200** | **0.1322** |
+| `h1_size` | 0.1440 | 0.1318 |
+
+0.1320 is the mean of 0.1200 and 0.1440. So with assignment off, `h0` is **neither
+hand** - the smoothing filter averages both into one slot, because the slot changes
+identity every frame. That is the most concrete demonstration of "silent slot
+swapping looks fine on screen" this project is likely to produce, and it only
+became visible because the filter was added first.
+
+**A toggle, because it changes behaviour.** With assignment on, a single LEFT hand
+puts nothing in slot 0: every `h0_*` channel reads zero and `h1_*` carries the
+hand. That is what "h0 is always the right hand" means, and it will surprise anyone
+treating `h0` as "the hand". Read at launch, restart to apply - the same mechanism
+settled for the stream toggles, and for the same reason: there is no control
+channel into the sidecar.
+
+**AND THE USER CAUGHT A BUG BY READING THE GENERATOR: the synthetic left hand was
+never a left hand.** `_FINGERS` describes a right hand - thumb at x = -0.42, little
+at +0.36 - and `synthetic_hand` built that geometry regardless of `chirality`,
+storing the label and nothing else. Both hands came out with the thumb on the same
+side.
+
+That made `chirality` cosmetic in every synthetic test, and it means anything
+handedness-sensitive had been silently testing a right hand twice: `rotation`,
+`point_angle`, `pinch_angle`, `spread`, and the whole pose descriptor. Fixed by
+reflecting local x before normalising, rotating or pinching, so everything
+downstream inherits it - including the pinch, which reaches for a fingertip that
+has already moved.
+
+Two things make the fix safe, and both are now tests. `size` and `rotation` are
+defined off the wrist-to-middle-MCP vector and middle_mcp sits at local x = 0, so
+reflection cannot move it - every exactness assertion in `test_derive.py` holds for
+either hand, verified. And a negative control asserts that `pinch_angle` DOES
+change, because a mirror that changes nothing was not applied.
+
+Worth noting what this says about the slot measurement above: it was taken before
+the mirror fix, and it stands, because it turns on `size`, which reflection does not
+change. Re-run afterwards with genuinely mirrored hands it also shows `thumb - little`
+in x at -0.1101 for h0 and +0.1321 for h1 - opposite signs, which no amount of
+relabelling could fake.
+
+**Still unmeasured**, and now the only thing the fixture is for: whether real
+Vision's chirality flickers frame to frame, and what it reports during occlusion or
+edge-on. Both decide how often the proximity fallback is actually reached.
+
+201 tests, ruff and mypy clean.

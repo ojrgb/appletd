@@ -239,47 +239,26 @@ gaps:
 - **`Sidecar.run()` tests** - later. Five mutations still survive a green suite,
   including one where the loop sends nothing.
 
-## Step 6 — slot assignment, and it is NOT blocked on a fixture
+## Step 6 — slot assignment — DONE 2026-08-21
 
-I have been repeating that milestone 11 needs a two-hand fixture. That is half
-wrong, and the half that is wrong is the half that matters.
+`visionhands/slots.py`, 17 tests, wired through the engine, the source and the
+sidecar, with `--slots` and a `Slotassign` toggle on the Sidecar page. DESIGN.md
+6.3 has the algorithm and the measurement; the journal has how it went.
 
-**Chirality already works.** `engine.py` reads `observation.chirality()` and maps
-it to `CHIRALITY_LEFT/_UNKNOWN/_RIGHT`, and it is published as `h{i}_chirality`.
-DESIGN.md 2.3 records it verified against a real hand. So the input the algorithm
-needs is already in the stream, at no extra inference cost.
+Short version: it is a partition, not a tracking problem, because Vision already
+reports handedness. Slot 0 is the right hand. The grace period the original spec
+asked for is deliberately not built - the Presence debounce does that job
+downstream, and in chirality mode the hazard cannot arise.
 
-**What is missing is using it.** DESIGN.md 6.3 specifies the algorithm - match by
-chirality when both hands are confident and distinct, then wrist proximity, then a
-grace period - and none of it is implemented, so `h0` can swap to the other
-physical hand between frames.
+**Left over from it**, and worth doing next time this area is open:
 
-**Why this is the biggest outstanding correctness gap.** Every per-hand temporal
-channel now depends on `h0` meaning the same hand from one frame to the next:
-`h0_vel_x`, `h0_speed`, `h0_held`, `h0_dwell`, and every per-hand latch and its
-counters. With two hands in shot and no slot assignment, all of them are measuring
-a hand that may have changed identity. The caveat is documented in
-docs/ATTRIBUTES.md, which is honest but not a fix - and the temporal work since has
-made the exposure much larger than it was when that caveat was written.
-
-**And it is testable with no fixture and nobody in frame.** `HandPose.chirality` is
-already a field, `synthetic_frame` takes a list of poses, and `sequences.py` is
-built for exactly this: a sequence with a left and a right hand crossing over,
-asserting that `h0` stays the left hand throughout, and a second with chirality
-forced to UNKNOWN to exercise the proximity fallback. The algorithm is pure Python
-in the package, so it is unit-testable the way `derive()` is.
-
-The fixture is still wanted, but for a different question: how real Vision behaves
-- whether chirality flickers, and what it reports during occlusion. That validates
-the assumptions the algorithm rests on. It does not gate writing it.
-
-**Suggested as the next thing to build**, ahead of the rest of step 2, because
-several remaining channels (`dwell`, `steadiness`, the wave and swipe events) are
-per-hand and inherit the same unreliability.
-
-Cheap to bundle while in there: `h{i}_e_grab` / `h{i}_e_release` are latches on
-`openness` with `Grabon`/`Graboff` - two more rows in the latch table, no new
-machinery.
+- `h{i}_e_grab` / `h{i}_e_release` are latches on `openness` with `Grabon` /
+  `Graboff`: two more rows in `tools/td_add_latches.py`, no new machinery. Intended
+  to be bundled with this and was not.
+- The fixture is now wanted for exactly one question: whether real Vision's
+  chirality flickers, and what it reports during occlusion or edge-on. That decides
+  how often the proximity fallback is reached, and it is the last thing standing
+  between the fallback being tested and being merely written.
 
 ## TouchDesigner facts that cost time to learn
 

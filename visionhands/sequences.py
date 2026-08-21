@@ -30,7 +30,11 @@ from collections.abc import Callable, Iterator
 from typing import Final
 
 from visionhands.synth import HandPose, open_hand, pinching, synthetic_frame
-from visionhands.types import LandmarkFrame
+from visionhands.types import (
+    CHIRALITY_LEFT,
+    CHIRALITY_RIGHT,
+    LandmarkFrame,
+)
 
 # One sequence: phase in 0..1 -> the pose of each hand slot, None for absent.
 SequenceFn = Callable[[float], list[HandPose | None]]
@@ -197,6 +201,32 @@ def _swipe(phase: float) -> list[HandPose | None]:
     return [open_hand(palm_x=across, palm_y=_CENTRE_Y, size=_SIZE), None]
 
 
+def _crossing(phase: float) -> list[HandPose | None]:
+    """A LEFT and a RIGHT hand crossing over. The slot-assignment test.
+
+    Two hands swapping sides is exactly when Vision reorders its observations, and
+    a wrong answer there looks perfectly correct on screen - the landmarks still
+    track two hands, they are just attributed to the wrong one. So the hands are
+    given real chirality, and `tools/send_synthetic.py --unstable` reverses the
+    order every frame to simulate the reordering.
+
+    The observable is `h0_chirality`: with assignment on it must read +1 (right)
+    for the whole sweep; with it off it alternates. Nothing else in the channel
+    set distinguishes the two cases so cleanly.
+
+    They also differ in SIZE, which is what lets a test follow a hand between
+    slots - the same trick tests/test_slots.py uses.
+    """
+    right_x = _CENTRE_X + 0.2 - 0.4 * triangle(phase)
+    left_x = _CENTRE_X - 0.2 + 0.4 * triangle(phase)
+    return [
+        open_hand(palm_x=right_x, palm_y=_CENTRE_Y, size=_SIZE,
+                  chirality=CHIRALITY_RIGHT),
+        open_hand(palm_x=left_x, palm_y=_CENTRE_Y, size=_SIZE * 1.2,
+                  chirality=CHIRALITY_LEFT),
+    ]
+
+
 def _static_open(_phase: float) -> list[HandPose | None]:
     """Two open hands, held still and far apart. The resting baseline.
 
@@ -230,6 +260,7 @@ SEQUENCES: Final[dict[str, SequenceFn]] = {
     "little": _ramp_to_finger("little"),
     "clap": _ramp_clap,
     "swipe": _swipe,
+    "crossing": _crossing,
     "deadband": _deadband,
     "both": _ramp_both,
     "open": _static_open,

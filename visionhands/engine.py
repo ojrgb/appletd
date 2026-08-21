@@ -50,6 +50,7 @@ from libdispatch import (
     dispatch_sync,
 )
 
+from visionhands.slots import SLOT_MODE_CHIRALITY, SlotAssigner
 from visionhands.types import (
     BLANK_HAND,
     CHIRALITY_LEFT,
@@ -306,16 +307,14 @@ def frame_from_observations(observations: list[ObjCObject], seq: int,
               DESIGN.md 6.2 unconditionally true instead of something the CHOP
               has to remember.
 
-    TODO(M5): SLOT ASSIGNMENT IS NAIVE HERE, ON PURPOSE. Hands land in whatever
-              order Vision returned them. Vision has no tracking IDs and its
-              observation order is not stable, so h0 can and will swap to the
-              other physical hand between frames. DESIGN.md 6.3 specifies the
-              real algorithm - chirality first, then wrist proximity, then an
-              N-frame grace period - and milestone 5 implements it against a
-              two-hand fixture. Until then, treat two-hand output as unusable
-              for anything that cares which hand is which. Silent slot swapping
-              looks fine on screen and corrupts everything downstream, which is
-              why this is a labelled gap and not a quiet approximation.
+    Slots: hands land here in whatever order Vision returned them, which is NOT
+              stable between frames - Vision provides no tracking ID. Assignment
+              happens one level up, in `HandEngine._publish`, via
+              `visionhands.slots.SlotAssigner`. Deliberately not here: this
+              function is shared with the replay path, and the assigner holds
+              per-session state that a pure observations-to-frame conversion has
+              no business owning. So a caller of THIS function gets Vision's
+              order and must not assume otherwise.
     """
     hands: list[Hand] = []
     n_unreadable = 0
@@ -688,7 +687,8 @@ class HandEngine:
                  height_px: int = DEFAULT_HEIGHT_PX,
                  max_hands: int = MAX_HANDS,
                  seq_start: int = 0,
-                 target_fps: int | None = TARGET_FPS) -> None:
+                 target_fps: int | None = TARGET_FPS,
+                 slot_mode: str = SLOT_MODE_CHIRALITY) -> None:
         """seq_start continues an existing frame sequence rather than restarting it.
 
         Why it exists: this engine keeps `_seq` monotonic across its OWN
@@ -711,6 +711,16 @@ class HandEngine:
         # where it can be reported - instead of on the capture queue where it
         # could only be recorded.
         self._detector = HandDetector(max_hands=max_hands)
+
+        # Which physical hand goes in which slot. Applied HERE rather than inside
+        # HandDetector because the detector is also the replay path's inference
+        # step, and a replay of a fixture should be able to ask for either mode
+        # without the detector carrying session state it does not own.
+        #
+        # Constructed rather than validated later, so a bad mode fails on the
+        # caller's thread at construction - the same reason the detector is built
+        # here rather than in start().
+        self._slots = SlotAssigner(slot_mode)
 
         self._session: ObjCObject | None = None
         self._output: ObjCObject | None = None
@@ -808,6 +818,12 @@ class HandEngine:
             self.n_dropped += 1
             return
 
+        # Slots BEFORE the consumer sees anything, so `h0` means the same physical
+        # hand to every consumer - the CHOP, the OSC stream, the fixture harness -
+        # rather than each of them having to reorder for itself. Vision hands back
+        # observations with no tracking ID and in no stable order (DESIGN.md 6.3).
+        frame = self._slots.assign(frame)
+
         self.n_published += 1
         # Set AFTER the first frame is actually built, so a waiter that wakes on
         # this event knows a real frame exists and not merely that a buffer
@@ -872,6 +888,11 @@ class HandEngine:
         self.n_delivered = 0
         self.n_published = 0
         self.n_dropped = 0
+        # The slot assigner's memory is per-session too. Without this, the first
+        # frame of a new session would be matched against the LAST frame of the
+        # old one by the proximity fallback - the same class of stale-state defect
+        # the M2b review found three of in this file.
+        self._slots.reset()
 
         status = AVF.AVCaptureDevice.authorizationStatusForMediaType_(AVF.AVMediaTypeVideo)
         if status != AUTH_STATUS_AUTHORIZED:

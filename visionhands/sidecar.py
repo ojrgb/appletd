@@ -3,6 +3,15 @@
     RUN IT
         ~/.venvs/visionhands/bin/python -m visionhands.sidecar
         ~/.venvs/visionhands/bin/python -m visionhands.sidecar --fps 60 --port 10000
+        ~/.venvs/visionhands/bin/python -m visionhands.sidecar --slots off
+
+    SLOT ASSIGNMENT is on by default: h0 is the right hand, h1 the left, whatever
+    order Vision hands them over in (visionhands/slots.py). `--slots off` passes
+    Vision's order straight through. It is read once at startup, so the toggle in
+    TouchDesigner takes effect on the next Start rather than immediately - which is
+    deliberate: there is no control channel INTO this process, and adding one to
+    change a partition would be a lot of machinery for something nobody changes
+    mid-session.
 
     RECEIVE IT
         An OSC In CHOP in TouchDesigner, port 10000. That is the entire TD side:
@@ -54,6 +63,7 @@ import time
 from types import FrameType
 
 from visionhands.osc import encode_channels
+from visionhands.slots import SLOT_MODE_CHIRALITY, SLOT_MODES
 from visionhands.source import SEQ_NEVER_PUBLISHED, HandSource, InProcessSource
 from visionhands.types import channel_names, channel_values
 
@@ -102,7 +112,8 @@ class Sidecar:
                  send_fps: int = DEFAULT_SEND_FPS,
                  camera_name: str | None = None,
                  parent_pid: int | None = None,
-                 source: HandSource | None = None) -> None:
+                 source: HandSource | None = None,
+                 slot_mode: str = SLOT_MODE_CHIRALITY) -> None:
         """`source` is injectable so the send path can be tested with no camera.
 
         Defaulting to InProcessSource keeps the production path a one-liner; a
@@ -114,7 +125,7 @@ class Sidecar:
         self.send_interval_s = 1.0 / send_fps
         self.parent_pid = parent_pid
         self.source = source if source is not None else InProcessSource(
-            camera_name=camera_name)
+            camera_name=camera_name, slot_mode=slot_mode)
         # UDP: this is a stream of the most recent state, and a retransmitted
         # stale frame is worth less than the next fresh one. Loss on loopback is
         # not a practical concern, and `seq` makes any loss visible downstream.
@@ -331,6 +342,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="send rate, independent of the camera's rate")
     parser.add_argument("--camera", default=None,
                         help="substring of the camera name; never an index")
+    parser.add_argument("--slots", default=SLOT_MODE_CHIRALITY, choices=SLOT_MODES,
+                        help="which physical hand goes in which slot. "
+                             "'chirality' puts the right hand in h0 and the left "
+                             "in h1, so a slot means the same hand every frame; "
+                             "'off' passes Vision's own order through, which is "
+                             "not stable between frames. Read once at startup - "
+                             "restart to change it.")
     parser.add_argument("--parent-pid", type=int, default=None,
                         help="exit when this pid does. Pass os.getpid() from a "
                              "TouchDesigner launcher so a TD crash cannot leave "
@@ -344,7 +362,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--parent-pid must be a positive pid, got %d" % args.parent_pid)
 
     sidecar = Sidecar(host=args.host, port=args.port, send_fps=args.fps,
-                      camera_name=args.camera, parent_pid=args.parent_pid)
+                      camera_name=args.camera, parent_pid=args.parent_pid,
+                      slot_mode=args.slots)
 
     def handle_signal(signum: int, frame: FrameType | None) -> None:
         # Only sets a flag. Doing the teardown here would run camera shutdown
