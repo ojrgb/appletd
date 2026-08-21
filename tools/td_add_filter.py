@@ -67,7 +67,17 @@ import sys
 
 REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
 COMP_PATH = "/project1/visionhands"
+# The group this builds, as a child COMP of the one above. Everything it owns lives
+# inside, so the top-level network shows one node called `filter` rather than five
+# loose operators - and `allowCooking` on it gates the whole group at once
+# (docs/BUILD_PLAN.md step 7.3).
+GROUP = "filter"
 PREFIX = "oef_"
+
+# Parameters stay on the TOP-LEVEL COMP so all tuning is in one place, which means
+# an expression inside the group reaches them through the grandparent. `parent(2)`
+# rather than a path string: it survives the COMP being renamed or moved.
+PARENT_PAR = "parent(2).par.%s"
 
 # Filter-page defaults. Both GUESSED - see the note on beta.
 #
@@ -149,12 +159,24 @@ def main():
     others = [n for n in names if not n.endswith(("_x", "_y"))]
     assert len(positions) + len(others) == len(names)
 
+    # The group COMP, rebuilt from scratch. Destroying and recreating it is what
+    # makes this script idempotent, and it is safe because everything inside is
+    # generated - nothing a user would have edited lives in here.
+    group = comp.op(GROUP)
+    if group is not None:
+        group.destroy()
+    group = comp.create(td.baseCOMP, GROUP)
+    group.nodeX, group.nodeY = -1100, ROW_Y
+    group.color = (0.35, 0.45, 0.55)
+    # Any stray operators from before this group existed.
     removed = 0
     for child in list(comp.children):
         if child.name.startswith(PREFIX):
             child.destroy()
             removed += 1
-    print("1. cleared %d existing %s* operators" % (removed, PREFIX))
+    print("1. built the `%s` group COMP%s"
+          % (GROUP, ", clearing %d loose %s* operators" % (removed, PREFIX)
+             if removed else ""))
 
     _page(comp)
     print("2. Filter page: Smoothing=%s, %s" % (
@@ -162,17 +184,24 @@ def main():
         ", ".join("%s=%.3f" % (n, float(getattr(comp.par, n).eval()))
                   for n in sorted(FILTER_DEFAULTS))))
 
-    def make(kind, name, x, y=ROW_Y):
-        node = comp.create(kind, PREFIX + name)
+    def make(kind, name, x, y=0):
+        node = group.create(kind, PREFIX + name)
         node.nodeX, node.nodeY = x, y
         return node
 
+    # The group's own input and output. An In CHOP inside plus a wired connector
+    # outside is what makes the group a node in the parent network rather than a
+    # folder that reaches out of itself.
+    group_in = group.create(td.inCHOP, "in1")
+    group_in.nodeX, group_in.nodeY = -1600, 0
+    group.inputConnectors[0].connect(source)
+
     # -- the input, split in two -------------------------------------------
     raw = make(td.selectCHOP, "in", -1400)
-    raw.inputConnectors[0].connect(source)
+    raw.inputConnectors[0].connect(group_in)
     raw.par.channames = " ".join(positions)
-    rest = make(td.selectCHOP, "rest", -1400, ROW_Y - 150)
-    rest.inputConnectors[0].connect(source)
+    rest = make(td.selectCHOP, "rest", -1400, -150)
+    rest.inputConnectors[0].connect(group_in)
     rest.par.channames = " ".join(others)
 
     # -- the filter, which is one operator ---------------------------------
@@ -183,8 +212,8 @@ def main():
     # slices to carry state across, and `raw` inherits time-slicing from the OSC
     # In CHOP. On a non-time-sliced one-sample CHOP it is a silent passthrough.
     smoothed.par.timeslice = True
-    smoothed.par.cutoff.expr = "parent().par.Mincutoff"
-    smoothed.par.speedcoeff.expr = "parent().par.Beta"
+    smoothed.par.cutoff.expr = PARENT_PAR % "Mincutoff"
+    smoothed.par.speedcoeff.expr = PARENT_PAR % "Beta"
 
     # -- the toggle, and back to 137 channels ------------------------------
     # A Switch rather than bypassing: with Smoothing off, index 0 sends the RAW
@@ -194,23 +223,29 @@ def main():
     switch = make(td.switchCHOP, "switch", -1000)
     switch.inputConnectors[0].connect(raw)
     switch.inputConnectors[1].connect(smoothed)
-    switch.par.index.expr = "1 if parent().par.Smoothing else 0"
+    switch.par.index.expr = "1 if %s else 0" % (PARENT_PAR % "Smoothing")
 
     out = make(td.mergeCHOP, "out", -800)
     out.inputConnectors[0].connect(switch)
     out.inputConnectors[1].connect(rest)
+    group_out = group.create(td.outCHOP, "out1")
+    group_out.nodeX, group_out.nodeY = -600, 0
+    group_out.inputConnectors[0].connect(out)
 
-    print("3. built %d operators (was 21 by hand - see the docstring)"
-          % sum(1 for c in comp.children if c.name.startswith(PREFIX)))
+    print("3. %d operators inside `%s` (was 21 loose ones by hand - see the "
+          "docstring)" % (len(group.children), GROUP))
 
     # -- verification -------------------------------------------------------
     failures = []
-    out.cook(force=True)
-    produced = tuple(c.name for c in out.chans())
+    # Read the group's OUT CHOP, not the COMP: a base COMP is not a CHOP and has
+    # no channels of its own. What flows out of the connector is whatever `out1`
+    # inside carries.
+    group_out.cook(force=True)
+    produced = tuple(c.name for c in group_out.chans())
     if set(produced) != set(names) or len(produced) != len(names):
         missing = sorted(set(names) - set(produced))
         extra = sorted(set(produced) - set(names))
-        failures.append("oef_out does not reproduce the contract: %d channels, "
+        failures.append("the group output does not reproduce the contract: %d channels, "
                         "missing %r, extra %r" % (len(produced), missing[:5],
                                                   extra[:5]))
     for node in (raw, rest, smoothed, switch, out):
@@ -221,25 +256,54 @@ def main():
     if not smoothed.isTimeSlice:
         failures.append("oef_smooth is not time-sliced, so it will be a silent "
                         "passthrough - see the docstring")
-    print("4. oef_out: %d channels (contract has %d), filter time-sliced: %s"
-          % (len(produced), len(names), smoothed.isTimeSlice))
+    print("4. `%s` output: %d channels (contract has %d), filter time-sliced: %s"
+          % (GROUP, len(produced), len(names), smoothed.isTimeSlice))
 
     # -- repoint everything that read in1 ----------------------------------
     # `lat_seq` deliberately stays on the RAW input: it watches `seq` to decide
     # whether anything is still arriving, and liveness should not depend on a
     # filter chain that could itself be misconfigured.
+    # Scan every sibling rather than `source.outputs`. The output list goes STALE
+    # the moment the group is destroyed and rebuilt - measured: after a second run
+    # of this script nothing read the group at all, `derive_chop` and the coordinate
+    # branches were back on the raw input, and the filter was silently bypassed
+    # while reporting success. Walking the children and inspecting their input
+    # connectors asks the question the other way round, which cannot go stale.
+    #
+    # `tmp_seq` is excluded deliberately: it watches `seq` to decide whether
+    # anything is still arriving, and liveness must not depend on a filter chain
+    # that could itself be misconfigured.
+    RAW_CONSUMERS = ("tmp_seq",)
     moved = []
-    for consumer in list(source.outputs):
-        if consumer.name.startswith(PREFIX) or consumer.name == "lat_seq":
+    for consumer in comp.children:
+        if consumer is group or consumer.name in RAW_CONSUMERS:
             continue
-        for connector in consumer.inputConnectors:
+        for connector in getattr(consumer, "inputConnectors", []):
             for connection in list(connector.connections):
                 if connection.owner is source:
-                    connector.connect(out)
+                    # The COMP's OUTPUT CONNECTOR, not the COMP. `connect()` takes
+                    # an operator only where that operator has one unambiguous
+                    # output; a base COMP does not, and passing it raises "Invalid
+                    # number or type of arguments".
+                    connector.connect(group.outputConnectors[0])
                     moved.append(consumer.name)
-    print("5. repointed to oef_out: %s" % ", ".join(sorted(set(moved))))
-    print("   (lat_seq stays on the raw input, so liveness cannot depend on the "
-          "filter)")
+    print("5. repointed to `%s`: %s" % (GROUP, ", ".join(sorted(set(moved)))))
+    print("   (the temporal group's liveness stays on the RAW input, so it cannot "
+          "depend on a filter that might be misconfigured)")
+
+    # Assert the repoint actually took. This is the failure that hid once already:
+    # the group built cleanly, reported success, and nothing read it.
+    still_raw = []
+    for consumer in comp.children:
+        if consumer is group or consumer.name in RAW_CONSUMERS:
+            continue
+        for connector in getattr(consumer, "inputConnectors", []):
+            for connection in connector.connections:
+                if connection.owner is source:
+                    still_raw.append(consumer.name)
+    if still_raw:
+        failures.append("these still read the RAW input, so the filter is "
+                        "bypassed: %s" % ", ".join(sorted(set(still_raw))))
 
     comp.op("out1").cook(force=True)
     print("6. COMP output: %d channels" % comp.op("out1").numChans)

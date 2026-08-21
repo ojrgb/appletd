@@ -357,7 +357,46 @@ Either way the consequence is the same and needs writing down: a filter that sto
 cooking has a stale `x_hat_prev`, so re-enabling it has a settling transient. It
 self-converges, and it is the same trade `allowCooking` makes everywhere else.
 
-### 7.3 Group the network into COMPs
+### 7.3 Group the network into COMPs — IN PROGRESS
+
+**Done: `filter/`.** Five operators plus an In and an Out CHOP, inside a base COMP,
+so the top-level network shows one node. The pattern the other groups follow:
+
+- everything the builder owns is created INSIDE the group, and the group is
+  destroyed and recreated whole, which is what keeps the builder idempotent;
+- an In CHOP inside and a wired connector outside, so the group is a node in the
+  parent network rather than a folder reaching out of itself;
+- user parameters stay on the TOP-LEVEL COMP so all tuning is in one place, and
+  expressions inside reach them through `parent(2).par.X` - relative, so it
+  survives a rename.
+
+**A design point that fell out, and it changes what gating means.** `allowCooking`
+gating is only right for a group whose output is OPTIONAL. The filter sits in the
+main DATA PATH - everything downstream reads landmarks through it - so disabling its
+cooking would freeze every position rather than bypass the filter. Its toggle stays
+a Switch, and grouping buys readability there rather than gating. The latch and
+temporal groups are the real `allowCooking` candidates: nothing breaks if their
+channels go stale, because nothing else reads them.
+
+**Two traps this hit, both worth knowing before doing the next group:**
+
+- `inputConnector.connect(op)` takes an operator only where that operator has one
+  unambiguous output. A base COMP does not: pass `group.outputConnectors[0]` or it
+  raises "Invalid number or type of arguments".
+- **`source.outputs` goes stale the moment a downstream group is destroyed.** The
+  first version repointed consumers by walking `in1.outputs`; after a second run of
+  the builder nothing read the group at all, `derive_chop` and the coordinate
+  branches were back on the raw input, and **the filter was silently bypassed while
+  the builder reported success**. Walk the SIBLINGS and inspect their input
+  connectors instead - the question asked that way round cannot go stale - and then
+  assert it took, which the builder now does.
+
+**Remaining:** `latches/`, `temporal/`, `coords/`. The first two take two inputs
+each (derive's channels, and `tmp_ready` for the latches), which is what In CHOPs
+are for and what makes the cross-group dependency visible in the network instead of
+hidden in an expression.
+
+
 
 152 operators in one flat network is spaghetti, and it is also why the tail costs
 0.6 ms. One base COMP per concern - `filter`, `latches`, `temporal`, `coords` -
