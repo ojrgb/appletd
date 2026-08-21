@@ -408,7 +408,10 @@ are excluded from the output rather than left stale.
 | `Grabon` | 0..1 | 0.30 | `openness` below which `e_grab` fires |
 | `Graboff` | 0..1 | 0.55 | above which `e_release` fires |
 | `Swipespeed` | /s | 1.50 | palm speed above which a swipe is considered |
-| `Smoothing` | s | 0.05 | master position filter. 0 disables |
+| `Smoothing` | toggle | on | the one-euro position filter. Off is a bit-exact passthrough, not a filter set to zero |
+| `Mincutoff` | Hz | 1.5 | how heavily a SLOW-moving hand is smoothed |
+| `Beta` | 1/units | 2.0 | how far a FAST-moving hand is allowed through |
+| `Dcutoff` | Hz | 1.0 | smoothing on the speed estimate that drives the adaptation |
 
 ### Page: Advanced — presence and pose
 
@@ -468,6 +471,45 @@ jitter. A build that sets them equal has no re-arm rule and will chatter.
 normalised distance. The units column says `ratio` for exactly those. This is
 what makes a pinch tuned at arm's length still work when you lean in.
 
+## Smoothing: one adaptive filter, upstream of everything
+
+The 84 landmark positions pass through a **one-euro filter** before anything else
+reads them, so every distance, angle, curl, velocity and bounding box inherits the
+smoothing from one place and there is nothing per-channel to tune. Everything that
+is not a position — confidences, `found`, `seq`, `age_ms` — passes through
+untouched.
+
+**Why adaptive rather than a Lag or a Filter CHOP.** Landmark jitter and hand
+motion occupy the same frequency band, so a fixed cutoff has to choose: smooth
+enough to still a resting hand, and a fast hand lags visibly; responsive enough to
+track a fast hand, and a resting one shimmers. The one-euro filter makes the cutoff
+a function of estimated speed:
+
+    dx      = (x - x_prev) * rate
+    dx_hat  = exp_smooth(dx, alpha(Dcutoff))
+    cutoff  = Mincutoff + Beta * |dx_hat|
+    x_hat   = x_hat_prev + alpha(cutoff) * (x - x_hat_prev)
+
+MEASURED in TouchDesigner: at rest the cutoff sits at `Mincutoff` 1.5 Hz with
+alpha 0.136, and a hand crossing the frame in 0.8 s lifts it to 4.35 Hz with alpha
+0.313 — **2.3x more responsive on a real gesture than at rest**, which is exactly
+the trade a constant cutoff cannot make. A still hand converges to the raw value to
+within float32 precision, so the filter introduces no steady-state offset.
+
+**The published `beta` of 0.007 is wrong for these channels, and copying it makes
+the filter useless.** Every one-euro reference filters PIXELS, where speeds reach
+hundreds or thousands of units per second. These channels are normalised 0..1, so
+the same motion measures about a thousand times smaller and `1.5 + 0.007 * 1.4`
+is no adaptation at all. The default here is scaled for normalised units. It is a
+guess, and per-joint jitter is what should really set it (`DESIGN.md` 11).
+
+**One thing to know when tuning:** `dx_hat` is a smoothed *signed* velocity, so an
+oscillating fingertip largely cancels itself out — measured, a fingertip pinching
+back and forth on 0.6 s cycles peaked at only 0.037 units/s and the filter barely
+opened. Sustained motion in one direction is what drives the adaptation, which is
+the right behaviour, and it is why the smoothing feels different on a swipe than on
+a rapid tap.
+
 ## Two caveats that are properties of the system, not of this list
 
 **Per-hand identity is not yet trustworthy.** Slot assignment is milestone 5;
@@ -515,7 +557,7 @@ reload to treat unpredictably:
 | need | operator |
 |---|---|
 | velocity, acceleration | Slope |
-| smoothing | Lag, Filter |
+| smoothing | a one-euro filter, built from Feedback + Math — see below |
 | Schmitt latches and their edge pulses | Feedback + Logic |
 | debounce (`Activateframes`, `Gestureframes`) | Count or Trail + Logic |
 | refractory windows, dwell | Timer, Count |

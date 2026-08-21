@@ -172,6 +172,31 @@ def _ramp_both(phase: float) -> list[HandPose | None]:
     ]
 
 
+# How far across the frame a swipe travels, and where it starts. Wide enough that
+# the motion is unambiguous and the palm stays in frame at both ends.
+_SWIPE_FROM: Final = 0.15
+_SWIPE_TO: Final = 0.85
+
+
+def _swipe(phase: float) -> list[HandPose | None]:
+    """One open hand traversing the frame and coming back. SUSTAINED motion.
+
+    Distinct from the pinch ramps in the one way that matters to anything
+    velocity-based: the hand moves in ONE direction for half the cycle. The pinch
+    sweeps oscillate a fingertip, and a smoothed signed velocity of an oscillation
+    averages toward zero - measured, `|dx_hat|` peaked at 0.037 units/s even on
+    0.6-second sweeps, so the adaptive filter barely opened up and the swipe
+    thresholds would have had nothing to fire on. A traverse produces the velocity
+    a real gesture produces.
+
+    At the default period of 2 s that is 0.70 units in 1 s, so roughly 0.7 units
+    per second, and `--period` scales it: `--period 0.7` gives about 2 units/s,
+    which is a fast deliberate swipe.
+    """
+    across = _SWIPE_FROM + (_SWIPE_TO - _SWIPE_FROM) * triangle(phase)
+    return [open_hand(palm_x=across, palm_y=_CENTRE_Y, size=_SIZE), None]
+
+
 def _static_open(_phase: float) -> list[HandPose | None]:
     """Two open hands, held still and far apart. The resting baseline.
 
@@ -204,6 +229,7 @@ SEQUENCES: Final[dict[str, SequenceFn]] = {
     "ring": _ramp_to_finger("ring"),
     "little": _ramp_to_finger("little"),
     "clap": _ramp_clap,
+    "swipe": _swipe,
     "deadband": _deadband,
     "both": _ramp_both,
     "open": _static_open,

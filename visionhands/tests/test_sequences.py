@@ -19,6 +19,7 @@ under test, and a test that shares its implementation tests nothing.
 from __future__ import annotations
 
 import math
+from itertools import pairwise
 
 import pytest
 
@@ -381,6 +382,29 @@ def test_both_hands_pinch_together_without_becoming_a_clap() -> None:
                                    *LATCH_THRESHOLDS["Together"])
     assert clap_engages == 0
     assert min(p["hands_distance"] for p in per_frame) > LATCH_THRESHOLDS["Together"][1]
+
+
+def test_the_swipe_traverses_the_frame_with_sustained_velocity() -> None:
+    """A swipe must move in ONE direction for many frames, unlike the pinch ramps.
+
+    Anything velocity-based needs an input whose smoothed SIGNED velocity is
+    large, and an oscillation's is not - it averages toward zero. So this asserts
+    the property that makes the sequence useful: the palm's frame-to-frame
+    displacement keeps the same sign across most of each half-cycle.
+    """
+    palm = [_channels(f)["h0_palm_x"]
+            for f in frames(SEQUENCES["swipe"], FPS, PERIOD_S, 1.0)]
+    steps = [b - a for a, b in pairwise(palm)]
+    rightward = sum(1 for s in steps if s > 0)
+    leftward = sum(1 for s in steps if s < 0)
+    # One long run each way, not an alternation.
+    assert rightward >= len(steps) // 2 - 1
+    assert leftward >= len(steps) // 2 - 1
+    sign_changes = sum(1 for a, b in pairwise(steps) if (a > 0) != (b > 0))
+    assert sign_changes == 1, "a traverse reverses once, not %d times" % sign_changes
+    # And it really crosses the frame.
+    assert min(palm) == pytest.approx(0.15, abs=0.01)
+    assert max(palm) == pytest.approx(0.85, abs=0.01)
 
 
 # ---------------------------------------------------------------------------
