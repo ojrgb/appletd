@@ -191,13 +191,6 @@ WORKING = tuple(row[0] for row in LATCHES)
 # success. Imported inside main(), after sys.path is set up.
 THRESHOLD_DEFAULTS = None       # populated by main() from visionhands.tuning
 
-# How far back to look for a change in `seq` before declaring the sender dead.
-# Long enough to bridge the alternate zero-slope frames at a 60 fps cook rate
-# against 30 fps delivery, and to survive a brief camera stall; short enough that
-# a stuck latch releases promptly. GUESSED, not measured - the right value depends
-# on how long a stall should be tolerated, which is a feel question.
-LIVENESS_WINDOW_S = 0.5
-
 # Where the bank is laid out, below the derive Script CHOP at y = -800.
 ROW_Y = -1100
 COLUMN_W = 200
@@ -456,88 +449,35 @@ def main():
 
     valid_raw = _fan(td, make, wire, source, "valid_raw", 2, ROW_Y - 150)
 
-    # -- liveness: is anything still SENDING? ------------------------------
-    # DESIGN.md 2.9 records that a dead sidecar leaves the OSC In CHOP frozen
-    # rather than zeroed, and that liveness has to be derived on the TD side. The
-    # validity gate was `found AND conf_median >= threshold AND size > floor` -
-    # every term read from the frozen last frame. So pressing Stop Sidecar while
-    # pinching left `h0_valid = 1` and `h0_pinch_index ~ 0.1` for ever: the latch
-    # stayed engaged, no end pulse ever fired, and any project gated on the state
-    # was stuck on with nothing reporting it. Found in review, and the journal had
-    # already recorded the benign version of it without recognising it - a latch
-    # "sitting engaged at pinch_index 0.435" after the sender exited.
-    #
-    # `seq` increments once per delivered frame and freezes when the sender stops,
-    # so a non-zero slope IS liveness. Two details:
-    #   * the Logic CHOP's `ne` convert ("On When Not Equal to Zero") turns the
-    #     slope straight into a boolean, so no absolute value is needed - which
-    #     also means the once-per-2**23 negative wrap still reads as alive;
-    #   * at a 60 fps cook rate against 30 fps delivery the slope is zero on
-    #     alternate frames, so the raw signal flickers. A Trail plus an Analyze
-    #     maximum answers "did seq change at all in the last LIVENESS_WINDOW_S"
-    #     exactly, with no filter constant and no epsilon to tune.
-    seq = make(td.selectCHOP, "seq", ROW_Y - 900)
-    wire(seq, comp.op("in1"))
-    seq.par.channames = "seq"
-    seq_slope = make(td.slopeCHOP, "seq_slope", ROW_Y - 900)
-    wire(seq_slope, seq)
-    changed = make(td.logicCHOP, "changed", ROW_Y - 900)
-    wire(changed, seq_slope)
-    changed.par.convert = "ne"                  # On When Not Equal to Zero
-    changed_trail = make(td.trailCHOP, "changed_trail", ROW_Y - 900)
-    wire(changed_trail, changed)
-    changed_trail.par.wlength = LIVENESS_WINDOW_S
-    changed_trail.par.wlengthunit = "seconds"
-    live = make(td.analyzeCHOP, "live", ROW_Y - 900)
-    wire(live, changed_trail)
-    live.par.function = "maximum"               # 1 if it changed at all in the window
-
-    # -- the debounced gate, if the temporal group has been built -----------
+    # -- the gate: raw validity AND whatever the temporal group says --------
     # docs/ATTRIBUTES.md gates the latches on `h{i}_active` - `valid` DEBOUNCED
-    # over Activateframes/Deactivateframes - not on raw per-frame validity. Without
-    # it, one low-confidence frame mid-pinch drops the state, fires a spurious end
-    # pulse, and re-engages with a spurious start and a bumped counter.
+    # over Activateframes/Deactivateframes - and on the stream being LIVE, because
+    # a dead sidecar leaves TouchDesigner's channels frozen rather than zeroed
+    # (DESIGN.md 2.9) so every term of raw validity keeps reporting the last good
+    # frame for ever.
     #
-    # An OPTIONAL dependency rather than a hard one: tools/td_add_temporal.py
-    # publishes `h{i}_active`, and either builder can be run first. If the channels
-    # are not there yet the bank gates on raw validity as before, and says so,
-    # rather than erroring per channel per cook - which is what a missing parameter
-    # reference does (measured, when the Trigger thresholds were added).
-    # ONE broadcast, not two. Liveness and the debounced `active` are both
-    # per-hand booleans that get ANDed into the same gate, and each was a Constant
-    # CHOP of 15 Python expressions - 0.074 ms a frame between them (MEASURED) to
-    # deliver four numbers. So the AND happens per HAND first, in one native Logic
-    # CHOP, and only the result is broadcast.
+    # Both of those live in tools/td_add_temporal.py now, which publishes them
+    # already combined as `tmp_ready` - three channels, `h{i}_valid` and
+    # `both_valid`, each `active AND live`. Liveness used to be computed HERE, and
+    # moving it out is what breaks the dependency cycle between the two groups:
+    # the latch bank read `active` from temporal while temporal read `live` from
+    # the latch bank. Flat, TouchDesigner tolerated that because the real data
+    # dependencies were acyclic; as wired COMPs it would not.
     #
-    # Still expressions rather than static values, because unlike the thresholds
-    # these genuinely change every frame.
-    active_source = comp.op("tmp_out_active")
-    if active_source is not None:
-        # `live AND active`, two channels wide. `both_valid` maps to `both_active`,
-        # the debounced form of the same condition.
-        ready = make(td.constantCHOP, "ready", ROW_Y - 150)
-        ready.seq.const.numBlocks = 3
-        for index, (name, source) in enumerate(
-                (("h0_valid", "op('tmp_out_active')['h0_active']"),
-                 ("h1_valid", "op('tmp_out_active')['h1_active']"),
-                 ("both_valid", "op('tmp_both_active')['both_active']"))):
-            ready.par["name%d" % index] = name
-            ready.par["value%d" % index].expr = (
-                "(%s) * op('lat_live')['seq']" % source)
+    # An OPTIONAL dependency: if `tmp_ready` is not there the bank gates on raw
+    # validity and says so, rather than erroring per channel per cook - which is
+    # what a missing reference does (measured, when the Trigger thresholds were
+    # added).
+    ready = comp.op("tmp_ready")
+    if ready is not None:
         gate13 = _fan(td, make, wire, ready, "gate", 2, ROW_Y - 150)
+        valid = make(td.logicCHOP, "valid", ROW_Y - 150)
+        wire(valid, valid_raw, gate13)
+        valid.par.chopop = "and"
+        valid.par.match = "name"
     else:
-        # No temporal group yet: liveness alone, still one broadcast.
-        ready = make(td.constantCHOP, "ready", ROW_Y - 150)
-        ready.seq.const.numBlocks = 3
-        for index, name in enumerate(("h0_valid", "h1_valid", "both_valid")):
-            ready.par["name%d" % index] = name
-            ready.par["value%d" % index].expr = "op('lat_live')['seq']"
-        gate13 = _fan(td, make, wire, ready, "gate", 2, ROW_Y - 150)
-
-    valid = make(td.logicCHOP, "valid", ROW_Y - 150)
-    wire(valid, valid_raw, gate13)
-    valid.par.chopop = "and"
-    valid.par.match = "name"
+        gate13 = None
+        valid = valid_raw
 
     # -- the thresholds, as channels ---------------------------------------
     # Constant CHOPs with the working names, values bound by expression to the
@@ -750,7 +690,7 @@ def main():
     # dead. Nothing here depends on what any project downstream happens to select.
     terminals = make(td.mergeCHOP, "terminals", ROW_Y - 900)
     wire(terminals, out_state, out_start, out_end, out_count, out_count_end,
-         both, gate13)
+         both)
     clock = make(td.nullCHOP, "tick", ROW_Y - 900)
     wire(clock, terminals)
     clock.par.cooktype = "always"
@@ -785,8 +725,11 @@ def main():
     # would leave a network that cooks cleanly and computes the wrong thing.
     print("4. structure:")
     failures = []
-    checks = [(dist, WORKING), (valid_raw, WORKING), (valid, WORKING),
-              (gate13, WORKING), (on, WORKING), (off, WORKING), (zero, WORKING),
+    checks = [(dist, WORKING), (valid_raw, WORKING), (valid, WORKING)]
+    if gate13 is not None:
+        checks.append((gate13, WORKING))
+    checks += [
+              (on, WORKING), (off, WORKING), (zero, WORKING),
               (below_on, WORKING), (above_off, WORKING), (previous, WORKING),
               (held, WORKING), (engage, WORKING), (state, WORKING),
               (start, WORKING), (end, WORKING),
@@ -802,10 +745,11 @@ def main():
               # `both_pinching`, and it would silently equal `h0_pinching`.
               (both_sel, ("h0_pinching", "h1_pinching")),
               (both, ("both_pinching",)),
-              (live, ("seq",)),
-              # 66 published channels plus the 13 broadcast liveness channels.
+              # Every published channel, plus both_pinching. The gate broadcast
+              # is NOT here: it is upstream of lat_valid, so it is pulled anyway,
+              # and tmp_ready has the temporal group's own clock behind it.
               (terminals, (*(n for row in LATCHES for n in row[5:10]),
-                           "both_pinching", *WORKING))]
+                           "both_pinching"))]
     for node, expected in checks:
         actual = tuple(named(node))
         # Compared as SETS. Every rename is now keyed on channel names rather than
@@ -851,12 +795,9 @@ def main():
     print("6. cooks: lat_state=%d, merge_out=%d (both climb from here; "
           "tools/td_verify_latches.py checks that lat_state really does)"
           % (state.totalCooks, comp.op("merge_out").totalCooks))
-    print("   gate: raw validity AND liveness%s"
-          % (" AND the debounced h{i}_active" if active_source is not None
-             else " (NO debounce - run tools/td_add_temporal.py, then this again)"))
-    print("   liveness: lat_live=%.0f - 0 means nothing has sent for %.1f s, and "
-          "every latch is then forced released" % (live.chan("seq")[0],
-                                                   LIVENESS_WINDOW_S))
+    print("   gate: raw validity%s"
+          % (" AND tmp_ready (the debounced active, AND liveness)" if ready is not None
+             else " ONLY - run tools/td_add_temporal.py, then this again"))
     print("   clock pulls %d terminal channels; tools/td_verify_latches.py checks "
           "that lat_end cooks as often as lat_start" % terminals.numChans)
 
