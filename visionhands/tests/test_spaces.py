@@ -26,6 +26,8 @@ import pytest
 from visionhands.face_types import FACE_REGIONS, face_channel_names
 from visionhands.pose_types import pose_channel_names
 from visionhands.spaces import (
+    DERIVE_CHOP,
+    DERIVED_SOURCES,
     ROLE_ANGLE,
     ROLE_BOX_RELATIVE,
     ROLE_EXTENT_X,
@@ -34,12 +36,16 @@ from visionhands.spaces import (
     ROLE_POSITION_Y,
     ROLE_SCALAR,
     SMOOTHED_ROLES,
+    TEMPORAL,
     TRANSFORMED_ROLES,
     box_branches,
     box_expressions,
     channel_roles,
     compact_pattern,
     companioned_names,
+    derived_branches,
+    derived_companioned_names,
+    derived_roles,
     names_by_role,
     passthrough_names,
     scope_pattern,
@@ -362,3 +368,95 @@ def test_every_branch_carries_the_suffix_its_channels_actually_end_with() -> Non
         for box in box_branches(stream):
             assert all(n.endswith(box.source) for n in box.names), box.label
             assert box.suffix.endswith(box.source[-1]), box.label
+
+
+# ---------------------------------------------------------------------------
+# The channels that never arrive on the wire
+# ---------------------------------------------------------------------------
+def test_a_derived_position_is_transformed_like_a_joint() -> None:
+    """palm, pinch and the two centres are points in the image. Nothing about them
+    is different from a wrist except that TouchDesigner computes them."""
+    roles = derived_roles(DERIVE_CHOP)
+    for stem in ("h0_palm", "h1_palm", "h0_pinch", "hands_center", "index_center"):
+        assert roles[stem + "_x"] == ROLE_POSITION_X, stem
+        assert roles[stem + "_y"] == ROLE_POSITION_Y, stem
+
+
+def test_a_rate_takes_the_extent_rule_and_therefore_no_offset() -> None:
+    """A velocity of 0.2 is 0.2 wherever the hand is, so centring it would be as
+    wrong as centring a width."""
+    roles = derived_roles(TEMPORAL)
+    assert roles["h0_vel_x"] == ROLE_EXTENT_X
+    assert roles["h0_vel_y"] == ROLE_EXTENT_Y
+    for branch in derived_branches(TEMPORAL):
+        assert branch.offset == 0.0, branch.label
+
+
+def test_a_unit_vector_is_never_transformed() -> None:
+    """The one that is a CONCLUSION rather than an omission. World space scales y by
+    the render's aspect, so a transformed unit vector is neither unit length nor
+    pointing where the image-space one pointed."""
+    for source, stems in ((DERIVE_CHOP, ("h0_point", "h1_point")),
+                          (TEMPORAL, ("h0_dir", "h1_dir"))):
+        roles = derived_roles(source)
+        for stem in stems:
+            assert roles[stem + "_x"] == ROLE_SCALAR, stem
+            assert roles[stem + "_y"] == ROLE_SCALAR, stem
+        # And therefore in no branch at all.
+        touched = {n for b in derived_branches(source) for n in b.names}
+        assert not touched & {s + a for s in stems for a in ("_x", "_y")}
+
+
+def test_the_hand_local_descriptor_is_not_in_the_table_at_all() -> None:
+    """The 84 `h{i}_d_<joint>_x/y` channels are joint offsets in the HAND's frame,
+    divided by hand size. A shape signature, with no image position in it — so they
+    are absent rather than marked, and a branch cannot reach them."""
+    for source in DERIVED_SOURCES:
+        assert not any("_d_" in name for name in derived_roles(source))
+        assert not any("_d_" in n for b in derived_branches(source) for n in b.names)
+
+
+def test_a_derived_branch_has_the_same_shape_as_a_wire_branch() -> None:
+    """They go through the identical builder code, so a difference in shape is a
+    crash at build time — and the arithmetic must not be duplicated."""
+    for source in DERIVED_SOURCES:
+        for branch in derived_branches(source):
+            assert isinstance(branch, type(transform_branches("hands")[0]))
+            assert branch.names
+            assert branch.source in ("_x", "_y")
+            assert branch.suffix in ("_tx", "_ty", "_px", "_py")
+            assert all(n.endswith(branch.source) for n in branch.names)
+
+
+def test_a_derived_branch_selects_by_NAME_not_by_pattern() -> None:
+    """`derive_chop`'s output holds `h0_palm_x` AND all 84 `h0_d_<joint>_x`
+    descriptor channels, and DESIGN.md 2.11 records that `h?_*_x` cannot tell those
+    apart. There are at most twelve names, so a literal list costs nothing."""
+    for source in DERIVED_SOURCES:
+        for branch in derived_branches(source):
+            assert branch.pattern == " ".join(branch.names), branch.label
+            assert "*" not in branch.pattern
+
+
+def test_the_derived_delete_list_is_exactly_the_companioned_channels() -> None:
+    """What `Screenspaceonly` removes from the derived half — 16 channels, and not
+    one of the eight unit vectors."""
+    doomed = derived_companioned_names()
+    assert len(doomed) == 16
+    assert not any("point" in n or "dir" in n for n in doomed)
+    every = {n for s in DERIVED_SOURCES
+             for b in derived_branches(s) for n in b.names}
+    assert set(doomed) == every
+
+
+def test_an_unknown_derived_source_raises() -> None:
+    with pytest.raises(ValueError, match="unknown derived source"):
+        derived_roles("nonesuch")
+
+
+def test_the_derived_and_wire_delete_lists_do_not_overlap() -> None:
+    """They are concatenated into one Delete CHOP list, and a duplicated name there
+    would be harmless — but it would also mean one of the two registries had grown a
+    channel that belongs to the other."""
+    for stream in STREAM_NAMES:
+        assert not set(companioned_names(stream)) & set(derived_companioned_names())

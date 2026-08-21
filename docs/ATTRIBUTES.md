@@ -414,8 +414,8 @@ belong to - a page you have to scroll is a page nobody tunes.
 |---|---|---|---|
 | `Verbosity` | menu | Interaction | Minimal / Interaction / Everything. Sets the toggles below in one click |
 | `Landmarks` | toggle | on | publish the raw 137 from the sidecar |
-| `Coordstx` | toggle | on | `_tx`/`_ty`, EVERY stream. Freezes `coords/world` |
-| `Coordspx` | toggle | on | `_px`/`_py`, every stream. Freezes `coords/pixels` |
+| `Coordstx` | toggle | on | `_tx`/`_ty`, EVERY stream, wire contract AND derived. Freezes `coords/world` and `coords/dv_world` |
+| `Coordspx` | toggle | on | `_px`/`_py`, the same. Freezes `coords/pixels` and `coords/dv_pixels` |
 | `Lmcoordstx` | toggle | on | `_tx`/`_ty` for the 174 FACE landmark points |
 | `Lmcoordspx` | toggle | off | `_px`/`_py` for the same. 348 channels, 1.08 ms |
 | `Core` | toggle | on | palm, size, bbox |
@@ -550,12 +550,20 @@ nothing inside the COMP reads through it. Deleting channels is normally the sile
 failure this whole system is arranged to avoid (`DESIGN.md` 6.2); this is the one
 place it is the point.
 
-**Known gap.** 24 channels on the hands stream are normalised positions with no
-companion, so the toggle leaves them: `h{i}_palm_x/y`, `h{i}_pinch_x/y` and
-`h{i}_point_x/y` are derived POSITIONS and deserve `_tx`/`_ty` companions, while
-`h{i}_vel_x/y` is a rate and `h{i}_dir_x/y` a unit vector — a direction in world
-space is not the image-space direction, because y is scaled by the aspect. Giving
-the three derived positions companions is the obvious next step and is not done.
+**What it leaves, and why.** Eight channels — `h{i}_point_x/y` and `h{i}_dir_x/y` —
+are UNIT VECTORS, and they have no companion on purpose. World space scales y by the
+render's aspect, so a transformed unit vector is neither unit length nor pointing
+where the image-space one pointed; re-normalising it is a magnitude and a divide,
+which is a different branch rather than a companion.
+
+And the 84 `h{i}_d_<joint>_x/y` descriptor channels are hand-LOCAL — joint offsets
+in the hand's own frame, divided by hand size. A shape signature, with no image
+position in it.
+
+Everything else derived now HAS a companion and is removed: `h{i}_palm_x/y`,
+`h{i}_pinch_x/y`, `hands_center_x/y` and `index_center_x/y` take the position rule,
+and `h{i}_vel_x/y` takes the extent rule — scaled into world units per second, with
+no centring, because a velocity of 0.2 is 0.2 wherever the hand is.
 
 ### Face landmark coordinates — composed through the bounding box
 

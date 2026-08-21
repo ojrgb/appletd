@@ -1,6 +1,6 @@
 # Handoff — 2026-08-21
 
-**387 tests**, `ruff check` and `mypy visionhands` clean. Working tree clean apart
+**396 tests**, `ruff check` and `mypy visionhands` clean. Working tree clean apart
 from `tools/vision_landmarks.py` and `tools/vision_landmarks_live.py`, which are the
 user's own untracked files — leave them alone. (`ruff check` at the repo root will
 fail on one of those two; lint `visionhands/` and `tools/td_*.py tools/send_*.py
@@ -25,7 +25,7 @@ entry is what went wrong on the way.
 ## What is running
 
     /project1/vision            every parameter, six pages, the sidecar control
-      hands_osc 10000  ->  hands  ->  out1      499 channels
+      hands_osc 10000  ->  hands  ->  out1      531 channels
       pose_osc  10001  ->  pose   ->  out2      275
       face_osc  10002  ->  face   ->  out3     1083
       status                                   the sidecar's own sc_* channels
@@ -38,13 +38,17 @@ Inside each stream, and the ROW a node is on says whether it is in the data path
            temporal -----------+
            latches ------------+
 
-`coords` now holds up to four gateable halves — `world`, `pixels`, and on the face
-stream `lm_world` and `lm_pixels` for the landmark points.
+`coords` now holds up to six gateable halves: `world` and `pixels` for the wire
+contract, `dv_world`/`dv_pixels` for the positions and rates that `derive_chop` and
+`temporal` compute (hands only), and `lm_world`/`lm_pixels` for the face's landmark
+points.
 
-Build order, run end to end and verified 2026-08-21. **One builder per call.**
+Build order, run end to end and verified 2026-08-21 with zero failures. **One
+builder per call.** Note where `td_add_coords.py` sits — it moved to the end,
+because it now reads `derive_chop` and `temporal` as well as `filter`.
 
-    td_build_vision.py -> td_add_filter.py -> td_add_coords.py -> td_add_derive.py
-    -> td_add_temporal.py -> td_add_latches.py -> td_add_screenspace.py
+    td_build_vision.py -> td_add_filter.py -> td_add_derive.py -> td_add_temporal.py
+    -> td_add_latches.py -> td_add_coords.py -> td_add_screenspace.py
     -> td_add_groups.py
 
 Then, both read-only and both worth running after any build:
@@ -97,6 +101,7 @@ streams, and two things in it depend on toggles that now gate cooking:
 | their operator | reads | needs |
 |---|---|---|
 | `select3` `select4` `select5` | `vision` out1, `*_tx` / `*_ty` / `*trigger*` | `Streamhands`, `Coordstx`, and the latch bank (`Triggers`) |
+| | (these went 42 → 50 channels when the derived positions gained companions — palm, pinch, the two centres and velocity) | |
 | `null2` → nothing yet | out2 (pose) | `Streampose` |
 | `null3` → `select6` `select7`, `*f0*_x` / `*f0*_y` | out3 (face) | `Streamface`, and `Screenspaceonly` OFF — on, it deletes exactly those channels |
 
@@ -170,25 +175,23 @@ touched the engine's capture queue, three lock-free boxes and the sidecar's send
 path. **Offer this to the user before starting anything new.** It is the oldest
 outstanding item in the project and the only one with a real risk attached.
 
-### 2. Companions for the derived positions — the toggle's known gap
+### 2. The unit vectors, and the channel-to-group registry
 
-`Screenspaceonly` leaves 24 hands channels behind because they have no screen-space
-twin, and they fall into three kinds:
+The derived POSITIONS and RATES got their companions (BUILD_PLAN step 10 item 7), so
+`Screenspaceonly` is complete except for eight channels: `h{i}_point_x/y` and
+`h{i}_dir_x/y` are UNIT VECTORS, and a transformed unit vector is neither unit
+length nor pointing where the image-space one pointed, because world space scales y
+by the render's aspect. Either publish a re-normalised world-space direction — a
+magnitude and a divide, so a real branch — or leave them image-space and say so in
+`ATTRIBUTES.md`. **It is a design decision, not a task.** My reading is that a
+direction is most useful as an ANGLE anyway, and `h{i}_dir` already exists.
 
-- **`h{i}_palm_x/y`, `h{i}_pinch_x/y`, `h{i}_point_x/y`** are derived POSITIONS.
-  They should get `_tx`/`_ty`/`_px`/`_py` on exactly the same rule as a joint, and
-  then the toggle covers them. This is the straightforward half.
-- **`h{i}_vel_x/y`** is a RATE. It scales but does not offset — like an extent — and
-  the units of the result are world units per second, which is worth naming.
-- **`h{i}_dir_x/y`** is a UNIT VECTOR, and this is the one that needs thought: a
-  direction in world space is not the image-space direction, because y is scaled by
-  the render's aspect. Scaling it denormalises it. Either publish the world-space
-  direction re-normalised, or leave it image-space and say so.
-
-Doing this needs `derive()`'s outputs classified by role the way the wire contract
-already is in `spaces.py` — which is most of the **channel-to-group registry** that
-`td_add_groups.py` has been asking for since it was written, and which would also
-let the `Landmarks`/`Triggers`/`Motion`/`Events` toggles stop being advisory.
+The bigger prize behind it is the **channel-to-group registry**.
+`spaces.derived_roles()` now classifies 24 of the derived channels; extending that to
+all 171 of `derive()`'s outputs plus the latch table (which still lives in
+`tools/td_add_latches.py` and should move into the package) is what would let
+`Landmarks`, `Triggers`, `Motion` and `Events` stop being advisory. `td_add_groups.py`
+has been asking for it in a printed note since it was written.
 
 ### 3. Segmentation — PARKED, decision made
 
@@ -200,8 +203,8 @@ re-research it. The one thing still unmeasured needs a camera: the per-frame cos
 
 ### 4. Smaller, and each is self-contained
 
-- **`face/coords/lm_world` is 1.08 ms** and it is the most expensive thing in the
-  COMP when it is on. The cost is 348 channels through two operators at about
+- **`face/coords/lm_world` is 0.83–1.08 ms** and it is the most expensive thing in
+  the COMP when it is on. The cost is 348 channels through two operators at about
   1.2 µs each; there is no cleverer network, only fewer channels. If it matters,
   the honest lever is publishing 76 distinct points instead of 87 region slots.
 - **A `Coordspx`-style default hazard exists for `Lmcoordspx`** and does not matter

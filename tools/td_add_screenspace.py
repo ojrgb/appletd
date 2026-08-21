@@ -132,8 +132,8 @@ def main():
                   if n == "visionhands" or n.startswith("visionhands.")]:
         del sys.modules[stale]
     # `td_layout` is where this operator goes - the one table every builder reads.
-    from visionhands.spaces import companioned_names
-    from visionhands.streams import STREAM_NAMES
+    from visionhands.spaces import companioned_names, derived_companioned_names
+    from visionhands.streams import STREAM_HANDS, STREAM_NAMES
     from visionhands.td_layout import master_xy, stream_xy
 
     master = op(MASTER_PATH)
@@ -153,8 +153,13 @@ def main():
         if child is None:
             print("   (no `%s` stream in %s - skipped)" % (stream, MASTER_PATH))
             continue
+        # Two lists, and the split matters. The wire-contract channels are ALWAYS
+        # on the output, so one of them missing is a fault. The derived ones can be
+        # absent - a disabled derive group does not emit its channels at all, unlike
+        # a frozen native group, which holds them - so a missing one is normal.
+        optional = derived_companioned_names() if stream == STREAM_HANDS else []
         built.append(_build_one(td, child, stream, companioned_names(stream),
-                                engaged, failures, stream_xy(NODE),
+                                optional, engaged, failures, stream_xy(NODE),
                                 stream_xy("screen_only_notes")))
 
     callbacks = master.op("screenspace_callbacks") or master.create(
@@ -185,7 +190,8 @@ def main():
         print("   counter, confidence and angle.")
 
 
-def _build_one(td, child, stream, doomed, engaged, failures, node_xy, note_xy):
+def _build_one(td, child, stream, doomed, optional, engaged, failures, node_xy,
+               note_xy):
     """Put the Delete CHOP between `merge_out` and `out1`. Returns a report row."""
     merge = child.op("merge_out")
     chop_out = child.op("out1")
@@ -208,7 +214,7 @@ def _build_one(td, child, stream, doomed, engaged, failures, node_xy, note_xy):
     # its default.
     node.par.select = "byname"
     node.par.discard = "scoped"
-    node.par.delscope = " ".join(doomed)
+    node.par.delscope = " ".join(list(doomed) + list(optional))
     node.bypass = not engaged
 
     # out1 reads the Delete CHOP now, not the Merge. Stated here rather than left
@@ -230,34 +236,40 @@ def _build_one(td, child, stream, doomed, engaged, failures, node_xy, note_xy):
     if not child.allowCooking:
         print("   (`%s` is frozen - built, not verified. Turn Stream%s on to check "
               "it.)" % (stream, stream))
-        note.text = NOTES % {"parameter": PARAMETER, "n_deleted": len(doomed),
-                             "n_kept": 0}
-        return (stream, 0, 0, len(doomed))
+        note.text = NOTES % {"parameter": PARAMETER,
+                             "n_deleted": len(doomed) + len(optional), "n_kept": 0}
+        return (stream, 0, 0, len(doomed) + len(optional))
 
     merge.cook(force=True)
     chop_out.cook(force=True)
     arrived = {c.name for c in merge.chans()}
     produced = {c.name for c in chop_out.chans()}
-    note.text = NOTES % {"parameter": PARAMETER, "n_deleted": len(doomed),
-                         "n_kept": len(arrived) - len(doomed)}
+    note.text = NOTES % {"parameter": PARAMETER,
+                         "n_deleted": len(doomed) + len(optional),
+                         "n_kept": len(arrived - set(doomed) - set(optional))}
 
     # -- verification -------------------------------------------------------
     # Every name in the delete list has to BE on the input, or the list has drifted
     # from the contract and the toggle silently under-deletes.
     absent = sorted(set(doomed) - arrived)
+    gated_away = sorted(set(optional) - arrived)
+    if gated_away:
+        print("   (`%s`: %d derived channel(s) in the list are not on the output "
+              "right now - a disabled derive group emits nothing. Not a fault.)"
+              % (stream, len(gated_away)))
     if absent:
         failures.append("%s: %d channel(s) in the delete list are not on merge_out: "
                         "%r - spaces.companioned_names() and the live network "
                         "disagree" % (stream, len(absent), absent[:5]))
     if engaged:
-        left = sorted(set(doomed) & produced)
+        left = sorted((set(doomed) | set(optional)) & produced)
         if left:
             failures.append("%s: %d channel(s) should have been deleted and were "
                             "not: %r" % (stream, len(left), left[:5]))
         # And the far more damaging direction: something NOT on the list going
         # missing. A Delete CHOP set to `nonscoped` by accident would take out the
         # entire rest of the stream.
-        collateral = sorted(arrived - produced - set(doomed))
+        collateral = sorted(arrived - produced - set(doomed) - set(optional))
         if collateral:
             failures.append("%s: %d channel(s) were deleted that are NOT on the "
                             "list: %r" % (stream, len(collateral), collateral[:5]))
@@ -266,7 +278,7 @@ def _build_one(td, child, stream, doomed, engaged, failures, node_xy, note_xy):
         if arrived != produced:
             failures.append("%s: `%s` is bypassed and changed the channel set by %d"
                             % (stream, NODE, len(arrived ^ produced)))
-    return (stream, len(arrived), len(produced), len(doomed))
+    return (stream, len(arrived), len(produced), len(doomed) + len(optional))
 
 
 main()

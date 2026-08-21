@@ -5,10 +5,11 @@
       Paste into a Text DAT in TouchDesigner, right-click > "Run Script".
       Then, in order:
         td_add_filter.py    the one-euro filter, in EVERY stream
-        td_add_coords.py    the world and pixel spaces, in EVERY stream
         td_add_derive.py    the stateless hand attributes
         td_add_temporal.py  presence, liveness, velocity  (hands)
         td_add_latches.py   the proximity latches         (hands)
+        td_add_coords.py    the world and pixel spaces, in EVERY stream. AFTER
+                            derive and temporal, because it reads them
         td_add_screenspace.py  the Screen Space Only filter on each output
         td_add_groups.py    the Attributes page and the cook gating
       Idempotent: run any of them as often as you like.
@@ -644,8 +645,8 @@ def main():
             print("          channels as they arrive, so an idle port looks "
                   "exactly like this)")
     print()
-    print("   NEXT, in order: td_add_filter.py, td_add_coords.py,")
-    print("   td_add_derive.py, td_add_temporal.py, td_add_latches.py,")
+    print("   NEXT, in order: td_add_filter.py, td_add_derive.py,")
+    print("   td_add_temporal.py, td_add_latches.py, td_add_coords.py,")
     print("   td_add_screenspace.py, td_add_groups.py")
     print()
     print("   Reference a fingertip as:  op('%s/hands')['h0_index_tip_tx']"

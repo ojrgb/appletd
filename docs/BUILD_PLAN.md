@@ -824,14 +824,50 @@ stream's output carries 87 derived attributes, 27 temporal channels and 76 latch
 channels named by tables in three different builders.
 
 It keeps every boolean, counter, confidence and ANGLE — the rule is "remove the
-second copy of a number, never the only copy". **What it therefore does NOT remove,
-and this is a real gap:** 24 channels on the hands stream that are normalised
-positions with no companion at all — `h{i}_palm_x/y`, `h{i}_pinch_x/y`,
-`h{i}_point_x/y` (derived positions, which deserve companions), and
-`h{i}_vel_x/y`, `h{i}_dir_x/y` (a rate and a unit vector, which need different
-rules — a direction in world space is not the image-space direction, because y is
-scaled by the aspect). Giving the derived positions companions is the obvious next
-step and is not done.
+second copy of a number, never the only copy".
+
+That rule left 24 channels behind on the first pass, because they had no companion
+to be redundant with. Sorting out which of them SHOULD have one is item 7.
+
+### 7. The 24 channels the toggle could not remove — 16 of them now can be
+
+The screen-space toggle made a gap visible that had been there since `derive()` was
+written: 100 derived channels end in `_x` or `_y`, and they are not all the same
+kind of number.
+
+| kind | channels | rule | companions |
+|---|---|---|---|
+| positions — `palm`, `pinch`, `hands_center`, `index_center` | 12 | as a joint: scale, offset by −0.5 | **added** |
+| rates — `vel` | 4 | as an extent: scale, NO offset. World units per second | **added** |
+| unit vectors — `point`, `dir` | 8 | none | deliberately not |
+| hand-local — the 84 `h{i}_d_<joint>_x/y` descriptor channels | 84 | none | never |
+
+The positions were simply missed, and a project drawing the palm centre had to
+redo the transform by hand. The rates take the extent rule, which is the same
+arithmetic: a velocity of 0.2 is 0.2 wherever the hand is.
+
+**The unit vectors are a conclusion, not an omission.** World space scales y by the
+render's aspect, so a transformed unit vector is no longer unit length AND no longer
+points where the image-space one pointed. Re-normalising it is a magnitude and a
+divide — a different branch, not a companion. It is named in `spaces.py` beside the
+table so nobody has to work it out twice.
+
+**The 84 descriptor channels are hand-LOCAL**: joint offsets rotated into the hand's
+own frame and divided by hand size, so they are a shape signature with no image
+position in them. Transforming one would be meaningless.
+
+Built as two more gateable halves — `coords/dv_world` and `coords/dv_pixels`, on the
+same `Coordstx`/`Coordspx` toggles, because they are the same spaces. The
+arithmetic is the identical `Branch` machinery: `spaces.derived_branches()` returns
+the same tuple type as `transform_branches()`, so there is no second copy of the
+coordinate formula anywhere.
+
+**`coords` therefore moved to the END of the build order.** It now READS
+`derive_chop` and `temporal` as well as `filter`, a consumer must state its own
+input (2.11), and an input has to exist to be named. A missing source is reported
+and its branches skipped, so a partial build still leaves a working group.
+
+Hands went **499 → 531 channels**, and the delete list 84 → 100.
 
 ### 6. Text DATs and deliberate layout — DONE, and it found bugs
 

@@ -111,12 +111,25 @@ GAINS = {
     "_ph": MASTER_PAR % "Resh",
 }
 
-# What feeds this. The FILTERED stream, so the derived coordinates inherit the
-# smoothing like everything else - a project reading `_tx` and a project reading
-# `derive`'s output should not disagree about where the hand is. It is also what
-# makes the box-relative composition consistent: the points and the box a builder
-# composes them through are both smoothed, or neither is.
+# THREE inputs, in connector order, and what each one is for.
+#
+#   filter       the wire contract, smoothed. Every landmark and every bounding box.
+#   derive_chop  palm, pinch, hands_center, index_center - positions that are
+#                COMPUTED in TouchDesigner and never arrive on the wire
+#   temporal     the velocity channels, which are a RATE and take the extent's rule
+#
+# `filter` and not `in1`, so the coordinates inherit the smoothing like everything
+# else - a project reading `_tx` and a project reading `derive`'s output should not
+# disagree about where the hand is. It is also what makes the box-relative
+# composition consistent: the points and the box they compose through are both
+# smoothed, or neither is.
+#
+# The other two are why this builder moved to the END of the build order: it now
+# READS them, and a consumer must state its own input (DESIGN.md 2.11) which means
+# the input has to exist. A missing one is reported and its branches skipped, so a
+# partial build still produces a working group.
 SOURCE = "filter"
+SOURCES = ("filter", "derive_chop", "temporal")
 
 # ---- layout -----------------------------------------------------------------
 # The group's position inside its stream comes from `visionhands/td_layout.py`, the
@@ -164,6 +177,14 @@ HALVES = (
     ("pixels", "Coordspx", ("_px", "_py", "_pw", "_ph"), False),
     ("lm_world", "Lmcoordstx", ("_tx", "_ty"), True),
     ("lm_pixels", "Lmcoordspx", ("_px", "_py"), True),
+)
+
+# Which halves take branches whose source is NOT the wire contract. Split out so a
+# derived branch cannot land in the same COMP as a wire one: the two read different
+# inputs, and `allowCooking` freezes a whole COMP.
+DERIVED_HALVES = (
+    ("dv_world", "Coordstx", ("_tx", "_ty")),
+    ("dv_pixels", "Coordspx", ("_px", "_py")),
 )
 
 HALF_NOTES = """%(name)s - the %(space)s half of the coordinate spaces.
@@ -373,8 +394,14 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "visionhands" or n.startswith("visionhands.")]:
         del sys.modules[stale]
-    from visionhands.spaces import box_branches, box_expressions, transform_branches
-    from visionhands.streams import STREAM_NAMES
+    from visionhands.spaces import (
+        DERIVED_SOURCES,
+        box_branches,
+        box_expressions,
+        derived_branches,
+        transform_branches,
+    )
+    from visionhands.streams import STREAM_HANDS, STREAM_NAMES
     from visionhands.td_layout import stream_xy
 
     master = op(MASTER_PATH)
@@ -389,7 +416,15 @@ def main():
         if child is None:
             print("   (no `%s` stream in %s - skipped)" % (stream, MASTER_PATH))
             continue
-        built.append(_build_one(td, child, stream, transform_branches(stream),
+        # Every branch carries the NAME of the input it reads. The wire contract
+        # comes off `filter`; the derived positions and rates come off the operators
+        # that compute them, and only the hands stream has any - pose and face have
+        # no attribute layer by design (DESIGN.md 6.4).
+        pairs = [(SOURCE, b) for b in transform_branches(stream)]
+        if stream == STREAM_HANDS:
+            for src in DERIVED_SOURCES:
+                pairs.extend((src, b) for b in derived_branches(src))
+        built.append(_build_one(td, child, stream, pairs,
                                 box_branches(stream), box_expressions, failures,
                                 stream_xy(GROUP)))
 
@@ -420,9 +455,14 @@ def main():
                  / master.par.Renderw.eval()))
 
 
-def _build_one(td, child, stream, branches, boxes, box_expressions, failures,
+def _build_one(td, child, stream, pairs, boxes, box_expressions, failures,
                group_xy):
-    """Build one stream's coords group. Returns (stream, operators, channels, how)."""
+    """Build one stream's coords group. Returns (stream, operators, channels, how).
+
+    `pairs` is [(source name, Branch)] - the source is which of this group's inputs
+    the branch reads, because the derived positions do not arrive on the wire.
+    """
+    branches = [b for _src, b in pairs]
     source = child.op(SOURCE) or child.op("in1")
     if source is None:
         failures.append("%s has neither `%s` nor `in1`" % (child.path, SOURCE))
@@ -443,16 +483,45 @@ def _build_one(td, child, stream, branches, boxes, box_expressions, failures,
     group = child.op(GROUP)
     if group is None:
         group = child.create(td.baseCOMP, GROUP)
-    kept = _clear_keeping_ports(td, group, ("in1", "out1"))
+    kept = _clear_keeping_ports(td, group, ("in1", "in2", "in3", "out1"))
     group.nodeX, group.nodeY = group_xy
     group.color = (0.45, 0.4, 0.3)
 
-    group_in = kept.get("in1") or group.create(td.inCHOP, "in1")
-    group_in.nodeX, group_in.nodeY = COL_IN * COL_W, 0
-    # `outputConnectors[0]`, not the COMP: connect() accepts an operator only where
-    # it has one unambiguous output, and a base COMP does not (DESIGN.md 2.11).
-    group.inputConnectors[0].connect(
-        source.outputConnectors[0] if source.isCOMP else source)
+    # One In CHOP per source, stacked so the row a wire leaves says which input it
+    # came from. `outputConnectors[0]`, not the COMP: connect() accepts an operator
+    # only where it has one unambiguous output, and a base COMP does not.
+    # Only the sources this stream actually has branches for. Pose and face have no
+    # attribute layer (DESIGN.md 6.4), so giving them an `in2` and an `in3` would
+    # leave two In CHOPs wired to nothing and reading nothing - which is exactly
+    # what tools/td_verify_layout.py calls an orphan, and it was right to.
+    wanted = {src for src, _b in pairs} | {SOURCE}
+    group_ins = {}
+    absent = []
+    for index, src_name in enumerate(s for s in SOURCES if s in wanted):
+        port = "in%d" % (index + 1)
+        node = kept.pop(port, None) or group.create(td.inCHOP, port)
+        node.nodeX, node.nodeY = COL_IN * COL_W, -index * ROW_H
+        group_ins[src_name] = node
+        upstream = child.op(src_name) if src_name != SOURCE else source
+        if upstream is None:
+            absent.append(src_name)
+            continue
+        group.inputConnectors[index].connect(
+            upstream.outputConnectors[0] if upstream.isCOMP else upstream)
+    # Any In CHOP left over from a run when this stream wanted more of them.
+    for port, node in kept.items():
+        if port.startswith("in") and node.valid:
+            node.destroy()
+    group_in = group_ins[SOURCE]
+    # Only worth saying for a source this stream actually WANTS. Pose and face have
+    # no attribute layer at all (DESIGN.md 6.4), so `derive_chop` being absent there
+    # is the design rather than a missing build step.
+    missing = [src for src in absent if src in wanted]
+    if missing:
+        # Not a failure: this builder runs last precisely so they exist, and a
+        # partial build should still leave a working group rather than nothing.
+        print("   (`%s` has no %s yet - those branches skipped. Re-run this after "
+              "td_add_temporal.py.)" % (stream, ", ".join(missing)))
 
     if not branches and not boxes:
         # A stream with nothing to transform is legitimate - it just gets an empty
@@ -467,19 +536,26 @@ def _build_one(td, child, stream, branches, boxes, box_expressions, failures,
     summary = []
     renames = {}
     row = 0
-    for name, toggle, suffixes, box_half in HALVES:
-        # A half takes EITHER the image-space branches or the box-relative ones,
-        # never both - that separation is the whole reason there are four.
-        mine = [] if box_half else [b for b in branches if b.suffix in suffixes]
+    # (name, toggle, suffixes, box-relative?, which sources) - the wire halves take
+    # only `filter`, the derived halves take only the other two, and a branch whose
+    # source is missing is dropped here rather than half-built.
+    plan = [(n, t, sfx, box, (SOURCE,)) for n, t, sfx, box in HALVES]
+    plan += [(n, t, sfx, False, tuple(s for s in SOURCES if s != SOURCE))
+             for n, t, sfx in DERIVED_HALVES]
+    for name, toggle, suffixes, box_half, from_sources in plan:
+        mine = ([] if box_half else
+                [(src, b) for src, b in pairs
+                 if b.suffix in suffixes and src in from_sources
+                 and src not in absent])
         boxes_mine = [b for b in boxes if b.suffix in suffixes] if box_half else []
         if not mine and not boxes_mine:
             continue
-        half = _build_half(td, group, group_in, stream, name, toggle, mine,
+        half = _build_half(td, group, group_ins, stream, name, toggle, mine,
                            boxes_mine, box_expressions, renames, failures, row)
         halves.append(half)
-        summary.append("  %-8s gated by %-10s %2d branches, %4d channels"
+        summary.append("  %-9s gated by %-11s %2d branches, %4d channels"
                        % (name, toggle, len(mine) + len(boxes_mine),
-                          sum(len(b.names) for b in mine)
+                          sum(len(b.names) for _s, b in mine)
                           + sum(len(b.names) for b in boxes_mine)))
         # Stack the halves downward, leaving a row of clearance below the taller.
         row -= len(mine) + len(boxes_mine) + 2
@@ -501,7 +577,10 @@ def _build_one(td, child, stream, branches, boxes, box_expressions, failures,
         "box_note": BOX_NOTE if boxes else "",
         "branches": "\n".join(["", "HALVES", *summary])}
 
-    expected = sum(len(branch.names) for branch in branches) + sum(
+    # Only the branches that were actually BUILT - a source that is absent
+    # contributes nothing, and counting it would turn a partial build into a
+    # failure report rather than the message above.
+    expected = sum(len(b.names) for src, b in pairs if src not in absent) + sum(
         len(box.names) for box in boxes)
     if group_out.numChans != expected:
         failures.append("%s: `%s` produced %d channels, expected %d"
@@ -529,7 +608,7 @@ def _build_one(td, child, stream, branches, boxes, box_expressions, failures,
     return (stream, len(group.findChildren(depth=2)), group_out.numChans, renames)
 
 
-def _build_half(td, group, group_in, stream, name, toggle, branches, boxes,
+def _build_half(td, group, group_ins, stream, name, toggle, branch_pairs, boxes,
                 box_expressions, renames, failures, top_row):
     """One gateable half of a coords group - `world` or `pixels`. Returns the COMP.
 
@@ -541,19 +620,29 @@ def _build_half(td, group, group_in, stream, name, toggle, branches, boxes,
     half = group.create(td.baseCOMP, name)
     half.nodeX, half.nodeY = COL_SELECT * COL_W, top_row * ROW_H
     half.color = (0.4, 0.42, 0.34)
-    half_in = half.create(td.inCHOP, "in1")
-    half_in.nodeX, half_in.nodeY = COL_IN * COL_W, 0
-    half.inputConnectors[0].connect(group_in)
+
+    # One In CHOP per source this half's branches actually read, in the group's own
+    # connector order - so a half reading only `filter` has one input and does not
+    # pay for two it ignores.
+    used = [src for src in SOURCES
+            if any(s == src for s, _b in branch_pairs) or (boxes and src == SOURCE)]
+    half_ins = {}
+    for index, src in enumerate(used):
+        port = half.create(td.inCHOP, "in%d" % (index + 1))
+        port.nodeX, port.nodeY = COL_IN * COL_W, -index * ROW_H
+        half.inputConnectors[index].connect(group_ins[src])
+        half_ins[src] = port
+    half_in = half_ins.get(SOURCE) or next(iter(half_ins.values()))
 
     outputs = []
     described = []
     row = ROW_FIRST
 
     # -- the channels already in image space -------------------------------
-    for branch in branches:
+    for src, branch in branch_pairs:
         select = half.create(td.selectCHOP, "sel_%s" % branch.label)
         select.nodeX, select.nodeY = COL_SELECT * COL_W, row * ROW_H
-        select.inputConnectors[0].connect(half_in)
+        select.inputConnectors[0].connect(half_ins[src])
         # A verified PATTERN, not a list of names: `spaces.py` expanded it against
         # this stream's own contract and returned it only on an exact match.
         select.par.channames = branch.pattern
@@ -571,9 +660,9 @@ def _build_half(td, group, group_in, stream, name, toggle, branches, boxes,
                             failures, "%s/%s/%s" % (stream, name, math.name))
         renames[how] = renames.get(how, 0) + 1
         outputs.append(math)
-        described.append("  %-10s %-24s %3d ch  preoff %+.1f"
-                         % (branch.label, branch.pattern, len(branch.names),
-                            branch.offset))
+        described.append("  %-14s %-3s %3d ch  preoff %+.1f  from %s"
+                         % (branch.label, branch.suffix, len(branch.names),
+                            branch.offset, src))
         row -= 1
 
     # -- the channels normalised to a bounding box -------------------------

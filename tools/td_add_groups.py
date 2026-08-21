@@ -162,6 +162,12 @@ COOK_GATED = {
     # Only the face has box-relative channels, so only the face has these two.
     "face/coords/lm_world": ("Lmcoordstx",),
     "face/coords/lm_pixels": ("Lmcoordspx",),
+    # And only HANDS has an attribute layer, so only hands has coordinate branches
+    # reading `derive_chop` and `temporal` - palm, pinch, the two centres, and the
+    # velocity channels. Same toggles as the wire-contract halves, because they are
+    # the same spaces; separate COMPs because they read a different input.
+    "hands/coords/dv_world": ("Coordstx",),
+    "hands/coords/dv_pixels": ("Coordspx",),
 }
 
 # `latches` READS `temporal`'s second output - the liveness/presence gate that

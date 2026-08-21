@@ -448,6 +448,131 @@ def companioned_names(stream: str) -> list[str]:
     return [name for name in channel_roles(stream) if name in with_companion]
 
 
+# ---------------------------------------------------------------------------
+# Channels that never arrive on the wire
+#
+# `derive_chop` and `temporal` compute another 100 channels ending in `_x` or `_y`
+# INSIDE TouchDesigner, and they are not all the same kind of number. The screen
+# space toggle made that visible: it left 24 channels behind because they had no
+# companion, and sorting out which of them SHOULD have one is what this section is.
+#
+#   POSITIONS       palm, pinch, hands_center, index_center. Points in the image,
+#                   normalised, exactly like a joint. 12 channels, and they were
+#                   simply missed - a project drawing the palm centre has to
+#                   recompute the transform by hand.
+#   RATES           vel. Normalised units per SECOND. It scales into world units
+#                   per second and takes NO offset, which is the extent rule - a
+#                   velocity of 0.2 is 0.2 wherever the hand is.
+#   UNIT VECTORS    point, dir. NOT transformable, and this is a real conclusion
+#                   rather than an omission: world space scales y by the render's
+#                   aspect, so a transformed unit vector is no longer unit length,
+#                   and the DIRECTION it points is not the direction the image-space
+#                   one pointed. Re-normalising it is a magnitude and a divide - a
+#                   different branch, not a companion. Left alone, and named here so
+#                   the next person does not have to work it out again.
+#   HAND-LOCAL      the 84 `h{i}_d_<joint>_x/y` descriptor channels. Joint offsets
+#                   rotated into the HAND's own frame and divided by hand size, so
+#                   they are a shape signature and there is no image position in
+#                   them at all. Transforming one would be meaningless.
+#
+# Keyed by the operator that publishes them, because a coordinate branch has to
+# read that operator and the two are built at different times.
+DERIVE_CHOP: Final = "derive_chop"
+TEMPORAL: Final = "temporal"
+DERIVED_SOURCES: Final[tuple[str, ...]] = (DERIVE_CHOP, TEMPORAL)
+
+# Per hand, and MAX_HANDS is 2 everywhere in this system.
+_MAX_HANDS: Final = 2
+_DERIVED_PER_HAND: Final[dict[str, tuple[tuple[str, str], ...]]] = {
+    DERIVE_CHOP: (("palm", "position"), ("pinch", "position"),
+                  ("point", "direction")),
+    TEMPORAL: (("vel", "rate"), ("dir", "direction")),
+}
+# Per frame rather than per hand: one point between the two hands.
+_DERIVED_PER_FRAME: Final[dict[str, tuple[tuple[str, str], ...]]] = {
+    DERIVE_CHOP: (("hands_center", "position"), ("index_center", "position")),
+    TEMPORAL: (),
+}
+_KIND_ROLES: Final[dict[str, tuple[str, str]]] = {
+    "position": (ROLE_POSITION_X, ROLE_POSITION_Y),
+    # An extent's rule: scaled, never offset.
+    "rate": (ROLE_EXTENT_X, ROLE_EXTENT_Y),
+    # Deliberately a scalar, so nothing transforms it. See the note above.
+    "direction": (ROLE_SCALAR, ROLE_SCALAR),
+}
+
+
+def derived_roles(source: str) -> dict[str, str]:
+    """The channels `source` publishes that a coordinate branch cares about.
+
+    Contract: names in publication order, mapped to the same roles the wire
+              contract uses - so `transform_branches`' arithmetic applies unchanged
+              and there is no second copy of the coordinate formula anywhere.
+              A `direction` is deliberately ROLE_SCALAR: it is not transformable and
+              marking it so is what keeps it out of every branch.
+    Raises:   on an unknown source, rather than returning an empty map - which would
+              silently build a group that transforms nothing.
+    """
+    if source not in DERIVED_SOURCES:
+        raise ValueError("unknown derived source %r; known: %s"
+                         % (source, ", ".join(DERIVED_SOURCES)))
+    roles: dict[str, str] = {}
+    for stem, kind in _DERIVED_PER_HAND[source]:
+        role_x, role_y = _KIND_ROLES[kind]
+        for hand in range(_MAX_HANDS):
+            roles["h%d_%s_x" % (hand, stem)] = role_x
+            roles["h%d_%s_y" % (hand, stem)] = role_y
+    for stem, kind in _DERIVED_PER_FRAME[source]:
+        role_x, role_y = _KIND_ROLES[kind]
+        roles["%s_x" % stem] = role_x
+        roles["%s_y" % stem] = role_y
+    return roles
+
+
+def derived_branches(source: str) -> list[Branch]:
+    """The coordinate branches for one derived source, as `Branch` tuples.
+
+    Contract: same shape and same arithmetic as `transform_branches`, so
+              `tools/td_add_coords.py` builds them with the identical code. The
+              patterns are LITERAL NAME LISTS rather than wildcards, and that is not
+              laziness: these branches read `derive_chop`, whose output contains
+              `h0_palm_x` AND all 84 `h0_d_<joint>_x` descriptor channels, and
+              DESIGN.md 2.11 records that `h?_*_x` cannot tell those apart. There are
+              at most twelve names in a list here, so the cost is nothing.
+    """
+    roles = derived_roles(source)
+    branches: list[Branch] = []
+    for role in (ROLE_POSITION_X, ROLE_POSITION_Y, ROLE_EXTENT_X, ROLE_EXTENT_Y):
+        names = [name for name, got in roles.items() if got == role]
+        if not names:
+            continue
+        # An x-axis rate is still an `_x` channel on the wire; only its RULE is the
+        # extent's. So the source suffix comes from the axis, not from the role.
+        axis = "_x" if role in (ROLE_POSITION_X, ROLE_EXTENT_X) else "_y"
+        world = "_t" + axis[1]
+        pixels = "_p" + axis[1]
+        pattern = " ".join(names)
+        offset = -0.5 if role in (ROLE_POSITION_X, ROLE_POSITION_Y) else 0.0
+        branches.append(Branch(source + world, axis, world, names, pattern, offset))
+        branches.append(Branch(source + pixels, axis, pixels, names, pattern, 0.0))
+    return branches
+
+
+def derived_companioned_names() -> list[str]:
+    """Every DERIVED channel that gets a screen-space companion.
+
+    Kept separate from `companioned_names` for one reason: these channels can be
+    ABSENT. A disabled derive group does not emit its channels at all - unlike a
+    frozen native group, which holds them - so a builder must not treat a missing
+    one as a fault. The wire-contract half is always present and is checked.
+    """
+    names: list[str] = []
+    for source in DERIVED_SOURCES:
+        for branch in derived_branches(source):
+            names.extend(n for n in branch.names if n not in names)
+    return names
+
+
 def source_suffix(role: str) -> str:
     """The suffix a role's channels end with, for a Rename CHOP's From pattern."""
     return _SUFFIXES[role][0]

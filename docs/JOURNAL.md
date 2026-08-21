@@ -2433,3 +2433,40 @@ direction in world space is not the image-space direction, since y is scaled by 
 aspect. That is a real piece of design, not an oversight to sweep up.
 
 And the review gate is now SEVEN milestones unpaid.
+
+### Addendum, same day: the 24 channels, and what they turned out to be
+
+The screen-space toggle left 24 channels behind because they had no companion, and I
+wrote that up as a gap for next time. Then I looked at what they actually were, and
+the answer was more interesting than "some missing branches".
+
+`derive()` and `temporal` publish 100 channels ending in `_x` or `_y`, in four kinds:
+
+- **12 POSITIONS** — `palm`, `pinch`, `hands_center`, `index_center`. Points in the
+  image, exactly like a joint. Simply missed, and a project drawing the palm centre
+  had to redo the transform by hand. They have companions now.
+- **4 RATES** — `vel`. Normalised units per second, and the extent's rule fits it
+  exactly: scale, no offset, because a velocity of 0.2 is 0.2 wherever the hand is.
+  Companions now, and the world ones are world units per second.
+- **8 UNIT VECTORS** — `point`, `dir`. **These cannot have companions, and that is a
+  conclusion rather than a gap.** World space scales y by the render's aspect, so a
+  transformed unit vector is neither unit length nor pointing where the image-space
+  one pointed. Re-normalising it is a magnitude and a divide — a different branch.
+- **84 HAND-LOCAL** — the `h{i}_d_<joint>_x/y` descriptor channels are joint offsets
+  rotated into the hand's own frame and divided by hand size. A shape signature with
+  no image position in it at all.
+
+So 16 of the 24 got companions and 8 are correctly excluded, which makes the toggle
+complete rather than approximately right. The arithmetic is the identical `Branch`
+machinery — `derived_branches()` returns the same tuple type as
+`transform_branches()` — so there is no second copy of the coordinate formula.
+
+Two consequences worth knowing. `coords` now READS `derive_chop` and `temporal`, so
+it moved to the END of the build order: a consumer must state its own input, and an
+input has to exist to be named. And the delete list gained channels that can be
+ABSENT — a disabled derive group emits nothing, unlike a frozen native group which
+holds its channels — so the builder checks presence only for the wire-contract half.
+
+The pleasant part: the user's own network reads `*_tx` and `*_ty` off the hands
+output, and those two Selects went from 42 channels to **50** without anyone
+touching them.
