@@ -1390,3 +1390,158 @@ plain 1-sample CHOP with no rate negotiation of its own to get wrong.
 debounce, dwell, steadiness, motion events), the group COMPs with `allowCooking`
 gating and the five parameter pages. **Still needs the user:** threshold feel, and
 a two-hand fixture before slot assignment.
+
+---
+
+## Review triage: a stuck latch, a wrong explanation, and two tests that tested nothing
+2026-08-20
+
+The review gate earned its keep. Thirteen findings; the four that mattered were
+all invisible to me, and one of them was that my headline measurement from the
+previous entry was arithmetic nonsense.
+
+**HIGH, real, and now fixed: a stopped sidecar latched every engaged gesture for
+ever.** `DESIGN.md` 2.9 already recorded that a dead sidecar leaves TouchDesigner's
+channels frozen rather than zeroed. The validity gate was `found AND conf_median
+>= threshold AND size > floor` — every term read from the frozen last frame. So
+pressing Stop Sidecar mid-pinch left `h0_valid = 1` and `h0_pinch_index ≈ 0.1`
+indefinitely: the latch stayed engaged, no end pulse ever fired, and any project
+gated on the state was stuck on with nothing reporting it.
+
+The previous entry had already *observed* this and not recognised it — I wrote that
+the latch was "sitting engaged at `pinch_index` 0.435" after the sender exited and
+treated it as a nice demonstration of the dead-band hold. It was that, and it was
+also the bug.
+
+Fixed with a liveness term: the slope of `seq` is non-zero while frames arrive, a
+Logic `ne` convert turns that into a boolean, and a Trail plus an Analyze maximum
+answers "did it change at all in the last 0.5 s" exactly, with no filter constant
+and no epsilon. Broadcast to the bank's five channels by a Constant CHOP of
+expressions, the same way the thresholds already are. Verified: with the stream
+stopped, `h0_pinch_index` frozen at 0.435 and `h0_valid` frozen at 1,
+`h0_pinching` went to 0 and `h0_pinch_end_count` incremented.
+
+**And the liveness detector exposed that my explanation for the clock was
+wrong.** The previous entry claimed, and `DESIGN.md` 2.10 asserted, that
+TouchDesigner does not cook a Merge branch whose channels nothing downstream
+selects — citing `merge_out` at 283,930 cooks against `lat_state` at 2. The
+reviewer pointed out that a Merge cannot emit output without cooking its inputs,
+so the numbers could not both be right.
+
+They were not comparable at all. `merge_out` had existed for hours; every build of
+the bank destroys and recreates `lat_state`, restarting its counter. I compared a
+lifetime total against a fresh one and read a mechanism into the ratio. Tested
+properly — bank wired, clock detached — `lat_state` and `merge_out` advanced **402
+to 402, in lockstep**.
+
+What makes this worth a long entry is that the wrong diagnosis *worked*: adding
+the clock did fix the symptom, so nothing pushed back. The clock is still there,
+and it is still necessary — for a completely different reason, which the liveness
+work then made obvious. When the sender dies, `in1` stops changing, so nothing
+downstream cooks, **including the detector whose entire job is to notice that
+nothing is arriving**. Measured: `lat_live` sat at 1 forever with nothing sending.
+A branch with memory has to be clocked by time, not by data, because the event it
+must react to is the absence of data. `DESIGN.md` 2.10 has been rewritten, with
+the wrong version kept underneath it.
+
+Two lessons banked: `totalCooks` is a lifetime counter and comparing it across
+operators of different ages measures nothing; and a fix that works is not evidence
+that its rationale is right.
+
+**HIGH, latent: channel identity was positional.** Every rename used
+`renamefrom = "*"`, which maps the To list onto whatever order channels arrive
+in — so identity depended on order, and `derive_chop` publishes alphabetically,
+which is not the bank's order. Correctness rested entirely on the Select CHOP
+reordering to `channames`. Worse, `derive()` already takes an enabled-groups set:
+the moment the Attributes page exists, unchecking Contacts drops the eight
+`h*_pinch_*` channels, `hands_distance` becomes channel 0, and the clap latch is
+published as `h0_pinching` — cleanly, with no error. Now every rename is keyed on
+names. Verified live that a literal From/To list is pairwise, and that an absent
+source keeps its own name while the rest still map correctly, so a dropped group
+costs one latch instead of shifting four onto the wrong data.
+
+**MEDIUM, deferred with a reason: the gate is raw `valid`, not the debounced
+`active` the spec asks for.** One low-confidence frame mid-pinch drops the state,
+fires a spurious end pulse and re-engages with a spurious start and a bumped
+counter. The debounce is the Presence group's job; the shortfall is now marked
+`TODO(M-presence)` at the gate and written into `docs/ATTRIBUTES.md` rather than
+left implicit. No sequence perturbs confidence yet, so nothing would catch it — a
+`glitch` sweep expecting +1 rather than +2 is the test to write with it.
+
+**Nothing measured the falling edges.** All five sweeps passed while
+`h{i}_e_pinch_end`, `h{i}_e_snap_end` and `e_apart` were structurally checked and
+behaviourally untested. Added release counters, and with them a standing
+invariant checked on every run: `fires - releases == 1 if engaged else 0`. It
+catches a missing end pulse, a doubled one, and a missing start. Re-verified from
+a fresh build: ramp +4 fires and +4 releases, and after clap and both, all five
+pairs at 8/8, 3/3, 7/7, 3/3, 3/3 with the invariant holding.
+
+**Two surviving mutations — tests that tested nothing.**
+
+*`pinch_finger` could be ignored entirely.* Reverting the whole point of the
+synth change — hard-coding the index tip — left all 164 tests green, because a
+full index pinch already brings the thumb to 0.21 hand-sizes of the middle tip,
+under `Snapon` 0.25. So the `snap` sequence was secretly sending a pinch and
+TouchDesigner still reported `h0_snap_count +N`. The discriminating property is
+which distance reaches zero, and it is now asserted.
+
+*"Crosses the threshold" was not what the sweep test asserted.* Doubling the clap
+separation left the minimum `hands_distance` at 0.5999999999999996 — four parts in
+1e17 under `Togetheron` — and every Python assertion passed. But that value
+reaches TouchDesigner as a **float32**, where it rounds to exactly 0.6 and the
+clap latch never engages: green suite, `clap +0`, and the network blamed. Now
+every sweep must clear its thresholds by a tenth of the dead band on at least four
+frames.
+
+Both mutations re-applied and confirmed to fail now.
+
+**Thresholds had three homes.** `visionhands/tuning.py` is now the only one, with
+an import-time check that every `off` exceeds its `on`. The failure this prevents
+is specific: raising `Pinchon` to 0.45 in the builder alone left every Python test
+passing and TouchDesigner still reporting `deadband +1` — while the sweep's crest,
+at 0.44, was now *below* the engage threshold, so the distance never left the
+engaged region and the hysteresis test had silently stopped testing hysteresis.
+The test now asserts the crest sits strictly inside the band. Mutation confirmed
+failing.
+
+**Two writers on the port are now refused rather than documented.** The docstring
+said the receiver could not tell the sidecar from the synthetic stream, so the
+tool would not guess. Both halves were answerable, and the consequence justified
+the check: interleaved streams alternate the pinch distance between two different
+hands every other frame, driving the latch across the dead band repeatedly and
+turning +4 into +37 — or into something plausible enough to accept. `ps`-based
+detection, `--force` to override.
+
+**Which promptly found a bug in itself.** The first matcher required `-m`
+immediately followed by the module — and matched a decoy `python -c "... # -m
+visionhands.sidecar"`. `ps -Ao args=` returns the command line as one string, so
+splitting on spaces does not recover argv boundaries and the body of a `-c` script
+splits into words too. Same class as the `pgrep -f` false positive that once had
+the Stop button SIGTERM its own shell, one level subtler. Now the leading
+interpreter options are walked the way CPython parses them, stopping at the first
+`-c`, `-m` or script path. Six argv cases plus a live `-m` match and a live `-c`
+decoy.
+
+**Confirmed correct, so recorded as such:** initialisation. Both feedbacks take
+`lat_zero` as their template, so a reload comes back released with the counters at
+0, and the phantom-end-pulse-on-reload hazard `docs/ATTRIBUTES.md` warns about
+cannot happen. The converse does — reloading mid-gesture fires one spurious start
+— which is inherent to a level-driven latch and is now written down.
+
+**And a hazard closed by measurement rather than by argument.** The reviewer
+flagged that the Feedback CHOP's `previous` is time-based and asked what happens
+when the timeline rewinds. This project's timeline plays and loops every 600
+frames, so it had already rewound roughly a hundred times during the verification
+runs, and `h0_pinch_count` held at 8 throughout. It does not reset. Every +4/+1/+3
+delta in the previous entry was measured across multiple rewinds.
+
+**Still open, and named rather than absorbed:** a `pinch0`/`snap0` swap is
+invisible to both `ramp` and `both`, because both counters move together in each;
+the only thing that currently discriminates the mapping is the incidental snap
+engagement on a one-hand ramp, which the threshold-feel session may tune away.
+And 39 operators is a lot to hold in the head — `docs/BUILD_PLAN.md` step 3 has to
+decide how `allowCooking` group gating interacts with a Cook Type = Always clock
+before the group COMPs are built, because a disabled group would freeze its
+latches and resume with a stale `prev`.
+
+502 channels, 168 tests, ruff and mypy clean.

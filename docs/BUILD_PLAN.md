@@ -24,14 +24,29 @@ nobody in frame: `ramp` +4 for four sweeps, `deadband` **+1** for six dips (the
 hysteresis), `clap` +3, `both` +3 on all four per-hand counters, `absent` +0
 everywhere.
 
-**READ THIS BEFORE BUILDING STEP 2.** The bank was structurally perfect and
-completely dead, because TouchDesigner does not cook a Merge branch that nothing
-downstream consumes — measured, `merge_out` 283,930 cooks against `lat_state` 2.
-Harmless for stateless maths; fatal for anything with memory, and it silently
-corrupts every edge pulse rather than failing. `DESIGN.md` 2.10 has the numbers.
-Every group below needs a Null CHOP with Cook Type = `always`, or needs to be
-provably downstream of one. `viewer = True` does not work and neither does an
-ordinary Null.
+**READ THIS BEFORE BUILDING STEP 2.** A branch with memory must be clocked by
+TIME, not by data: when the sender stops, nothing downstream cooks, so anything
+that should react to the absence of data never gets the chance — including the
+liveness detector whose whole job that is. Measured, and `DESIGN.md` 2.10 has it,
+including the wrong explanation I believed first and why the wrong one still
+"worked". Every group below needs a Null CHOP with Cook Type = `always`, or needs
+to be provably downstream of one. `viewer = True` does not work and neither does
+an ordinary Null.
+
+**Two things step 2 owes the latches**, both marked `TODO` in
+`tools/td_add_latches.py`:
+
+- `h{i}_active` — `valid` debounced over `Activateframes`/`Deactivateframes` — is
+  what `docs/ATTRIBUTES.md` says should gate the latches. They currently gate on
+  raw per-frame validity, so one low-confidence frame mid-gesture fires a spurious
+  end-then-start pair and bumps the counter. AND it into `lat_valid`, where
+  liveness already is. Write a `glitch` sequence with it (a held pinch with one
+  low-confidence frame, expecting +1 rather than +2) - no existing sweep perturbs
+  confidence, so nothing would catch a regression.
+- Step 3's `allowCooking` group gating does not run a Cook Type = Always operator
+  inside a disabled COMP, so a disabled group would freeze its latches and resume
+  with a stale `prev`. Decide where the clock lives before building the group
+  COMPs; it probably has to sit outside any gated group.
 
 `DESIGN.md` 2.11 lists the seven other native-operator behaviours that cost time
 here — the Logic CHOP's `convert` being a comparator, its `match` defaulting to

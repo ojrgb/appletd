@@ -382,50 +382,57 @@ the built-in camera simultaneously (§2.8), so TD can display the camera while t
 sidecar tracks it. Two independent readers, 3.5 KB of landmarks per frame, and
 nothing else crosses the boundary.
 
-### 2.10 TouchDesigner does not cook a branch nobody consumes — measured
+### 2.10 A branch with memory must be clocked by TIME, not by data — measured
 
-The single most consequential thing learned building the latch bank, and it is
-not a bug: TouchDesigner cooks on demand, per branch. A Merge CHOP whose only
-downstream consumer selects `*_tx` and `*_ty` never pulls the branches carrying
-the other channels.
+**This section replaces an earlier version that got the reason wrong.** The wrong
+version is kept below, because the way it was wrong is the useful part.
 
-**MEASURED on the live network**, with a project whose only consumer of the COMP
-was two Select CHOPs taking the coordinate channels:
+**What is true.** A CHOP branch containing a recurrence has to cook every frame,
+and the reason is not efficiency — it is that *the event it must react to is the
+absence of data*. When the sidecar stops, the OSC In CHOP freezes rather than
+zeroing (§2.9), so `in1` stops changing, so nothing downstream of it cooks. That
+includes any detector whose job is to notice that nothing is arriving. MEASURED:
+with a `seq`-slope liveness detector wired from `in1`, nothing sending, and no
+independent clock, `lat_live` sat at **1** indefinitely — the absence of data was
+exactly what stopped the detector from being recomputed. A latch engaged at that
+moment stayed engaged for ever and never emitted its end pulse.
 
-| operator | totalCooks |
-|---|---|
-| `merge_out` | 283,930 |
-| `out1` | 283,929 |
-| `derive_chop` | 178,976 |
-| `lat_state`, `lat_start`, `lat_count` | **2** |
+The fix is a Null CHOP with Cook Type = `always` consuming the deepest point of
+the chain, so everything upstream cooks on the clock whether or not a frame
+arrived. Two things that look like they should work and do not: `viewer = True`
+(measured: cooks did not advance) and an ordinary Null CHOP downstream (itself
+unconsumed, so it does not cook either).
 
-Both of those two cooks were forced by the build script. The latch bank had never
-cooked on its own.
+**MEASURED, after the fix.** With `deadband` sent until the latch was engaged and
+then the sender stopped: `h0_pinch_index` frozen at 0.435 — inside the dead band,
+below the release threshold — and `h0_valid` frozen at 1, yet `h0_pinching` went
+to 0 and `h0_pinch_end_count` incremented. The gesture ended because the *stream*
+ended, which is the only correct answer.
 
-For a **stateless** branch this is a pure optimisation and entirely correct — an
-uncooked distance is recomputed the instant anyone asks for it, which is why
-`derive_chop` is fine. For a branch with **memory** it is fatal. A recurrence
-advances once per cook, so a Feedback CHOP in an uncooked branch holds a value
-from an arbitrarily distant past, and every edge pulse derived from it is
-computed between two frames that were never adjacent. The state itself would
-eventually be right, because the recurrence is level-driven and self-correcting;
-the pulses never would be.
+**What it costs, stated plainly.** The clock pulls `derive_chop`, which is
+main-thread Python at 0.210 ms (§2.7), so that cooks on 100% of frames rather than
+only when a frame arrives — about 1.3% of a 60 fps frame, paid always. It buys a
+latch bank that releases when the camera goes away.
 
-It cannot be left to the project downstream either. Consuming any latch channel
-does pull the whole recurrence, so a project that reads `h0_pinching` gets correct
-behaviour by accident — but one that reads only the raw landmarks silently gets a
-latch bank frozen in the past, with nothing anywhere reporting it.
+**THE WRONG VERSION, and why it was believed.** This section first claimed that
+*TouchDesigner does not cook a Merge branch whose channels nothing downstream
+selects*, citing `merge_out` at 283,930 cooks against `lat_state` at 2. That claim
+is **false**, and the citation was an invalid comparison: `merge_out` is an
+operator that had existed for hours, while every build of the latch bank destroys
+and recreates `lat_state`, so its counter had restarted. The two numbers measured
+different spans and were never comparable.
 
-**The fix is one operator**: a Null CHOP with Cook Type = `always`, consuming the
-deepest point of the bank. Everything upstream then cooks every frame regardless
-of what anyone downstream selects. Two things that look like they should work and
-do not: `viewer = True` (measured: cooks did not advance) and an ordinary Null
-CHOP downstream (it is itself unconsumed, so it does not cook either).
+Tested properly, under control — bank connected to `merge_out`, clock fully
+detached — `lat_state` and `merge_out` advanced **402 cooks to 402, in lockstep**.
+A Merge CHOP pulls all of its inputs, and there is no channel-level pruning.
 
-**Rule for everything still to build.** Every group of operators with memory —
-the velocity Slopes, the smoothing Filters, the debounce Counts, the dwell
-Timers — needs a guaranteed clock, or it needs to be provably downstream of one.
-This is the first thing to check when a temporal channel misbehaves.
+Two lessons worth more than the conclusion. First, `totalCooks` is a lifetime
+counter: comparing it across operators of different ages measures nothing, and
+the only valid use is a delta on one operator across a known interval. Second,
+the original diagnosis was reached from a single dramatic ratio and it *worked* —
+adding the clock did fix the symptom — which is precisely how a wrong explanation
+survives. It took a review challenging the arithmetic to notice, and the
+controlled A/B took thirty seconds.
 
 ### 2.11 Native CHOP behaviours that cost time, all verified live
 
@@ -464,6 +471,21 @@ Against the running instance (099), not read anywhere:
   order — so one operator can pick, reorder and rename in a single step.
 - **The MCP bridge has been observed executing a script TWICE per call.** Every
   builder must be idempotent by construction rather than by convention.
+- **`appendCustomPage` with an existing name creates a SECOND page of that name.**
+  Look the page up first.
+- **A literal space-separated Rename From/To list IS pairwise by name**, and a
+  source that is absent simply keeps its own name while the rest still map
+  correctly. So keying a rename on names rather than on `*` makes a missing
+  channel cost one channel instead of shifting every later one onto the wrong
+  data. (The recorded trap about non-pairwise lists applies to WILDCARD patterns,
+  which is a different thing.)
+- **`ps -Ao args=` is not tokenised by argv**, so splitting it on spaces cannot
+  recover argument boundaries: the body of a `python -c "..."` script splits into
+  words too, and a test for "`-m` immediately followed by the module" matches
+  `python -c "# -m visionhands.sidecar"`. This is the same class of false positive
+  that once had the COMP's Stop button SIGTERM the shell that launched it, one
+  level subtler. Walk the leading interpreter options the way CPython does and
+  stop at the first `-c`, `-m`, or script path.
 
 ---
 

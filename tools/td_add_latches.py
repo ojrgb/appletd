@@ -75,33 +75,45 @@ PREFIX = "lat_"
 # of operators serve all five latches: with the names identical across inputs,
 # every Logic CHOP pairs the right channels by name instead of by luck.
 LATCHES = (
-    # working    distance            valid         on            off
+    # 0 working  1 distance          2 valid       3 on          4 off
+    # 5 state    6 start pulse       7 end pulse   8 fire count  9 release count
     ("pinch0",   "h0_pinch_index",   "h0_valid",   "Pinchon",    "Pinchoff",
-     "h0_pinching",    "h0_e_pinch_start", "h0_e_pinch_end", "h0_pinch_count"),
+     "h0_pinching", "h0_e_pinch_start", "h0_e_pinch_end",
+     "h0_pinch_count", "h0_pinch_end_count"),
     ("pinch1",   "h1_pinch_index",   "h1_valid",   "Pinchon",    "Pinchoff",
-     "h1_pinching",    "h1_e_pinch_start", "h1_e_pinch_end", "h1_pinch_count"),
+     "h1_pinching", "h1_e_pinch_start", "h1_e_pinch_end",
+     "h1_pinch_count", "h1_pinch_end_count"),
     ("snap0",    "h0_pinch_middle",  "h0_valid",   "Snapon",     "Snapoff",
-     "h0_snapping",    "h0_e_snap",        "h0_e_snap_end",  "h0_snap_count"),
+     "h0_snapping", "h0_e_snap", "h0_e_snap_end",
+     "h0_snap_count", "h0_snap_end_count"),
     ("snap1",    "h1_pinch_middle",  "h1_valid",   "Snapon",     "Snapoff",
-     "h1_snapping",    "h1_e_snap",        "h1_e_snap_end",  "h1_snap_count"),
+     "h1_snapping", "h1_e_snap", "h1_e_snap_end",
+     "h1_snap_count", "h1_snap_end_count"),
     # `both_valid` rather than either hand's own flag: a two-hand distance is
     # meaningless unless both hands are there, and derive() already publishes 0
     # for `hands_distance` in that case - which is below every threshold, which
     # is exactly the absent-hand trap this gate exists to stop.
     ("together", "hands_distance",   "both_valid", "Togetheron", "Togetheroff",
-     "hands_together", "e_clap",           "e_apart",        "clap_count"),
+     "hands_together", "e_clap", "e_apart",
+     "clap_count", "apart_count"),
 )
 
 WORKING = tuple(row[0] for row in LATCHES)
 
-# Tuning defaults, straight from docs/ATTRIBUTES.md. Every `off` is looser than
-# its `on`: that gap IS the hysteresis and it IS the re-arm rule, so a build with
-# them equal has neither and will chatter.
-THRESHOLD_DEFAULTS = {
-    "Pinchon": 0.35, "Pinchoff": 0.50,
-    "Snapon": 0.25, "Snapoff": 0.45,
-    "Togetheron": 0.60, "Togetheroff": 0.95,
-}
+# Tuning defaults come from visionhands/tuning.py, not from a copy here. They were
+# written down in three places - this builder, the tests, and docs/ATTRIBUTES.md -
+# and nothing tied them together, so raising `Pinchon` here alone left the whole
+# suite green while silently pushing the dead-band sweep's crest below the engage
+# threshold: the hysteresis test stopped testing hysteresis and kept reporting
+# success. Imported inside main(), after sys.path is set up.
+THRESHOLD_DEFAULTS = None       # populated by main() from visionhands.tuning
+
+# How far back to look for a change in `seq` before declaring the sender dead.
+# Long enough to bridge the alternate zero-slope frames at a 60 fps cook rate
+# against 30 fps delivery, and to survive a brief camera stall; short enough that
+# a stuck latch releases promptly. GUESSED, not measured - the right value depends
+# on how long a stall should be tolerated, which is a feel question.
+LIVENESS_WINDOW_S = 0.5
 
 # Where the bank is laid out, below the derive Script CHOP at y = -800.
 ROW_Y = -1100
@@ -214,10 +226,15 @@ def _verify_hysteresis(comp):
 
 
 def main():
+    global THRESHOLD_DEFAULTS
     import td
 
     if REPO_ROOT not in sys.path:
         sys.path.append(REPO_ROOT)
+    # One table, shared with the tests. Its import-time self-check refuses a
+    # threshold pair with no dead band, which is a build that would chatter.
+    from visionhands.tuning import THRESHOLD_DEFAULTS as DEFAULTS
+    THRESHOLD_DEFAULTS = DEFAULTS
 
     comp = op(COMP_PATH)
     if comp is None:
@@ -266,7 +283,21 @@ def main():
     wire(dist, source)
     dist.par.chops = ""
     dist.par.channames = " ".join(row[1] for row in LATCHES)
-    dist.par.renamefrom = "*"
+    # KEYED ON NAMES, not on position. `renamefrom = "*"` maps the To list onto
+    # whatever order the channels happen to arrive in, which made every channel's
+    # IDENTITY positional - and `derive_chop` publishes in alphabetical order,
+    # which is not this order, so correctness rested entirely on the Select
+    # reordering to `channames`. Worse, `derive()` takes an enabled-groups set, so
+    # the moment the Attributes page exists, unchecking Contacts drops the eight
+    # `h*_pinch_*` channels, `hands_distance` becomes channel 0, and the clap
+    # latch is silently published as `h0_pinching`. Cooks cleanly, no error.
+    #
+    # A literal space-separated From/To list IS pairwise by name (verified live -
+    # the recorded trap about non-pairwise lists applies to WILDCARD patterns).
+    # And a missing source degrades safely: verified, the surviving channels still
+    # map correctly and the absent one simply keeps its own name, so a dropped
+    # group costs one latch instead of shifting four onto the wrong data.
+    dist.par.renamefrom = " ".join(row[1] for row in LATCHES)
     dist.par.renameto = " ".join(WORKING)
 
     # -- the five validity flags, renamed to the SAME working names -------
@@ -283,11 +314,69 @@ def main():
         part = make(td.selectCHOP, "valid_" + tag, ROW_Y - 150)
         wire(part, source)
         part.par.channames = " ".join(row[2] for row in rows)
-        part.par.renamefrom = "*"
+        part.par.renamefrom = " ".join(row[2] for row in rows)
         part.par.renameto = " ".join(row[0] for row in rows)
         valid_parts.append(part)
-    valid = make(td.mergeCHOP, "valid", ROW_Y - 150)
-    wire(valid, *valid_parts)
+    valid_raw = make(td.mergeCHOP, "valid_raw", ROW_Y - 150)
+    wire(valid_raw, *valid_parts)
+
+    # -- liveness: is anything still SENDING? ------------------------------
+    # DESIGN.md 2.9 records that a dead sidecar leaves the OSC In CHOP frozen
+    # rather than zeroed, and that liveness has to be derived on the TD side. The
+    # validity gate was `found AND conf_median >= threshold AND size > floor` -
+    # every term read from the frozen last frame. So pressing Stop Sidecar while
+    # pinching left `h0_valid = 1` and `h0_pinch_index ~ 0.1` for ever: the latch
+    # stayed engaged, no end pulse ever fired, and any project gated on the state
+    # was stuck on with nothing reporting it. Found in review, and the journal had
+    # already recorded the benign version of it without recognising it - a latch
+    # "sitting engaged at pinch_index 0.435" after the sender exited.
+    #
+    # `seq` increments once per delivered frame and freezes when the sender stops,
+    # so a non-zero slope IS liveness. Two details:
+    #   * the Logic CHOP's `ne` convert ("On When Not Equal to Zero") turns the
+    #     slope straight into a boolean, so no absolute value is needed - which
+    #     also means the once-per-2**23 negative wrap still reads as alive;
+    #   * at a 60 fps cook rate against 30 fps delivery the slope is zero on
+    #     alternate frames, so the raw signal flickers. A Trail plus an Analyze
+    #     maximum answers "did seq change at all in the last LIVENESS_WINDOW_S"
+    #     exactly, with no filter constant and no epsilon to tune.
+    seq = make(td.selectCHOP, "seq", ROW_Y - 900)
+    wire(seq, comp.op("in1"))
+    seq.par.channames = "seq"
+    seq_slope = make(td.slopeCHOP, "seq_slope", ROW_Y - 900)
+    wire(seq_slope, seq)
+    changed = make(td.logicCHOP, "changed", ROW_Y - 900)
+    wire(changed, seq_slope)
+    changed.par.convert = "ne"                  # On When Not Equal to Zero
+    changed_trail = make(td.trailCHOP, "changed_trail", ROW_Y - 900)
+    wire(changed_trail, changed)
+    changed_trail.par.wlength = LIVENESS_WINDOW_S
+    changed_trail.par.wlengthunit = "seconds"
+    live = make(td.analyzeCHOP, "live", ROW_Y - 900)
+    wire(live, changed_trail)
+    live.par.function = "maximum"               # 1 if it changed at all in the window
+
+    # Broadcast that one channel to the bank's five, the same way the thresholds
+    # are broadcast: a Constant CHOP with the working names, each value an
+    # expression. One channel cannot be ANDed against five by name, and this keeps
+    # the pairing by name rather than reintroducing a positional match.
+    live5 = make(td.constantCHOP, "live5", ROW_Y - 900)
+    live5.seq.const.numBlocks = len(LATCHES)
+    for index, row in enumerate(LATCHES):
+        live5.par["name%d" % index] = row[0]
+        live5.par["value%d" % index].expr = "op('lat_live')['seq']"
+
+    # TODO(M-presence): docs/ATTRIBUTES.md gates on `h{i}_active` - `valid`
+    # DEBOUNCED over Activateframes/Deactivateframes - and this gates on raw
+    # per-frame validity. One low-confidence frame mid-pinch therefore drops the
+    # state, fires a spurious end pulse, and re-engages with a spurious start and
+    # a bumped count. The debounce is the Presence group's job in step 2 of
+    # docs/BUILD_PLAN.md; when it lands it is ANDed in here, in this one place,
+    # exactly as liveness is.
+    valid = make(td.logicCHOP, "valid", ROW_Y - 150)
+    wire(valid, valid_raw, live5)
+    valid.par.chopop = "and"
+    valid.par.match = "name"
 
     # -- the thresholds, as channels ---------------------------------------
     # Constant CHOPs with the working names, values bound by expression to the
@@ -375,54 +464,61 @@ def main():
 
     # -- the fire counters --------------------------------------------------
     # docs/ATTRIBUTES.md asks for `h{i}_pinch_count` - how many times the gesture
-    # has fired - and is explicit that a Count CHOP is the right tool for that and
+    # has fired - and is explicit that a counter is the right tool for that and
     # the wrong tool for the state itself.
     #
-    # It counts every frame `start` is HIGH, not every off-to-on transition, and
-    # that choice is deliberate: `start = state AND NOT prev` is one frame wide by
-    # construction, so with a correct network the two counting modes agree
-    # exactly. Counting frames-high therefore measures the pulse WIDTH as well as
-    # the fire count - four sweeps must give exactly 4, and a pulse that ever
-    # lingered two frames would give 8 and fail loudly. Off-to-on counting would
-    # have quietly reported 4 either way.
-    # An accumulator - Feedback plus an add - rather than a Count CHOP.
-    #
-    # The Count CHOP is the obvious operator and it was tried first. Two things
-    # made it the harder of two equivalent options. Its `offtoon`/`on`/`ontooff`/
-    # `off` parameters LOOK like toggles and are actually menus of actions
+    # An accumulator (Feedback plus an add) rather than a Count CHOP. The Count
+    # CHOP is the obvious operator and was tried first; two things made it the
+    # harder of two equivalent options. Its `offtoon`/`on`/`ontooff`/`off`
+    # parameters LOOK like toggles and are actually menus of actions
     # (none / inc / dec / inctime / dectime / reset), so assigning True leaves
     # them at 'none' with no error and the counter sits at zero for ever; and once
     # that was corrected it still read zero through four full sweeps, with Time
-    # Slice as the remaining suspect and no way to see inside it.
+    # Slice as the remaining suspect and no way to see inside it. This is instead
+    # the same construction as the latch's own `prev`, already proven to carry
+    # state across frames in this exact network:
     #
-    # This is the same construction as the latch's own `prev`, which is already
-    # proven to carry state across frames in this exact network - so it adds no
-    # new unknowns, and what it does is legible in the network rather than
-    # depending on how one operator interprets its own parameters:
+    #     count = count_on_the_previous_frame + pulse
     #
-    #     count = count_on_the_previous_frame + start
-    #
-    # `start` is 0 or 1, so this counts the FRAMES the pulse was high. That is
-    # deliberately stricter than counting rising edges: `start = state AND NOT
-    # prev` is one frame wide by construction, so the two agree exactly when the
-    # network is right, and a pulse that ever lingered two frames doubles the
-    # count instead of passing silently.
-    counter_prev = make(td.feedbackCHOP, "count_prev", ROW_Y - 600)
-    counter_prev.par.output = "previous"
-    counter = make(td.mathCHOP, "count", ROW_Y - 600)
-    wire(counter, counter_prev, start)
-    counter.par.chopop = "add"
-    counter.par.match = "name"
-    # Same trap as the latch's own feedback: input 1 is the channel template and
-    # the initial value, and without it the operator emits nothing at all.
-    counter_prev.inputConnectors[0].connect(counter)
-    counter_prev.inputConnectors[1].connect(zero)
+    # The pulse is 0 or 1, so this counts the FRAMES it was high - deliberately
+    # stricter than counting rising edges. `start = state AND NOT prev` is one
+    # frame wide by construction, so the two agree exactly when the network is
+    # right, and a pulse that ever lingered two frames doubles the count instead
+    # of passing silently. Off-to-on counting would have reported 4 either way.
+    def accumulate(name, pulse, y):
+        """count = count_on_the_previous_frame + pulse. Frames-high, so strict."""
+        previous_count = make(td.feedbackCHOP, name + "_prev", y)
+        previous_count.par.output = "previous"
+        total = make(td.mathCHOP, name, y)
+        wire(total, previous_count, pulse)
+        total.par.chopop = "add"
+        total.par.match = "name"
+        # Same trap as the latch's own feedback: input 1 is the channel template
+        # and the initial value, and without it the operator emits nothing at all.
+        # `lat_zero` also makes a project reload come back at 0 and RELEASED, so
+        # the phantom-end-pulse-on-reload hazard docs/ATTRIBUTES.md warns about
+        # cannot happen. The converse does: reloading mid-gesture fires one
+        # spurious start. That is inherent to a level-driven latch and correct.
+        previous_count.inputConnectors[0].connect(total)
+        previous_count.inputConnectors[1].connect(zero)
+        return total
+
+    counter = accumulate("count", start, ROW_Y - 600)
+    # The falling edges get their own counter, because otherwise NOTHING measures
+    # them: every sweep passed with `h{i}_e_pinch_end`, `h{i}_e_snap_end` and
+    # `e_apart` structurally present and behaviourally untested. With both, a
+    # four-sweep ramp must give +4 on each, and the two counts must agree to
+    # within the currently-engaged state.
+    counter_end = accumulate("count_end", end, ROW_Y - 750)
 
     # -- publish under the documented names --------------------------------
     def publish(node, name, column_index, y):
+        """Rename the working names to the published ones, keyed on the names."""
         out = make(td.renameCHOP, "out_" + name, y)
         wire(out, node)
-        out.par.renamefrom = "*"
+        # Same reasoning as `lat_dist`: keyed on names so a missing channel drops
+        # one latch rather than renaming four onto the wrong data.
+        out.par.renamefrom = " ".join(WORKING)
         out.par.renameto = " ".join(row[column_index] for row in LATCHES)
         return out
 
@@ -430,6 +526,7 @@ def main():
     out_start = publish(start, "start", 6, ROW_Y - 150)
     out_end = publish(end, "end", 7, ROW_Y - 300)
     out_count = publish(counter, "count", 8, ROW_Y - 600)
+    out_count_end = publish(counter_end, "count_end", 9, ROW_Y - 750)
 
     # both_pinching: the one channel that combines two latches rather than
     # running alongside them. `chanop` combines channels WITHIN one CHOP, which
@@ -444,35 +541,49 @@ def main():
     both.par.renameto = "both_pinching"
 
     # -- the clock ----------------------------------------------------------
-    # THE MOST IMPORTANT OPERATOR IN THIS FILE, and the least obvious.
+    # THE LEAST OBVIOUS OPERATOR HERE, and the reasoning matters because the first
+    # version of this comment had it wrong.
     #
-    # TouchDesigner cooks on demand, per branch. A Merge CHOP whose downstream
-    # consumer selects only `*_tx` and `*_ty` - which is exactly what this project
-    # does - never pulls the branch carrying the latch channels. MEASURED on the
-    # live network: `merge_out` had cooked 283,930 times while `lat_state` had
-    # cooked TWICE, both of them because this script forced it.
+    # WRONG REASON (recorded so nobody re-derives it): "a Merge CHOP does not pull
+    # a branch whose channels nothing downstream selects." It does. Measured under
+    # control - with this Null fully detached, `lat_state` and `merge_out` advanced
+    # 402 cooks to 402, in lockstep. The earlier reading that suggested otherwise
+    # compared `merge_out`'s lifetime cook count against a `lat_state` that every
+    # build recreates from zero; the two numbers covered different spans.
     #
-    # For a stateless branch that is a pure optimisation and entirely correct: an
-    # uncooked distance is recomputed the moment anyone asks. For a branch with
-    # MEMORY it is fatal. The recurrence advances once per cook, so a bank that
-    # cooks twice an hour has a `prev` two cooks old, and every edge pulse -
-    # `e_clap`, `e_snap`, every start and end - is computed between two frames
-    # that were never adjacent. The state itself would eventually be right,
-    # because the recurrence is level-driven and self-correcting; the pulses never
-    # would be.
+    # THE REAL REASON. The bank has to react to data STOPPING, and nothing else
+    # will wake it up to notice. When the sidecar dies the OSC In CHOP freezes
+    # rather than zeroing (DESIGN.md 2.9), so `in1` stops changing, so nothing
+    # downstream cooks - including the liveness detector above, whose whole job is
+    # to spot that. Measured: with nothing sending, `lat_live` sat at 1 and stayed
+    # there, because the absence of data is exactly what stopped it from being
+    # recomputed. A latch engaged at that moment stays engaged for ever, and no
+    # end pulse ever fires.
     #
-    # It also cannot be left to the project downstream. Consuming any latch
-    # channel does pull the whole recurrence - so a project that reads
-    # `h0_pinching` gets correct behaviour by accident - but one that reads only
-    # the raw landmarks silently gets a latch bank frozen in the past, and nothing
-    # anywhere reports it.
+    # So the bank is clocked by TIME, not by data. A Null CHOP with Cook Type =
+    # Always consumes the deepest point, and everything upstream then cooks every
+    # frame whether or not anything arrived.
     #
-    # A Null CHOP with Cook Type = Always is the whole fix: it consumes the
-    # deepest point of the bank, so everything upstream of it cooks every frame
-    # whether or not anyone is watching the output.
-    clock = make(td.nullCHOP, "tick", ROW_Y - 750)
+    # WHAT IT COSTS, stated honestly: `derive_chop` is main-thread Python at
+    # 0.210 ms (DESIGN.md 2.7), and this makes it cook on 100% of frames instead
+    # of only when a frame arrives - about 1.3% of a 60 fps frame, paid always.
+    # That buys a latch bank that releases when the camera goes away, which is
+    # worth more than the 1.3%.
+    #
+    # TODO(M-groups): step 3 of docs/BUILD_PLAN.md gates groups with
+    # `allowCooking` off on a group COMP. Cook Type = Always does NOT run inside a
+    # COMP whose cooking is disabled, so a disabled group would freeze its latches
+    # and resume with a stale `prev`. Decide that interaction before building the
+    # group COMPs - the likely answer is that this clock lives outside any gated
+    # group.
+    clock = make(td.nullCHOP, "tick", ROW_Y - 900)
     wire(clock, counter)
     clock.par.cooktype = "always"
+    # The liveness chain hangs off `in1` rather than off the bank, so it needs
+    # pulling too - it is not upstream of `counter`.
+    clock_live = make(td.nullCHOP, "tick_live", ROW_Y - 1050)
+    wire(clock_live, live5)
+    clock_live.par.cooktype = "always"
 
     print("3. built %d operators" % sum(1 for c in comp.children
                                         if c.name.startswith(PREFIX)))
@@ -483,24 +594,36 @@ def main():
     # would leave a network that cooks cleanly and computes the wrong thing.
     print("4. structure:")
     failures = []
-    for node, expected in ((dist, WORKING), (valid, WORKING), (on, WORKING),
-                           (off, WORKING), (zero, WORKING), (below_on, WORKING),
-                           (above_off, WORKING), (previous, WORKING),
-                           (held, WORKING), (engage, WORKING), (state, WORKING),
-                           (start, WORKING), (end, WORKING),
-                           (out_state, tuple(r[5] for r in LATCHES)),
-                           (out_start, tuple(r[6] for r in LATCHES)),
-                           (out_end, tuple(r[7] for r in LATCHES)),
-                           (counter, WORKING),
-                           (out_count, tuple(r[8] for r in LATCHES)),
-                           (clock, WORKING),
-                           (both, ("both_pinching",))):
+    checks = [(dist, WORKING), (valid_raw, WORKING), (valid, WORKING),
+              (live5, WORKING), (on, WORKING), (off, WORKING), (zero, WORKING),
+              (below_on, WORKING), (above_off, WORKING), (previous, WORKING),
+              (held, WORKING), (engage, WORKING), (state, WORKING),
+              (start, WORKING), (end, WORKING),
+              (out_state, tuple(r[5] for r in LATCHES)),
+              (out_start, tuple(r[6] for r in LATCHES)),
+              (out_end, tuple(r[7] for r in LATCHES)),
+              (counter, WORKING), (counter_end, WORKING),
+              (out_count, tuple(r[8] for r in LATCHES)),
+              (out_count_end, tuple(r[9] for r in LATCHES)),
+              # Checked explicitly because the AND collapses two channels into
+              # one: if `h1_pinching` were ever missing, the Select would emit a
+              # single channel, the AND would still emit one channel called
+              # `both_pinching`, and it would silently equal `h0_pinching`.
+              (both_sel, ("h0_pinching", "h1_pinching")),
+              (both, ("both_pinching",)),
+              (live, ("seq",)),
+              (clock, WORKING), (clock_live, WORKING)]
+    for node, expected in checks:
         actual = tuple(named(node))
-        mark = "ok " if actual == tuple(expected) else "BAD"
-        if actual != tuple(expected):
+        # Compared as SETS. Every rename is now keyed on channel names rather than
+        # on position, so order carries no meaning and every multi-input operator
+        # pairs by name - asserting an order here would be asserting something the
+        # network no longer depends on, and would fail on a harmless reordering.
+        ok = set(actual) == set(expected) and len(actual) == len(expected)
+        if not ok:
             failures.append("%s: expected %r, got %r" % (node.name, expected, actual))
-        print("   %s %-22s %d chans  %s" % (mark, node.name, len(actual),
-                                            " ".join(actual[:5])))
+        print("   %s %-22s %d chans  %s" % ("ok " if ok else "BAD", node.name,
+                                            len(actual), " ".join(sorted(actual)[:4])))
         if node.errors():
             failures.append("%s: %s" % (node.name, node.errors()))
 
@@ -511,7 +634,7 @@ def main():
     merge = comp.op("merge_out")
     if merge is not None:
         wired = _rewire_merge(merge, (out_state, out_start, out_end,
-                                      out_count, both))
+                                      out_count, out_count_end, both))
         print("   merge_out inputs: %s" % ", ".join(wired))
         merge.cook(force=True)
         names = [o.name for o in merge.inputs]
@@ -522,13 +645,22 @@ def main():
     out_chop.cook(force=True)
     print("5. COMP output: %d channels" % out_chop.numChans)
     for probe in ("h0_pinching", "h0_e_pinch_start", "h0_snapping",
-                  "hands_together", "e_clap", "both_pinching", "h0_pinch_count"):
+                  "hands_together", "e_clap", "both_pinching", "h0_pinch_count",
+                  "h0_pinch_end_count"):
         channel = out_chop.chan(probe)
         print("   %-18s %s" % (probe, "MISSING" if channel is None
                                else round(channel[0], 3)))
 
-    print("6. lat_tick cooks=%d (must climb on its own - that is the bank's clock)"
-          % clock.totalCooks)
+    # Both cook counts are ~0 here because everything was just created; what
+    # matters is that lat_state CLIMBS on its own afterwards, which is what
+    # tools/td_verify_latches.py checks on every run. Reported here only so the
+    # numbers exist to compare against.
+    print("6. cooks: lat_state=%d, merge_out=%d (both climb from here; "
+          "tools/td_verify_latches.py checks that lat_state really does)"
+          % (state.totalCooks, comp.op("merge_out").totalCooks))
+    print("   liveness: lat_live=%.0f - 0 means nothing has sent for %.1f s, and "
+          "every latch is then forced released" % (live.chan("seq")[0],
+                                                   LIVENESS_WINDOW_S))
 
     if failures:
         print("\nFAILURES (%d):" % len(failures))

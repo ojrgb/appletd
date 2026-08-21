@@ -79,6 +79,22 @@ COUNTERS = (
     ("clap_count", "clap"),
 )
 
+# The matching release counters. Without these NOTHING measured the falling
+# edges: every sweep passed with `h{i}_e_pinch_end`, `h{i}_e_snap_end` and
+# `e_apart` structurally present and behaviourally untested. Paired with the
+# counters above they give a standing invariant, checked on every run:
+#
+#     fires - releases == 1 if the gesture is engaged right now, else 0
+#
+# which catches a missing end pulse, a doubled one, and a missing start.
+END_COUNTERS = (
+    ("h0_pinch_count", "h0_pinch_end_count", "h0_pinching"),
+    ("h1_pinch_count", "h1_pinch_end_count", "h1_pinching"),
+    ("h0_snap_count", "h0_snap_end_count", "h0_snapping"),
+    ("h1_snap_count", "h1_snap_end_count", "h1_snapping"),
+    ("clap_count", "apart_count", "hands_together"),
+)
+
 # What each sweep should add to the counter it drives. The whole point of the
 # tool is this table.
 EXPECTED = {
@@ -90,6 +106,13 @@ EXPECTED = {
     "absent": "+0 everywhere",
     "open": "+0 everywhere",
 }
+
+
+# Operators read for health rather than for a count. `lat_state` must be cooking
+# on its own or every measurement below is meaningless; `lat_live` says whether
+# anything is sending at all, which is the difference between "the gate correctly
+# refused" and "nothing arrived".
+HEALTH_OPS = ("lat_state", "lat_live", "merge_out")
 
 
 def _counts(comp):
@@ -105,7 +128,8 @@ def _counts(comp):
         return None
     out.cook(force=True)
     values = {}
-    for name, _driven_by in COUNTERS:
+    wanted = [n for n, _d in COUNTERS] + [e for _f, e, _s in END_COUNTERS]
+    for name in wanted:
         channel = out.chan(name)
         # `is not None`, never truthiness: a Channel's truth value is its VALUE,
         # so a counter sitting at 0 would read as missing.
@@ -152,7 +176,19 @@ def main():
     for line in store.text.splitlines():
         if "=" in line:
             key, _, value = line.partition("=")
-            previous[key.strip()] = int(value)
+            if key.strip() == "_lat_state_cooks":
+                stored_cooks = int(value)
+            else:
+                previous[key.strip()] = int(value)
+
+    # Health first, because a stuck clock makes every number below a lie.
+    health = {}
+    for name in HEALTH_OPS:
+        node = comp.op(name)
+        health[name] = None if node is None else node.totalCooks
+    live_op = comp.op("lat_live")
+    live = None if live_op is None else live_op.chan("seq")[0]
+    stored_cooks = None
 
     state = _states(comp)
     print("now: h0_valid=%.0f both_valid=%.0f | pinch_index=%.3f pinch_middle=%.3f "
@@ -162,6 +198,13 @@ def main():
     print("     h0_pinching=%.0f h0_snapping=%.0f hands_together=%.0f "
           "both_pinching=%.0f" % (state["h0_pinching"], state["h0_snapping"],
                                   state["hands_together"], state["both_pinching"]))
+    print("     lat_live=%s (0 = nothing has sent recently, so every latch is "
+          "forced released)" % ("?" if live is None else int(live)))
+    if stored_cooks is not None and health.get("lat_state") is not None:
+        advanced = health["lat_state"] - stored_cooks
+        verdict = "ok" if advanced > 0 else "STUCK - nothing below is meaningful"
+        print("     lat_state cooked %+d times since the last run: %s"
+              % (advanced, verdict))
     print("")
 
     if not previous:
@@ -176,12 +219,33 @@ def main():
             delta = now - was
             print("%-18s %6d %5d %+8d   %s" % (name, was, now, delta, driven_by))
         print("")
+        print("standing invariant  fires - releases  should equal  engaged now")
+        broken = []
+        for fire, release, state_channel in END_COUNTERS:
+            balance = counts[fire] - counts[release]
+            engaged = state[state_channel]
+            engaged_now = 0 if engaged is None else round(engaged)
+            mark = "ok " if balance == engaged_now else "BAD"
+            if balance != engaged_now:
+                broken.append("%s: %d fires - %d releases = %d but the state is %d"
+                              % (fire, counts[fire], counts[release], balance,
+                                 engaged_now))
+            print("   %s %-18s %8d %8d %11d" % (mark, fire, counts[fire],
+                                                counts[release], engaged_now))
+        if broken:
+            print("")
+            print("BROKEN INVARIANT - an edge pulse is missing or doubled:")
+            for problem in broken:
+                print("   " + problem)
+        print("")
         print("expected, per sweep sent:")
         for sweep in sorted(EXPECTED):
             print("   %-9s %s" % (sweep, EXPECTED[sweep]))
 
-    store.text = "\n".join("%s = %d" % (name, counts[name])
-                           for name, _driven_by in COUNTERS)
+    lines = ["%s = %d" % (name, value) for name, value in sorted(counts.items())]
+    if health.get("lat_state") is not None:
+        lines.append("_lat_state_cooks = %d" % health["lat_state"])
+    store.text = "\n".join(lines)
 
 
 main()

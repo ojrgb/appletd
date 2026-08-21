@@ -34,8 +34,24 @@ making every normalised distance 0/0. Without these, losing a hand fires pinch,
 snap and clap simultaneously and floods the output with NaN, which spreads
 silently through TouchDesigner maths:
 
-    state = h{i}_active AND ( below_on OR (prev AND NOT above_off) )
+    state = h{i}_active AND live AND ( below_on OR (prev AND NOT above_off) )
     size  = max(raw_size, Sizefloor)
+
+`live` is a THIRD condition, and it is not optional either. A dead sidecar leaves
+TouchDesigner's channels **frozen, not zeroed** (`DESIGN.md` 2.9), so `found`,
+`conf_median` and every distance keep reporting the last good frame for ever. Stop
+the sidecar mid-pinch without this term and the latch stays engaged permanently,
+no end pulse ever fires, and anything gated on the state is stuck on with nothing
+reporting it. Derived with no Python from the slope of `seq`: non-zero means
+frames are still arriving. See `DESIGN.md` 2.10 for why that detector needs its own
+clock — the absence of data is otherwise exactly what stops it noticing.
+
+**Currently the gate is raw per-frame validity, not the debounced `active`.** That
+is a known shortfall, not a design change: one low-confidence frame mid-pinch
+drops the state, fires a spurious end pulse, and re-engages with a spurious start
+and a bumped counter. `Activateframes` and `Deactivateframes` exist for exactly
+this, the debounce belongs to the Presence group, and when it is built it is ANDed
+into the same gate — one place, alongside `live`.
 
 The `active` gate is on the STATE, not just on the pulses. Gate only the pulses
 and the latch sits quietly engaged while the hand is gone, then emits a spurious
@@ -149,9 +165,20 @@ because pinch, snap and the two-hand "together" state are one family.
 | `h{i}_pinch_x`, `h{i}_pinch_y` | midpoint of thumb_tip and index_tip - the grab point, more stable than either tip |
 | `h{i}_pinching` | state on `pinch_index`, thresholds `Pinchon` / `Pinchoff` |
 | `h{i}_snapping` | state on `pinch_middle`, thresholds `Snapon` / `Snapoff`. Middle finger and thumb together |
-| `h{i}_pinch_count`, `h{i}_snap_count`, `clap_count` | how many times each has fired since the project opened. A Count CHOP doing the one job it is good at — see above |
+| `h{i}_pinch_count`, `h{i}_snap_count`, `clap_count` | how many times each has fired since the project opened. A counter doing the one job a counter is good at — see above |
+| `h{i}_pinch_end_count`, `h{i}_snap_end_count`, `apart_count` | and how many times each has released |
 
-23 channels. The edge pulses for these live in the Events group.
+28 channels. The edge pulses for these live in the Events group.
+
+**The two counters are a standing invariant, not just a convenience:**
+
+    fires - releases  ==  1 if the gesture is engaged right now, else 0
+
+That holds at every instant, and it is what makes the falling edges testable at
+all — without the release counters, every verification sweep passed with
+`h{i}_e_pinch_end`, `h{i}_e_snap_end` and `e_apart` structurally present and
+behaviourally unmeasured. A missing end pulse, a doubled one, or a missing start
+all break it.
 
 The counters are deliberately configured to count every FRAME the start pulse is
 high rather than every off-to-on transition. Both give the same answer when the
@@ -295,7 +322,7 @@ signature of the pose, for gesture matching or as features for a model.
 | `Coordspx` — `_px`/`_py` for all 42 joints | 84 | off |
 | `Core` | 20 | on |
 | `Presence` | 10 | on |
-| `Contacts` | 23 | on |
+| `Contacts` | 28 | on |
 | `Pose` | 22 | on |
 | `Motion` | 14 | on |
 | `Twohands` | 14 | on |
@@ -304,8 +331,8 @@ signature of the pose, for gesture matching or as features for a model.
 | `Descriptor` | 84 | off |
 
 Presets on the `Verbosity` menu: **Minimal** = Landmarks + Coordstx (221),
-**Interaction** = everything except Coordspx and Descriptor (376), **Everything**
-= all of it (544).
+**Interaction** = everything except Coordspx and Descriptor (381), **Everything**
+= all of it (549).
 
 ## Parameters
 

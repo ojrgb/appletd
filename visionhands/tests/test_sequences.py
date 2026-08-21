@@ -24,14 +24,20 @@ import pytest
 
 from visionhands.derive import Params, derive
 from visionhands.sequences import SEQUENCES, frames, triangle
+from visionhands.synth import pinching, snapping, synthetic_frame
+from visionhands.tuning import LATCH_THRESHOLDS
 from visionhands.types import LandmarkFrame, channel_names, channel_values
 
-# The defaults from docs/ATTRIBUTES.md, as (channel, on, off).
+# Which channel each sweep drives, and which threshold pair judges it. The NUMBERS
+# come from visionhands/tuning.py rather than being re-typed here - see that
+# module for the silent failure that caused.
 THRESHOLDS = {
-    "ramp": ("h0_pinch_index", 0.35, 0.50),
-    "snap": ("h0_pinch_middle", 0.25, 0.45),
-    "clap": ("hands_distance", 0.60, 0.95),
+    "ramp": ("h0_pinch_index", *LATCH_THRESHOLDS["Pinch"]),
+    "snap": ("h0_pinch_middle", *LATCH_THRESHOLDS["Snap"]),
+    "clap": ("hands_distance", *LATCH_THRESHOLDS["Together"]),
 }
+# The dead-band sweep aims at the pinch thresholds specifically.
+DEADBAND_ON, DEADBAND_OFF = LATCH_THRESHOLDS["Pinch"]
 
 FPS = 30.0
 PERIOD_S = 2.0
@@ -146,6 +152,54 @@ def test_each_sweep_crosses_both_thresholds_with_room_to_spare(name: str) -> Non
     assert in_band >= 8, "%s spends only %d frames in the dead band" % (channel, in_band)
 
 
+def test_snapping_aims_at_the_middle_finger_and_pinching_at_the_index() -> None:
+    """The `pinch_finger` field is load-bearing, so assert it does something.
+
+    SURVIVING MUTATION, found by review: replacing the target-tip lookup in
+    synth.py with a hard-coded index tip left all 164 tests green. Nothing
+    distinguished a snap from a pinch, because a full index pinch ALREADY brings
+    the thumb to 0.21 hand-sizes of the middle tip - under the `Snapon` default of
+    0.25 - so the only assertion on the snap sweep (that `pinch_middle` crosses
+    its thresholds) passed on a sequence that was secretly sending a pinch.
+
+    The discriminating property is which distance goes to ZERO: the tip the thumb
+    was actually sent to.
+    """
+    pinch = _channels(synthetic_frame([pinching(1.0, size=0.12), None]))
+    snap = _channels(synthetic_frame([snapping(1.0, size=0.12), None]))
+    assert pinch["h0_pinch_index"] < pinch["h0_pinch_middle"]
+    assert snap["h0_pinch_middle"] < snap["h0_pinch_index"]
+    # And to the point: each target is reached, not merely approached.
+    assert pinch["h0_pinch_index"] == pytest.approx(0.0, abs=1e-6)
+    assert snap["h0_pinch_middle"] == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("name", sorted(THRESHOLDS))
+def test_each_sweep_clears_its_thresholds_by_a_real_margin(name: str) -> None:
+    """"Crosses the threshold" is not enough - it has to clear it.
+
+    SURVIVING MUTATION, found by review: doubling the clap sweep's separation left
+    the minimum `hands_distance` at 0.5999999999999996, four parts in 1e17 below
+    `Togetheron` 0.60. Every Python assertion passed. But the value reaches
+    TouchDesigner as a float32, where it rounds to exactly 0.6 and the latch never
+    engages - so the suite would be green while `clap --cycles 3` reported +0 and
+    the network took the blame.
+
+    A margin of 10% of the dead band, and a REQUIREMENT that several frames sit
+    clear on each side, so one lucky sample cannot satisfy it.
+    """
+    channel, on, off = THRESHOLDS[name]
+    values = _swept(name)
+    margin = (off - on) * 0.1
+    below = sum(1 for v in values if v < on - margin)
+    above = sum(1 for v in values if v > off + margin)
+    assert below >= 4, ("%s only clears Xon by a margin on %d frames (min %.6f "
+                        "against on %.3f) - float32 would swallow that"
+                        % (channel, below, min(values), on))
+    assert above >= 4, ("%s only clears Xoff by a margin on %d frames (max %.6f "
+                        "against off %.3f)" % (channel, above, max(values), off))
+
+
 @pytest.mark.parametrize("name", sorted(THRESHOLDS))
 def test_no_swept_value_is_nan(name: str) -> None:
     assert not any(math.isnan(v) for v in _swept(name))
@@ -201,13 +255,21 @@ def test_deadband_crosses_on_but_never_off() -> None:
     all. Both failures look like success from the outside, which is why the
     amplitudes are asserted here rather than trusted.
     """
-    on, off = 0.35, 0.50
+    on, off = DEADBAND_ON, DEADBAND_OFF
     values = [_channels(f)["h0_pinch_index"]
               for f in frames(SEQUENCES["deadband"], FPS, PERIOD_S, 2.0)]
     assert min(values) < on, "trough %.4f never gets below Pinchon" % min(values)
     assert max(values) < off, "crest %.4f reaches Pinchoff and re-arms" % max(values)
-    # And it must come back INTO the band, or there is nothing to hold through.
-    assert max(values) > on, "crest %.4f never returns into the dead band" % max(values)
+    # STRICTLY INSIDE the band, with a margin. This is the assertion that makes
+    # the sweep a hysteresis test at all: if the crest slips below `on` the
+    # distance never leaves the engaged region, the latch is never asked to hold
+    # anything, and TouchDesigner still reports the expected +1 - a pass that
+    # means nothing. Raising Pinchon to 0.45 in the builder alone used to do
+    # exactly that, silently.
+    margin = (off - on) * 0.1
+    assert max(values) > on + margin, (
+        "crest %.4f is not clear of Pinchon %.4f - the sweep no longer traverses "
+        "the dead band, so +1 would prove nothing" % (max(values), on))
 
 
 def test_a_correct_latch_fires_once_over_many_deadband_cycles() -> None:
@@ -219,7 +281,7 @@ def test_a_correct_latch_fires_once_over_many_deadband_cycles() -> None:
     """
     values = [_channels(f)["h0_pinch_index"]
               for f in frames(SEQUENCES["deadband"], FPS, PERIOD_S, 6.0)]
-    states, engages, releases = schmitt(values, 0.35, 0.50)
+    states, engages, releases = schmitt(values, DEADBAND_ON, DEADBAND_OFF)
     assert engages == 1
     assert releases == 0
     assert states[-1] == 1          # still engaged at the end, never re-armed
@@ -280,14 +342,14 @@ def test_both_hands_pinch_together_without_becoming_a_clap() -> None:
     assert all(p["both_valid"] == 1.0 for p in per_frame)
     for hand in ("h0", "h1"):
         _states, engages, releases = schmitt(
-            [p["%s_pinch_index" % hand] for p in per_frame], 0.35, 0.50)
+            [p["%s_pinch_index" % hand] for p in per_frame], *LATCH_THRESHOLDS["Pinch"])
         assert engages == 2, "%s engaged %d times over two sweeps" % (hand, engages)
         assert releases == 2
     # ... and never close enough to count as hands together.
     _s, clap_engages, _r = schmitt([p["hands_distance"] for p in per_frame],
-                                   0.60, 0.95)
+                                   *LATCH_THRESHOLDS["Together"])
     assert clap_engages == 0
-    assert min(p["hands_distance"] for p in per_frame) > 0.95
+    assert min(p["hands_distance"] for p in per_frame) > LATCH_THRESHOLDS["Together"][1]
 
 
 # ---------------------------------------------------------------------------
