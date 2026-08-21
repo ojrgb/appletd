@@ -90,6 +90,59 @@ def onCook(scriptOp):
 '''
 
 
+def _attach_once(merge, node, drop_names=()):
+    """Normalise a Merge CHOP's inputs: `node` exactly once, anything in
+    `drop_names` gone, every other source exactly once. Returns what it removed.
+
+    The same helper tools/td_add_coords.py and tools/td_add_filter.py carry, and
+    it is duplicated rather than shared on purpose: every builder has to survive
+    being pasted into a Text DAT on its own.
+
+    Traps, all measured in this repo rather than anticipated (DESIGN.md 2.11):
+      * `.inputs` is STALE inside the same script that rewired anything, so this
+        reads `inputConnectors[i].connections` throughout - that is the truth.
+      * `.inputs` ALSO REPORTS A GROUP COMP AS ITS INNER `out1` CHOP, and every
+        group here has one, so a name-keyed dedup collapses `filter` and `coords`
+        into a single entry. That is not hypothetical: it is exactly how this
+        script silently dropped the 168 coordinate channels from the COMP's
+        output, taking it from 392 to 224 while reporting success. Deduping by the
+        OWNER OBJECT is what makes two groups two sources.
+      * disconnecting SHIFTS the connector list, so a single pass skips entries.
+        This restarts after every removal.
+      * a Merge CHOP accepts the SAME operator on any number of inputs, silently,
+        and the only symptom is the channel count.
+      * `connect()` accepts an operator only where it has one unambiguous output,
+        which a base COMP does not - hence `outputConnectors[0]`.
+    """
+    removed = []
+    for _attempt in range(256):
+        seen = []
+        cut = False
+        for conn in merge.inputConnectors:
+            owners = [x.owner for x in conn.connections]
+            if not owners:
+                continue
+            owner = owners[0]
+            if owner.name in drop_names or owner in seen:
+                removed.append(owner.name)
+                conn.disconnect()
+                cut = True
+                break                       # the list has shifted; start again
+            seen.append(owner)
+        if not cut:
+            break
+
+    attached = any(x.owner is node for conn in merge.inputConnectors
+                   for x in conn.connections)
+    if not attached:
+        target = node.outputConnectors[0] if node.isCOMP else node
+        for conn in merge.inputConnectors:
+            if not conn.connections:
+                conn.connect(target)
+                break
+    return removed
+
+
 def main():
     import td
 
@@ -118,33 +171,24 @@ def main():
 
     merge = comp.op("merge_out")
     if merge is not None:
-        # Rebuild the whole input list rather than appending. Two measured
-        # behaviours of the Merge CHOP make "append if missing" wrong:
+        # Attach derive_chop exactly once and leave every other source alone.
         #
-        #   * it accepts the same operator on any number of inputs, silently, and
-        #     the duplicate channels are invisible downstream because chan()
-        #     returns the first match - the channel COUNT is the only symptom.
-        #     This script's previous version appended unconditionally and left
-        #     derive_chop connected TEN times, publishing 1710 channels where 171
-        #     were meant;
-        #   * connecting to a connector that reports itself FREE can INSERT rather
-        #     than fill, pushing the existing connection down and leaving it
-        #     attached twice - so even the careful version made it worse.
+        # The previous version rebuilt the whole list from `merge.inputs`, keyed
+        # on NAME. That was wrong twice over: `.inputs` reports a group COMP as
+        # its inner `out1` CHOP, and every group has one - so `filter` and
+        # `coords` deduped to a single entry and the 168 coordinate channels
+        # silently left the COMP's output, 392 down to 224, while the script
+        # printed success. Deduping by the owner OBJECT is what makes two groups
+        # two sources; `_attach_once` above has the rest of the reasoning.
         #
-        # Deterministic and idempotent, which matters because the MCP bridge has
-        # been observed executing these scripts TWICE per call.
-        keep, seen = [], set()
-        for existing in merge.inputs:
-            if existing.name != chop.name and existing.name not in seen:
-                keep.append(existing)
-                seen.add(existing.name)
-        for _attempt in range(256):
-            if not merge.inputs:
-                break
-            merge.inputConnectors[0].disconnect()
-        for index, node in enumerate([*keep, chop]):
-            merge.inputConnectors[index].connect(node)
-        print("merge_out inputs: %s" % ", ".join(o.name for o in merge.inputs))
+        # Idempotent, which matters because the MCP bridge has been observed
+        # executing these scripts TWICE per call.
+        dropped = _attach_once(merge, chop)
+        owners = [x.owner.name for conn in merge.inputConnectors
+                  for x in conn.connections]
+        print("merge_out inputs: %s%s"
+              % (", ".join(owners),
+                 "" if not dropped else "  (dropped %s)" % ", ".join(dropped)))
 
     chop.cook(force=True)
     print("derive_chop: %d channels, errors=%r" % (chop.numChans, chop.errors()))

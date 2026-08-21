@@ -33,18 +33,20 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, runtime_checkable
 
 # visionhands.slots depends only on visionhands.types - no pyobjc - so importing
 # it at module scope does not compromise this module's promise to be importable,
 # and testable, with no frameworks present. test_boundaries.py enforces that.
+from visionhands.pose_types import PoseFrame, blank_pose_frame
 from visionhands.slots import SLOT_MODE_CHIRALITY
+from visionhands.streams import DEFAULT_STREAMS, STREAM_HANDS, STREAM_POSE
 from visionhands.types import LandmarkFrame, blank_frame
 
 if TYPE_CHECKING:
-    # Type-checking only: this import does NOT execute at runtime, so the module
+    # Type-checking only: these imports do NOT execute at runtime, so the module
     # keeps its property of being importable with no pyobjc present, while mypy
-    # still gets the real HandEngine type instead of a pile of `# type: ignore`.
+    # still gets the real types instead of a pile of `# type: ignore`.
     from visionhands.engine import HandEngine
 
 # Frames whose seq is 0 have never been published: `blank_frame()` uses 0 and the
@@ -72,8 +74,30 @@ def _never_negative(age_ms: float) -> float:
     return age_ms if age_ms > 0.0 else 0.0
 
 
-class LatestFrameBox:
+class TimedFrame(Protocol):
+    """What the box needs of whatever it carries: a sequence number and a capture
+    time. Read-only properties, because the frames are FROZEN dataclasses and
+    that immutability is what makes the missing lock safe (see LatestBox)."""
+
+    @property
+    def seq(self) -> int: ...
+    @property
+    def captured_at(self) -> float: ...
+
+
+# Invariant, not covariant: a box is written as well as read.
+FrameT = TypeVar("FrameT", bound=TimedFrame)
+
+
+class LatestBox(Generic[FrameT]):
     """A single-slot, lock-free latest-value box. One writer, many readers.
+
+    GENERIC over the frame type because there is now more than one stream, and
+    every subtlety below - the atomic rebind, the frame-before-clock ordering in
+    `age_ms`, the single-writer counters - applies identically to a pose frame.
+    Duplicating this class per stream would duplicate the reasoning, and it is
+    the reasoning rather than the code that is expensive here. `LatestFrameBox`
+    and `LatestPoseBox` are the two concrete boxes.
 
     Thread: `publish()` is called from the capture thread and ONLY from there.
             `latest()` may be called from any thread, as often as it likes, and
@@ -106,12 +130,12 @@ class LatestFrameBox:
     waiting is the one thing the main thread must never do.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, blank: FrameT) -> None:
         # Starts as a real frame rather than None, so every reader - including
         # the first cook, before the camera has produced anything - gets the
         # full fixed shape and never has to branch on None. The fixed channel
         # list in DESIGN.md 6.2 depends on this being true from the first cook.
-        self._frame: LandmarkFrame = blank_frame()
+        self._frame: FrameT = blank
         self._n_published = 0        # written by the capture thread only
         self._n_read = 0             # written by readers only
         self._started_at: float | None = None
@@ -130,7 +154,7 @@ class LatestFrameBox:
         """
         self._started_at = time.monotonic()
 
-    def publish(self, frame: LandmarkFrame) -> None:
+    def publish(self, frame: FrameT) -> None:
         """Make `frame` the latest. Called on the capture thread.
 
         This is the entire write path: one store, one increment. It is
@@ -140,7 +164,7 @@ class LatestFrameBox:
         self._frame = frame
         self._n_published += 1
 
-    def latest(self) -> LandmarkFrame:
+    def latest(self) -> FrameT:
         """The most recent frame. NEVER blocks. Called on TD's main thread.
 
         Returns a blank frame with seq == SEQ_NEVER_PUBLISHED if nothing has been
@@ -186,6 +210,27 @@ class LatestFrameBox:
         return self._n_read
 
 
+class LatestFrameBox(LatestBox[LandmarkFrame]):
+    """The hands box. Constructed with no arguments, as it always has been - the
+    generic base took a blank frame parameter and every existing call site says
+    `LatestFrameBox()`."""
+
+    def __init__(self) -> None:
+        super().__init__(blank_frame())
+
+
+class LatestPoseBox(LatestBox[PoseFrame]):
+    """The body-pose box (DESIGN.md 6.4).
+
+    A box of its own rather than a second field on the hands frame: the two
+    streams are published by two separate Vision requests, either can be off, and
+    a shared frame would mean one stream's failure blanking the other's channels.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(blank_pose_frame())
+
+
 @runtime_checkable
 class HandSource(Protocol):
     """Where a Script CHOP gets its landmarks from.
@@ -218,8 +263,30 @@ class HandSource(Protocol):
     def errors(self) -> list[str]: ...
 
 
+@runtime_checkable
+class PoseSource(Protocol):
+    """The body-pose half of a source, kept separate from `HandSource`.
+
+    Separate rather than folded in, for two reasons. `HandSource` is what
+    `td/hands_chop.py` and every existing test are written against, and widening
+    it would make every one of them owe a pose implementation they have no use
+    for. And a source genuinely can support one stream and not the other - the
+    sidecar asks `isinstance(source, PoseSource)` and falls back to sending the
+    blank frame's zeros, which is the contract a disabled stream has anyway
+    (DESIGN.md 6.4).
+
+    Implementations must guarantee the same things `HandSource` does:
+    `latest_pose()` and `pose_age_ms()` never block.
+    """
+
+    def latest_pose(self) -> PoseFrame: ...
+    def pose_age_ms(self) -> float: ...
+    @property
+    def streams_started(self) -> tuple[str, ...]: ...
+
+
 class InProcessSource:
-    """A HandSource backed by the camera and Vision, in TouchDesigner's process.
+    """A HandSource and PoseSource backed by the camera and Vision.
 
     Thread: `start()`/`stop()` on the caller's thread; the engine publishes into
             the box from the capture queue. `latest()` is lock-free.
@@ -231,9 +298,23 @@ class InProcessSource:
     def __init__(self, camera_name: str | None = None,
                  width_px: int | None = None,
                  height_px: int | None = None,
-                 slot_mode: str = SLOT_MODE_CHIRALITY) -> None:
+                 slot_mode: str = SLOT_MODE_CHIRALITY,
+                 streams: tuple[str, ...] = DEFAULT_STREAMS) -> None:
+        """`streams` is which Vision requests to run - see visionhands/streams.py.
+
+        Read once, here, because it is a launch flag: the sidecar is started with
+        it on its command line and there is no channel back into a running
+        process (DESIGN.md 6.4). Defaults to hands alone, which is exactly what
+        ran before there was a choice.
+        """
         self._slot_mode = slot_mode
+        self._streams = streams
         self.box = LatestFrameBox()
+        # Always constructed, even with pose disabled, so `latest_pose()` has the
+        # full fixed shape to publish from the first tick. A disabled stream sends
+        # zeros rather than nothing (DESIGN.md 6.4), and this is where the zeros
+        # come from.
+        self.pose_box = LatestPoseBox()
         # Guards start()/stop() against each other. It is NEVER taken by
         # latest() or age_ms() - the read path stays lock-free, which is the
         # whole point of this module. This only stops two callers building two
@@ -272,8 +353,21 @@ class InProcessSource:
                 HandEngine,
             )
 
+            # The pose request is built HERE and passed in, so `engine.py` never
+            # imports `pose.py` and a project that has not asked for body pose
+            # never constructs the request (DESIGN.md 6.4). Inside the lifecycle
+            # lock and before the engine, so a joint-table mismatch raises on
+            # this thread with no camera open yet.
+            pose_detector = None
+            if STREAM_POSE in self._streams:
+                from visionhands.pose import PoseDetector
+                pose_detector = PoseDetector()
+
             engine = HandEngine(
                 on_frame=self.box.publish,
+                hands=STREAM_HANDS in self._streams,
+                pose_detector=pose_detector,
+                on_pose=self.pose_box.publish if pose_detector is not None else None,
                 camera_name=self._camera_name or DEFAULT_CAMERA_NAME,
                 width_px=self._width_px or DEFAULT_WIDTH_PX,
                 height_px=self._height_px or DEFAULT_HEIGHT_PX,
@@ -291,6 +385,12 @@ class InProcessSource:
             # Marked before starting, so the age of a camera that never delivers
             # is measured from the attempt rather than from the first success.
             self.box.mark_started()
+            # The pose box is marked only when the stream is ON. A disabled
+            # stream's age must stay 0 rather than climbing: a rising age means
+            # "expected data that never came" (DESIGN.md 6.2), and nothing is
+            # expected from a stream nobody asked for.
+            if pose_detector is not None:
+                self.pose_box.mark_started()
             try:
                 engine.start()
             except Exception as exc:
@@ -331,6 +431,28 @@ class InProcessSource:
 
     def age_ms(self) -> float:
         return self.box.age_ms()
+
+    def latest_pose(self) -> PoseFrame:
+        """The most recent body-pose frame, or the blank one with pose disabled.
+
+        Never blocks, never None, and never absent: the caller publishes a fixed
+        channel list whatever is enabled (DESIGN.md 6.4).
+        """
+        return self.pose_box.latest()
+
+    def pose_age_ms(self) -> float:
+        return self.pose_box.age_ms()
+
+    @property
+    def streams_started(self) -> tuple[str, ...]:
+        """Which streams are ACTUALLY running, not which were asked for.
+
+        Empty until `start()` has succeeded, and empty again after `stop()`, which
+        is the distinction the sidecar's `sc_*` channels publish: a stream that
+        was requested and failed to start must not report itself as live
+        (DESIGN.md 6.4).
+        """
+        return self._streams if self.running else ()
 
     @property
     def running(self) -> bool:

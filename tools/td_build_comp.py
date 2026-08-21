@@ -182,13 +182,36 @@ def start():
     # settled for the future stream toggles - docs/BUILD_PLAN.md step 5.
     comp = op(%(comp)r)
     assign = comp is None or bool(comp.par.Slotassign.eval())
+    # Which Vision requests the process will run. Each toggle is one name on the
+    # command line; the sidecar validates the list and refuses an empty one.
+    # A stream that is OFF still has all of its channels in TouchDesigner, as
+    # zeros - what the toggle saves is the inference (DESIGN.md 6.4).
+    streams = []
+    for name, par_name in (("hands", "Streamhands"), ("pose", "Streampose")):
+        if comp is None or bool(getattr(comp.par, par_name).eval()):
+            streams.append(name)
+    if not streams:
+        # Checked here rather than left to the sidecar, so the message lands in
+        # the Textport next to the button that was pressed. A sidecar with no
+        # streams opens the camera and looks exactly like a working one with
+        # nobody in frame.
+        print("[visionhands] NOT STARTING: every stream toggle is off, so the "
+              "sidecar would open the camera and run no inference at all.")
+        return 0
+
     process = subprocess.Popen(
         [SIDECAR_PYTHON, "-m", "visionhands.sidecar",
          "--port", str(PORT), "--parent-pid", str(os.getpid()),
-         "--slots", "chirality" if assign else "off"],
+         "--slots", "chirality" if assign else "off",
+         "--streams", ",".join(streams)],
         cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("[visionhands] sidecar started, pid %%d, slots=%%s"
-          %% (process.pid, "chirality (h0=right, h1=left)" if assign else "off"))
+    print("[visionhands] sidecar started, pid %%d, slots=%%s, streams=%%s"
+          %% (process.pid, "chirality (h0=right, h1=left)" if assign else "off",
+              ",".join(streams)))
+    # The ports each stream lands on, printed because "which port is pose on" is
+    # the first question when the pose COMP shows no channels.
+    print("[visionhands]   hands -> port %%d   pose -> port %%d  (base + 1)"
+          %% (PORT, PORT + 1))
     return process.pid
 
 
@@ -299,7 +322,8 @@ def main():
     if existed:
         # Remember what the user tuned, so a rebuild restores it rather than
         # resetting it.
-        for name in ("Resw", "Resh", "Orthowidth", "Renderw", "Renderh"):
+        for name in ("Resw", "Resh", "Orthowidth", "Renderw", "Renderh",
+                     "Slotassign", "Streamhands", "Streampose"):
             if hasattr(comp.par, name):
                 previous[name] = getattr(comp.par, name).eval()
     if comp is None:
@@ -348,8 +372,39 @@ def main():
     par_slots = lifecycle.appendToggle("Slotassign",
                                        label="Assign Slots (restart to apply)")[0]
     par_slots.default = True
-    if not existed:
-        par_slots.val = True
+    # Which Vision requests the sidecar runs. LAUNCH FLAGS, read once when the
+    # process starts (DESIGN.md 6.4) - hence "restart to apply" in both labels,
+    # for the same reason `Slotassign` says it: there is no control channel into
+    # a running sidecar and there is not going to be one.
+    #
+    # What the toggles save is INFERENCE, not channels. A disabled stream keeps
+    # every one of its channels in TouchDesigner, reading zero, because TD's OSC
+    # In CHOP creates channels as they arrive and a channel that vanishes breaks
+    # its consumers silently (DESIGN.md 6.2).
+    par_hands = lifecycle.appendToggle(
+        "Streamhands", label="Hands Stream (restart to apply)")[0]
+    par_pose = lifecycle.appendToggle(
+        "Streampose", label="Body Pose Stream (restart to apply)")[0]
+    par_hands.default = True
+    # OFF by default: an existing project reads no pose channels, and turning it
+    # on by default would make every one of them pay for an inference nothing
+    # looks at.
+    par_pose.default = False
+    # TRAP, MEASURED on this rebuild: a NEWLY APPENDED toggle takes val = 0,
+    # whatever `.default` says. `Streamhands` came back with default True and val
+    # False, so `start()` refused to launch anything - loudly, which is the only
+    # reason it was noticed rather than being a hands stream that quietly stopped.
+    #
+    # This is the sibling of the recorded appendInt/appendFloat trap (which is
+    # about an EXISTING parameter being reset). The rule that covers both: set
+    # `.val` exactly when the PARAMETER is new, which is not the same question as
+    # whether the COMP is new - and it was the COMP the first version asked about.
+    # `previous` is the record of which parameters existed before this run.
+    for name, parameter in (("Slotassign", par_slots),
+                            ("Streamhands", par_hands), ("Streampose", par_pose)):
+        if name not in previous:
+            parameter.val = parameter.default
+
     lifecycle.appendPulse("Startsidecar", label="Start Sidecar")
     lifecycle.appendPulse("Stopsidecar", label="Stop Sidecar")
     lifecycle.appendPulse("Sidecarstatus", label="Print Status")
@@ -468,6 +523,11 @@ def main():
     print()
     print("   Sidecar page on %s:" % comp.path)
     print("     Start Sidecar / Stop Sidecar / Print Status")
+    print("     Hands Stream: %s | Body Pose Stream: %s  (both restart-to-apply)"
+          % ("on" if comp.par.Streamhands.eval() else "off",
+             "on" if comp.par.Streampose.eval() else "off"))
+    print("     Body pose arrives on port %d - run tools/td_build_pose_comp.py"
+          % (OSC_PORT + 1))
     print("   Stop finds ANY running sidecar, including one started from a")
     print("   terminal, and the project's exit stops it too.")
     print("=" * 70)

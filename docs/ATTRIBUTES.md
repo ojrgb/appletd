@@ -480,7 +480,73 @@ geometry validates arithmetic and says nothing about how a hand sits.
 ### Page: Sidecar
 
 `Startsidecar`, `Stopsidecar`, `Sidecarstatus` pulses and a read-only
-`Sidecarpid`, as built.
+`Sidecarpid`, as built, plus three toggles that are LAUNCH FLAGS - read once when
+the process starts, so each says "restart to apply":
+
+| parameter | default | what it does |
+|---|---|---|
+| `Slotassign` | on | h0 is the right hand, h1 the left (DESIGN.md 6.3) |
+| `Streamhands` | on | run `VNDetectHumanHandPoseRequest` |
+| `Streampose` | **off** | run `VNDetectHumanBodyPoseRequest` |
+
+**What a stream toggle saves is INFERENCE, not channels.** A disabled stream keeps
+every one of its channels, reading zero: TouchDesigner's OSC In CHOP creates
+channels as they arrive, so a stream that stopped sending would make its channels
+VANISH, and a vanished channel breaks its consumers silently (DESIGN.md 6.2).
+
+**Turning both off does not start anything.** The COMP says so in the Textport
+rather than launching a process that opens the camera and runs nothing - which
+looks exactly like a working sidecar with nobody in frame.
+
+## The body-pose stream — a separate COMP on a separate port
+
+Built 2026-08-21. `visionpose` is plumbing only: **123 channels, no derived
+attributes, no filtering, no temporal channels.** Build it with
+`tools/td_build_pose_comp.py`; drive it with the Body Pose Stream toggle, or with
+`tools/send_synthetic_pose.py` and no camera at all.
+
+```
+pose_n_bodies, pose_seq, pose_age_ms
+p<i>_found, p<i>_score, p<i>_conf_median                       for i in 0..1
+p<i>_<joint>_x, p<i>_<joint>_y, p<i>_<joint>_conf              19 joints
+```
+
+The 19 joints, in channel order: `nose` `left_eye` `right_eye` `left_ear`
+`right_ear` `neck` `left_shoulder` `right_shoulder` `left_elbow` `right_elbow`
+`left_wrist` `right_wrist` `root` `left_hip` `right_hip` `left_knee` `right_knee`
+`left_ankle` `right_ankle`.
+
+**Three things to know before using them.**
+
+**`p0` is the LEFTMOST person**, by a stateless sort on the root joint (the neck if
+the root is not confident). There is no chirality for a person, so the partition
+that makes `h0` mean one hand has no equivalent here - two people who cross over
+exchange slots, and the `two` sweep crosses them deliberately so you can see it.
+
+**Gate on `p<i>_conf_median`, never on `p<i>_score`.** The body observation
+confidence is UNMEASURED - hands' equivalent is a measured constant 1.0
+(DESIGN.md 2.6) and this one has never been seen, because seeing it needs a person
+in frame. It is published as a faithful mirror of the API, nothing more.
+
+**Nothing here is depth-invariant.** Every hand attribute divides through hand size
+for exactly that reason; no pose channel does, so a consumer measuring a raw
+distance between two pose joints is measuring how far away the person is standing.
+`tools/send_synthetic_pose.py depth` is the sweep that shows it.
+
+### The sidecar's own status channels
+
+Four channels on the HANDS port, so they arrive whatever else is enabled:
+
+| channel | meaning |
+|---|---|
+| `sc_uptime_s` | seconds since the sidecar started sending. **FROZEN means the process is gone** |
+| `sc_hands` | 1 when the sidecar really started that stream |
+| `sc_pose` | as above. `sc_face` is published too, and reads 0 until face is built |
+
+`sc_uptime_s` is the channel that tells "sidecar dead" apart from "stream switched
+off", because a disabled stream's own `seq` is frozen as well. And `sc_*` reports
+what the process is RUNNING, not what the toggles say: after somebody flips a
+toggle without restarting, the toggle is a request and this is the state.
 
 ### Two rules the defaults follow
 

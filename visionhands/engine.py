@@ -36,7 +36,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import AVFoundation as AVF
 import CoreMedia
@@ -69,6 +69,15 @@ from visionhands.types import (
     NormY,
     median_joint_confidence,
 )
+
+if TYPE_CHECKING:
+    # Type-checking only, and the direction is deliberate: `pose.py` imports THIS
+    # module, so importing it back at runtime would be a cycle. The engine owns
+    # the camera and knows nothing about which extra requests it is carrying
+    # beyond the two attributes below - `source.py` constructs the detector and
+    # passes it in (DESIGN.md 6.4).
+    from visionhands.pose import PoseDetector
+    from visionhands.pose_types import PoseFrame
 
 # ---------------------------------------------------------------------------
 # Constants. Every value has a reason; see the referenced measurement.
@@ -688,7 +697,10 @@ class HandEngine:
                  max_hands: int = MAX_HANDS,
                  seq_start: int = 0,
                  target_fps: int | None = TARGET_FPS,
-                 slot_mode: str = SLOT_MODE_CHIRALITY) -> None:
+                 slot_mode: str = SLOT_MODE_CHIRALITY,
+                 hands: bool = True,
+                 pose_detector: PoseDetector | None = None,
+                 on_pose: Callable[[PoseFrame], None] | None = None) -> None:
         """seq_start continues an existing frame sequence rather than restarting it.
 
         Why it exists: this engine keeps `_seq` monotonic across its OWN
@@ -700,6 +712,14 @@ class HandEngine:
         `seq > last_seq` freshness test until the new engine catches up.
         """
         self._on_frame = on_frame
+        # The pose stream, or nothing. Passed in rather than constructed here so
+        # that this module never imports `pose.py` and a project that does not
+        # want body pose never builds the request - which is the whole point of
+        # the stream toggles (DESIGN.md 6.4). Both must be present or neither: a
+        # detector with nowhere to publish would burn an inference per frame and
+        # throw the result away.
+        self._pose_detector = pose_detector if on_pose is not None else None
+        self._on_pose = on_pose if pose_detector is not None else None
         self._camera_name = camera_name
         self._requested_px = (width_px, height_px)
         self._max_hands = max_hands
@@ -710,7 +730,21 @@ class HandEngine:
         # missing framework fails at construction - on the caller's thread,
         # where it can be reported - instead of on the capture queue where it
         # could only be recorded.
-        self._detector = HandDetector(max_hands=max_hands)
+        #
+        # None when the hands stream is switched off, and that is what makes the
+        # toggle worth having: no request means no inference, which is the ~3.4 ms
+        # per frame (DESIGN.md 2.6) that a project reading only body pose should
+        # not be paying. The channels do not disappear - the sidecar keeps sending
+        # the blank frame's zeros (DESIGN.md 6.4).
+        self._detector = HandDetector(max_hands=max_hands) if hands else None
+        if self._detector is None and self._pose_detector is None:
+            # A camera with no requests: it would open the device, hold it, warm
+            # up, deliver frames and do nothing with any of them - while every
+            # channel read zero and nothing said why. Refused on the caller's
+            # thread, where it can be fixed.
+            raise EngineError(
+                "no streams enabled: this engine would open the camera and run "
+                "no inference at all. Enable hands, pose, or both.")
 
         # Which physical hand goes in which slot. Applied HERE rather than inside
         # HandDetector because the detector is also the replay path's inference
@@ -739,6 +773,8 @@ class HandEngine:
         self.n_delivered = 0        # every buffer the camera handed us
         self.n_published = 0        # frames that reached on_frame
         self.n_dropped = 0          # buffers with no image, or failed inference
+        self.n_pose_published = 0   # pose frames that reached on_pose
+        self.n_pose_dropped = 0     # buffers where the pose request failed
         self.delivered_px: tuple[int, int] | None = None
         self.errors: list[str] = []
         # Set on the first delivered frame. Lets a caller confirm liveness by
@@ -799,9 +835,39 @@ class HandEngine:
                     % (self.delivered_px[0], self.delivered_px[1],
                        self._requested_px[0], self._requested_px[1]))
 
+        # ONE sequence number per delivered buffer, incremented before either
+        # stream runs, so a hands frame and a pose frame from the same buffer
+        # carry the same `seq` and a consumer can align the two (DESIGN.md 6.4).
         self._seq += 1
+
+        # Each stream in its own method, and NEITHER may return out of this one.
+        # The first version ran pose after the hands code's early returns, so a
+        # single failed hand inference silently took the pose stream down with it
+        # for that frame - two streams sharing a callback must not share its
+        # control flow.
+        self._publish_hands(sample_buffer, captured_at)
+        # AFTER hands, deliberately. Both requests run on this one serial queue,
+        # so whichever goes second adds its inference to the other's latency, and
+        # hands is what a live TouchDesigner project is reading (DESIGN.md 6.4).
+        # The consequence to know: with pose enabled, the camera's frame interval
+        # has to cover BOTH inferences or AVFoundation starts dropping buffers,
+        # which shows up as n_delivered falling rather than as anything failing.
+        self._publish_pose(sample_buffer, captured_at)
+
+    def _publish_hands(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+        """Run the hand request and publish the result. Never raises.
+
+        Thread: capture queue only, from `_on_sample_buffer`.
+        Contract: a no-op when the hands stream is disabled, in which case the
+                  consumer keeps receiving whatever it last had - which for the
+                  sidecar is a blank frame, so the channels read zeros and stay
+                  present (DESIGN.md 6.4).
+        """
+        detector = self._detector
+        if detector is None:
+            return
         try:
-            frame = self._detector.detect_sample_buffer(
+            frame = detector.detect_sample_buffer(
                 sample_buffer, self._seq, captured_at)
         except EngineError as exc:
             # Caught here, not left to the delegate's blanket guard, so that a
@@ -825,17 +891,56 @@ class HandEngine:
         frame = self._slots.assign(frame)
 
         self.n_published += 1
-        # Set AFTER the first frame is actually built, so a waiter that wakes on
-        # this event knows a real frame exists and not merely that a buffer
-        # arrived.
-        if not self.first_frame.is_set():
-            self.first_frame.set()
+        self._mark_first_frame()
 
         # The consumer's callback. Anything it raises is caught by the
         # delegate's guard and recorded - but a consumer that raises per frame
         # is broken, and a consumer that BLOCKS here stalls the camera queue and
         # will show up as rising age_ms downstream.
         self._on_frame(frame)
+
+    def _mark_first_frame(self) -> None:
+        """Set the liveness event, once, when a real frame has been built.
+
+        Set from EITHER stream, not just hands: with hands disabled and pose on,
+        a caller waiting on this event would otherwise wait forever while frames
+        were arriving perfectly well. It means "this engine has produced
+        something", which is the question every waiter is actually asking.
+        """
+        if not self.first_frame.is_set():
+            self.first_frame.set()
+
+    def _publish_pose(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+        """Run the body-pose request on a buffer hands has already been read from.
+
+        Thread: capture queue only, called at the end of `_on_sample_buffer`.
+        Contract: shares `_seq` and `captured_at` with the hands frame from the
+                  same buffer, so a consumer can align the two streams by seq.
+                  That is the property one process and one camera buys, and it is
+                  the reason the pose stream is not a second process
+                  (DESIGN.md 6.4).
+        Never raises: a pose fault is counted and recorded, exactly as a hand
+                  fault is, because the useful behaviour is to keep the other
+                  stream running.
+        """
+        detector, publish = self._pose_detector, self._on_pose
+        if detector is None or publish is None:
+            return
+        # Dimensions from what the camera actually DELIVERED, so both frames from
+        # one buffer agree about the image they came from. `_requested_px` is the
+        # fallback only until the first frame has set it - and the two disagreeing
+        # is itself recorded, above.
+        width_px, height_px = self.delivered_px or self._requested_px
+        try:
+            pose_frame = detector.detect_sample_buffer(
+                sample_buffer, self._seq, captured_at, width_px, height_px)
+        except EngineError as exc:
+            self.n_pose_dropped += 1
+            self._record_error("pose: %s" % exc)
+            return
+        self.n_pose_published += 1
+        self._mark_first_frame()
+        publish(pose_frame)
 
     # -- calling-thread side ------------------------------------------------
     @property
@@ -844,10 +949,23 @@ class HandEngine:
 
     @property
     def inference_ms(self) -> float:
-        """Cost of the most recent inference. A gauge, not a measurement -
+        """Cost of the most recent HAND inference. A gauge, not a measurement -
         DESIGN.md 3 forbids quoting live-camera timings, because the cost tracks
         what is in shot. Benchmark by replaying the fixture."""
-        return self._detector.last_inference_ms
+        detector = self._detector
+        return detector.last_inference_ms if detector is not None else 0.0
+
+    @property
+    def pose_inference_ms(self) -> float:
+        """Cost of the most recent BODY-POSE inference, or 0.0 with pose off.
+
+        Separate from `inference_ms` rather than summed into it: the two run as
+        separate requests on the same queue (DESIGN.md 6.4), and the question
+        worth answering when frames start dropping is which of them got
+        expensive. Also a gauge, not a measurement.
+        """
+        detector = self._pose_detector
+        return detector.last_inference_ms if detector is not None else 0.0
 
     def start(self) -> None:
         """Configure and start the capture session. Idempotent.

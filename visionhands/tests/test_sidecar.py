@@ -23,6 +23,7 @@ import pytest
 
 from visionhands.sidecar import SEQ_MODULUS, Sidecar
 from visionhands.source import FakeSource
+from visionhands.streams import status_channel_names
 from visionhands.types import (
     MAX_HANDS,
     N_JOINTS,
@@ -92,13 +93,18 @@ def _sidecar_for(receiver: socket.socket,
 
 
 def test_a_frame_arrives_as_the_full_named_contract(receiver: socket.socket) -> None:
-    """The end-to-end property: our frame, on the wire, named correctly."""
+    """The end-to-end property: our frame, on the wire, named correctly.
+
+    The base port carries the hands contract AND the sidecar status channels, in
+    one bundle, so that what the sidecar found and what it is running cannot
+    disagree about which tick they describe (DESIGN.md 6.4).
+    """
     sidecar, source = _sidecar_for(receiver, lambda seq: _frame(seq))
     source.box.publish(_frame(seq=7))
     sidecar.send_once()
 
     received = decode_bundle(receiver.recv(65535))
-    assert set(received) == set(channel_names())
+    assert set(received) == set(channel_names()) | set(status_channel_names())
     assert received["seq"] == 7.0
     assert received["n_hands"] == 1.0
     assert received["h0_found"] == 1.0
@@ -114,7 +120,7 @@ def test_a_frame_arrives_as_the_full_named_contract(receiver: socket.socket) -> 
 def test_channel_order_on_the_wire_matches_the_contract(receiver: socket.socket) -> None:
     """OSC In CHOP creates channels in arrival order, so order is worth pinning
     even though downstream references by name."""
-    sidecar, source = _sidecar_for(receiver, lambda seq: _frame(seq))
+    sidecar, _ = _sidecar_for(receiver, lambda seq: _frame(seq))
     sidecar.send_once()
     payload = receiver.recv(65535)
     # Addresses appear in the payload in send order; check the first few.
@@ -163,20 +169,23 @@ def test_sending_keeps_working_when_the_socket_fails(receiver: socket.socket) ->
     Sends to a closed socket, which raises OSError, and checks the error is
     counted rather than raised.
     """
-    sidecar, source = _sidecar_for(receiver, lambda seq: _frame(seq))
+    sidecar, _ = _sidecar_for(receiver, lambda seq: _frame(seq))
     sidecar.socket.close()
     sidecar.send_once()                          # must not raise
-    assert sidecar.n_send_errors == 1
+    # TWO, not one: one send_once() puts one bundle per stream on the wire, and
+    # both fail on a closed socket. Counting sends rather than ticks is what
+    # makes "the socket is broken" visible per bundle (DESIGN.md 6.4).
+    assert sidecar.n_send_errors == 2
     assert sidecar.n_sent == 0
 
 
 def test_no_source_still_sends_a_full_channel_set(receiver: socket.socket) -> None:
     """Before the camera produces anything, TD must still receive all 137
     channels - the fixed contract holds across the process boundary too."""
-    sidecar, source = _sidecar_for(receiver, lambda seq: _frame(seq))
+    sidecar, _ = _sidecar_for(receiver, lambda seq: _frame(seq))
     sidecar.send_once()                          # nothing published yet
     received = decode_bundle(receiver.recv(65535))
-    assert set(received) == set(channel_names())
+    assert set(received) == set(channel_names()) | set(status_channel_names())
     assert received["seq"] == 0.0
     assert received["n_hands"] == 0.0
 
@@ -186,7 +195,7 @@ def test_parent_watch_detects_a_dead_parent(receiver: socket.socket) -> None:
     camera, and the next launch fights it for the device - DESIGN.md 8's failure
     relocated rather than solved.
     """
-    sidecar, source = _sidecar_for(receiver, lambda seq: _frame(seq))
+    sidecar, _ = _sidecar_for(receiver, lambda seq: _frame(seq))
     assert sidecar._parent_is_gone() is False    # no parent to watch
 
     sidecar.parent_pid = 1                       # launchd: always alive

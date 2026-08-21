@@ -567,6 +567,34 @@ Against the running instance (099), not read anywhere:
   channel cost one channel instead of shifting every later one onto the wrong
   data. (The recorded trap about non-pairwise lists applies to WILDCARD patterns,
   which is a different thing.)
+- **`^` DOES NOT EXCLUDE in a Select CHOP's `channames`, and the terms are
+  ADDITIVE.** MEASURED against a 141-channel input: `*` gave 141, `* ^*_x ^*_y`
+  gave **423** - each term matching the whole lot again and the results
+  concatenated - and `* ^h0_wrist_x` gave 282. So a complement cannot be written
+  as a pattern at all; compute it in Python and name the channels. This is what
+  makes the "the two halves must partition exactly" rule in
+  `tools/td_add_filter.py` a rule about lists rather than about patterns.
+- **A NEWLY APPENDED parameter takes val = 0, whatever `.default` says.**
+  MEASURED: `appendToggle("Streamhands")` with `.default = True` came back
+  reading **False**. This is the sibling of the recorded `appendInt`/`appendFloat`
+  trap, which is about an existing parameter being reset - and the rule that
+  covers both is to set `.val` exactly when the PARAMETER is new. That is NOT the
+  same question as whether the COMP is new, which is what the builder asked, so
+  every parameter added to an existing COMP arrived switched off.
+- **`op.inputs` reports a group COMP as its inner `out1` CHOP.** So dedup keyed on
+  NAME collapses every group into one entry, because each group has an `out1`.
+  Measured: `tools/td_add_derive.py` rebuilt `merge_out`'s input list from
+  `merge.inputs`, deduped by name, and silently dropped the `coords` group - the
+  COMP output went from 392 channels to 224 while the builder printed success.
+  Dedup by the OWNER OBJECT (`inputConnectors[i].connections[0].owner`), which is
+  the COMP itself. This is the third distinct way `.inputs` has lied.
+- **A pass-through group silently eats channels that are in neither of its
+  Selects.** The filter group splits its input into positions and everything else,
+  both from named lists; when the sidecar started sending four `sc_*` status
+  channels they were in neither list and simply vanished - OSC In CHOP 141
+  channels, COMP output unchanged at 495, no error anywhere. Any group in the DATA
+  PATH needs a check that everything entering it leaves it, which is not the same
+  check as "does the output match the contract" (the contract is not what arrived).
 - **`ps -Ao args=` is not tokenised by argv**, so splitting it on spaces cannot
   recover argument boundaries: the body of a `python -c "..."` script splits into
   words too, and a test for "`-m` immediately followed by the module" matches
@@ -574,6 +602,75 @@ Against the running instance (099), not read anywhere:
   that once had the COMP's Stop button SIGTERM the shell that launched it, one
   level subtler. Walk the leading interpreter options the way CPython does and
   stop at the first `-c`, `-m`, or script path.
+
+### 2.12 The body-pose API surface, verified 2026-08-21
+
+Asked of the live framework (pyobjc 12.2.2 / macOS 26.5.2), not read from
+documentation. No camera involved: every one of these answers comes from
+constructing the request and asking it what it supports.
+
+```python
+r = Vision.VNDetectHumanBodyPoseRequest.alloc().init()
+r.revision()                                  # 1, and supportedRevisions() = {1}
+names, err = r.supportedJointNamesAndReturnError_(None)     # 19 names
+groups, err = r.supportedJointsGroupNamesAndReturnError_(None)
+# ('VNIPOAll', 'VNBLKFACE', 'VNBLKTORSO', 'VNBLKLARM', 'VNBLKRARM',
+#  'VNBLKLLEG', 'VNBLKRLEG')
+```
+
+**The request enumerates its own joints.** `supportedJointNamesAndReturnError_`
+returns all 19, so the hardcoded table in `pose_types.py` is checked against the
+framework's own answer rather than against a scrape of `dir(Vision)` — a strictly
+better check than the one hands gets, and it costs one call at construction.
+
+**`VNIPOAll` is the same group constant hands uses**, so one call returns all 19
+points exactly as it returns all 21 for a hand.
+
+**TRAP, and it is a real one: the constant NAME and its VALUE disagree.** The
+values are ARKit skeleton names, and four of them describe a different body part
+from the constant that holds them:
+
+| constant suffix | value |
+|---|---|
+| `LeftElbow` | `left_forearm_joint` |
+| `LeftWrist` | `left_hand_joint` |
+| `LeftKnee` | `left_leg_joint` |
+| `LeftHip` | `left_upLeg_joint` |
+| `Nose` | `head_joint` |
+
+Anyone building the table from the values would map the elbow to a forearm and the
+wrist to a hand. Our table keys on the CONSTANT suffix, publishes our own name, and
+carries the value as the dict key Vision actually hands back — the same three-name
+arrangement `types.py` uses for hands, and for the same reason.
+
+**There is no maximum-person setting.** `VNDetectHumanHandPoseRequest` has
+`setMaximumHandCount_`; the body-pose request has nothing equivalent, so Vision
+finds every person in shot and the cost is whatever that is. Publishing
+`MAX_BODIES = 2` therefore caps the CHANNEL LIST, not the inference — unlike
+`maximumHandCount`, which caps the work. `maximumProcessingDimensionOnTheLongSide`
+exists (default 0 = unlimited) and is the lever if downscaling is ever needed.
+
+**The face request, verified at the same time, because it is next.**
+`VNFaceObservation.landmarks()` returns a `VNFaceLandmarks2D` whose landmarks are
+**12 named REGIONS**, not one flat table: `faceContour`, `medianLine`, `nose`,
+`noseCrest`, `leftEye`, `rightEye`, `leftPupil`, `rightPupil`, `leftEyebrow`,
+`rightEyebrow`, `innerLips`, `outerLips`, plus `allPoints`. Each is a
+`VNFaceLandmarkRegion2D` with its own `pointCount`, `normalizedPoints` and
+`precisionEstimatesPerPoint`. `VNDetectFaceLandmarksRequest` supports revisions
+1-3 (default 3) and a selectable constellation -
+`VNRequestFaceLandmarksConstellation65Points` or `76Points`, defaulting to 76. So
+face does NOT fit the joint-table shape hands and pose share: the channel list
+needs region -> point count -> names, and the per-region counts have to be read
+from the framework rather than assumed.
+
+**UNMEASURED:** the per-frame cost of the request, and whether
+`VNHumanBodyPoseObservation.confidence()` is a real signal or the constant 1.0 that
+hands' is (§2.6). Both need a camera or a fixture with a person in it, and a
+fixture with a person in it cannot be committed (STANDARDS.md 3). `p<i>_score` is
+published as a faithful mirror and must not be gated on until measured;
+`p<i>_conf_median` is ours and is the one to gate on.
+
+---
 
 ---
 
@@ -711,33 +808,42 @@ new work goes:
 
 ## 5. Module layout
 
-Actual, as built. `engine.py` imports nothing from TD; `td/` imports no pyobjc;
-nothing in the package imports `cv2` or `PIL` at module scope. A test enforces all
-three rather than trusting discipline (`tests/test_boundaries.py`).
+Actual, as built. **`engine.py` and `pose.py` are the two modules that touch
+Vision**; neither imports TD, `td/` imports no pyobjc, and nothing in the package
+imports `cv2` or `PIL` at module scope. A test enforces all of it rather than
+trusting discipline (`tests/test_boundaries.py`). The dependency runs one way -
+`pose.py` imports `engine.py`, never the reverse - so the camera, the queue and the
+teardown stay in one place and a second stream is a plug-in rather than a rewrite.
 
 ```
 visionhands/
   types.py        # LandmarkFrame, Hand, the joint table, the 137-channel contract
+  pose_types.py   # Body, PoseFrame, the 19-joint table, the 123-channel contract
+  streams.py      # which streams exist, which port each uses, the sc_* status
   coords.py       # every coordinate conversion, and the single legal y-flip
-  engine.py       # TD-free: AVFoundation + Vision -> LandmarkFrame
-  source.py       # HandSource protocol; LatestFrameBox; InProcessSource; FakeSource
+  engine.py       # TD-free: AVFoundation + Vision -> LandmarkFrame, and the camera
+  pose.py         # TD-free: the body-pose request, a plug-in on top of engine.py
+  source.py       # HandSource/PoseSource; LatestBox; InProcessSource; FakeSource
   osc.py          # the OSC encoder, hand-rolled, byte-checked against python-osc
-  sidecar.py      # the process: camera + Vision + socket, on a fixed clock
+  sidecar.py      # the process: camera + Vision + socket, one bundle per stream
   derive.py       # the stateless half of docs/ATTRIBUTES.md, as one pure function
   synth.py        # parameterised synthetic hands, for testing without a camera
+  synth_body.py   # the same for a body, so the pose plumbing needs no person
   sequences.py    # gesture sweeps over time, for testing anything with memory
   tuning.py       # threshold defaults; one table, shared by builders and tests
   td/
     bootstrap.py  # sys.path wiring and engine lifecycle (in-process path, legacy)
     hands_chop.py # Script CHOP callbacks for the in-process path (legacy)
-  tests/          # 168 tests, none of which need a camera or TouchDesigner
+  tests/          # 284 tests, none of which need a camera or TouchDesigner
 
 tools/            # scripts pasted into a TD Text DAT, plus dev utilities
   td_build_comp.py     # the COMP: coordinate spaces, Sidecar page, Start/Stop
   td_add_derive.py     # the derived-attributes Script CHOP
   td_add_latches.py    # the proximity latch bank
   td_verify_latches.py # judges the latches by counter deltas over a sweep
+  td_build_pose_comp.py # the `visionpose` COMP and its OSC In CHOP
   send_synthetic.py    # drives sequences.py into TD over OSC, no camera
+  send_synthetic_pose.py # the same for a synthetic body, on the pose port
   record_fixture.py    # records a hands-only fixture, gated on people detection
   probe_m1_in_td.py    # the milestone-1 probe, kept
 
@@ -867,6 +973,114 @@ hand" and it will surprise anyone who has been treating `h0` as "the hand".
 frame to frame, and what it reports during occlusion or when a hand is edge-on.
 Both determine how often the proximity fallback is actually reached. That needs a
 two-hand fixture, and it validates the assumptions rather than gating the code.
+
+### 6.4 Several streams — one process, one port each
+
+Hands were the only stream until 2026-08-21. Pose and face are the same shape of
+problem — a Vision request over the same camera frames — and this section is the
+contract that makes adding one a table plus a converter rather than a redesign.
+
+**One process, several requests.** The sidecar opens the camera once, runs one
+capture queue, and performs every enabled request on the same sample buffer. The
+alternative — a process per stream — buys fault isolation and costs a camera open
+per stream (§2.8 measured two processes on one camera, never three), a warm-up
+each (§2.7: ~1.5 s), and three Start buttons. Frames also stop being comparable
+across streams, because each process would see a different one. Fault isolation is
+recovered cheaply instead: a request that fails is counted and recorded per stream,
+and one failing stream does not stop the others or the loop.
+
+**One UDP port per stream.** Hands 10000, pose 10001, face 10002 — `BASE_PORT` plus
+a fixed offset, in `visionhands/streams.py`, which both the sidecar and the TD
+builders import so the two cannot drift. One port carrying everything was the
+obvious alternative and is worse here:
+
+  * TouchDesigner's OSC In CHOP puts every channel it receives into one CHOP, and
+    the `visionhands` COMP passes its whole input through to `merge_out`. Sharing
+    the port would put pose channels inside the hands COMP's output, so each COMP
+    would need a prefix Select at its input — and a prefix Select is exactly the
+    mechanism that already failed to partition channels once (step 3 of
+    docs/BUILD_PLAN.md: `h?_*_x` matches two different groups).
+  * A port per stream means the existing hands path is untouched: same port, same
+    137 channels, nothing inserted in front of it. Pose is purely additive, which
+    is the property that makes it safe to build in one sitting.
+  * The datagram-size question disappears. One bundle per stream stays far inside
+    the ~16 KB loopback limit noted in `osc.py`; hands plus pose plus face in one
+    bundle would be around 11 KB and would need watching as the contract grows.
+
+The cost is three OSC In CHOPs instead of one, and three port numbers to keep in
+step — which is why they are computed from one constant rather than typed twice.
+
+**Streams are launch flags.** `--streams hands,pose`, parsed once at startup. There
+is no control channel into the sidecar and there is not going to be one: the
+process is started by a `Popen` from TouchDesigner (§8.2), so a toggle is an
+argument on that command line and takes effect on the next Start. The TD toggles
+say "restart to apply" for that reason.
+
+**The channel contract per stream is CONSTANT, whatever is enabled.** A disabled
+stream still sends its bundle, all zeros, at the send rate. This is not laziness
+about bytes — §6.2's rule is that channels which appear and disappear break every
+downstream reference *silently*, and the OSC In CHOP creates channels as they
+arrive, so omitting a stream makes its channels vanish from the CHOP entirely. The
+compute saving that matters is the inference, and that is saved whether or not the
+zeros go out.
+
+**The sidecar says what it actually started**, on the base port, as channels:
+
+```
+sc_uptime_s   seconds since the send loop started. FROZEN means the process is
+              gone; a disabled stream's own seq is also frozen, so this is what
+              tells the two apart
+sc_hands      1 when the sidecar really started that stream, 0 when it did not
+sc_pose
+sc_face
+```
+
+Without these, a panel showing `Streampose` on after somebody flipped it without
+restarting would be lying. With them TD can say "toggle on, sidecar off — restart
+needed", which is the only honest thing to show.
+
+They ride the BASE port rather than each stream's own port, because a status
+channel that travels only on an optional stream's port vanishes exactly when it is
+needed.
+
+**Pose contract.** 19 joints (§2.12), `MAX_BODIES = 2`, prefix `p{i}_`:
+
+```
+pose_n_bodies, pose_seq, pose_age_ms
+p<i>_found, p<i>_score, p<i>_conf_median
+p<i>_<joint>_x, p<i>_<joint>_y, p<i>_<joint>_conf     for the 19 joints
+```
+
+3 + 2×(3 + 57) = **123 channels**. The frame scalars are prefixed where hands'
+equivalents (`n_hands`, `seq`, `age_ms`) are not — hands went first and those names
+are referenced in a live project, so they stay. Nothing new goes unprefixed.
+
+**No chirality for a body, and therefore no slot assignment.** §6.3's partition
+works because Vision labels each hand left or right; it has no equivalent for
+people. Vision's observation order is not stable, so `p0` would swap between two
+people frame to frame — the same defect §6.3 exists to fix. What is built instead
+is a stable spatial sort: **bodies are ordered left to right by the x of the
+reference joint**, so `p0` is the leftmost person. That is stable while people do
+not cross over, costs one sort, and holds no state. Real tracking through a
+crossing is the same proximity fallback `slots.py` already has and is phase 2 —
+with one person, which is the case this was built for, the question does not arise.
+
+**Segmentation is not in this scheme.** It is a mask rather than floats, so it
+breaks the "137 floats and no pixels" property in §4.2 whatever the flags say, and
+it goes down the §9 C++ path. Datum from the user, worth having before starting: a
+C++ segmentation plugin for TouchDesigner already exists and pins the frame rate
+at 50 fps. The question is whether 10 fps is an acceptable price, not whether it
+can be done.
+
+**Where the sidecar control lives, and why it did not move.** The Start/Stop DATs
+and the stream toggles are still inside the `visionhands` COMP, even though the
+process they control now serves every stream. Moving them up to a shared COMP was
+considered and deferred: it would break the panel in a live project, the parameter
+paths every callback names, and the `--slots` plumbing, in exchange for tidiness.
+The trigger for doing it is a second thing needing to control the process — a
+`visionpose` COMP wanting its own Start — not the current asymmetry.
+
+---
 
 ---
 

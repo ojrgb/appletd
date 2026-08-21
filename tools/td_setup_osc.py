@@ -158,12 +158,17 @@ def main():
     if osc.numChans == 0:
         print("   (zero until the first bundle arrives - start the sidecar and")
         print("    re-run this, or just watch the operator)")
-    elif osc.numChans == 137:
-        print("   OK all 137 channels present. Wave at the camera and watch")
-        print("   h0_conf_median. Gate downstream work on that, NEVER on")
+    elif osc.numChans in (137, 141):
+        # 137 hand channels, plus the four `sc_*` sidecar status channels that
+        # ride the base port (DESIGN.md 6.4). 137 alone means the sender predates
+        # those - tools/send_synthetic.py sends the hands contract only.
+        print("   OK all 137 hand channels present%s. Wave at the camera and"
+              % (" (+4 sidecar status)" if osc.numChans == 141 else ""))
+        print("   watch h0_conf_median. Gate downstream work on that, NEVER on")
         print("   h0_score - that channel is a measured constant 1.0.")
     else:
-        print("   UNEXPECTED - expected 137. Is another sender on port %d?" % OSC_PORT)
+        print("   UNEXPECTED - expected 137, or 141 with the sidecar's status")
+        print("   channels. Is another sender on port %d?" % OSC_PORT)
     print()
     print("LIVENESS: a dead sidecar leaves these channels frozen, not zeroed.")
     print("  Slope CHOP on 'seq'    -> 0 means the camera stopped")

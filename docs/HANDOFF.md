@@ -1,8 +1,13 @@
 # Handoff — 2026-08-21
 
-State at `469f251`. 223 tests, ruff and mypy clean. Working tree clean apart from
-`tools/vision_landmarks.py` and `tools/vision_landmarks_live.py`, which are the
-user's own untracked files — leave them alone.
+**285 tests**, `ruff check` and `mypy visionhands` clean. Working tree clean apart
+from `tools/vision_landmarks.py` and `tools/vision_landmarks_live.py`, which are
+the user's own untracked files — leave them alone.
+
+Body pose landed this session: a second stream, end to end, verified in
+TouchDesigner with no camera. See `docs/BUILD_PLAN.md` step 5 and the last journal
+entry — **four separate silent channel losses** came out of it, three in code that
+already existed, and they are all in `DESIGN.md` 2.11 now.
 
 ## Read these, in this order
 
@@ -20,22 +25,32 @@ user's own untracked files — leave them alone.
 
 ## What is running
 
-Camera → sidecar (own process) → OSC 10000 → `/project1/visionhands` → **495
-channels**. Top level is 16 operators: four group COMPs (`filter`, `coords`,
-`temporal`, `latches`), `derive_chop`, `merge_out`, `out1`, the sidecar DATs.
+One sidecar process, one camera, **one Vision request per enabled stream**, and one
+UDP port each (`DESIGN.md` 6.4):
 
-Build order from scratch — each group wires to the one before:
+    camera → sidecar → OSC 10000 → /project1/visionhands → 499 channels
+                     → OSC 10001 → /project1/visionpose  → 123 channels
+
+`visionhands` top level is 16 operators: four group COMPs (`filter`, `coords`,
+`temporal`, `latches`), `derive_chop`, `merge_out`, `out1`, the sidecar DATs. 499
+rather than 495 because the base port now also carries four `sc_*` status channels.
+`visionpose` is three operators — plumbing only, no attribute layer, by design.
+
+Build order from scratch — each group wires to the one before, and this chain was
+run end to end and verified at 499 channels on 2026-08-21:
 
     td_build_comp.py → td_add_filter.py → td_add_coords.py → td_add_derive.py
     → td_add_temporal.py → td_add_latches.py → td_add_groups.py
 
+then `td_build_pose_comp.py`, which is independent of all of it.
+
 Every builder is idempotent and is run by pasting into a Text DAT, or via the MCP
 with `exec(open(path).read())`.
 
-Six parameter pages on the COMP: Visionhands, Sidecar (Start/Stop, `Slotassign`),
-Tuning (latch thresholds), Filter (`Smoothing`, `Mincutoff`, `Beta`), Advanced
-(debounce frames, `Velocityfilter`, `Speedfloor`), Attributes (group toggles,
-`Verbosity`).
+Six parameter pages on the COMP: Visionhands, Sidecar (Start/Stop, `Slotassign`,
+`Streamhands`, `Streampose`), Tuning (latch thresholds), Filter (`Smoothing`,
+`Mincutoff`, `Beta`), Advanced (debounce frames, `Velocityfilter`, `Speedfloor`),
+Attributes (group toggles, `Verbosity`).
 
 ## How to test anything
 
@@ -48,12 +63,21 @@ Sequences: `ramp` `snap` `ring` `little` (per-finger contact), `curl` (grab),
 `clap`, `both`, `crossing` (slot assignment — use `--unstable`), `deadband`
 (hysteresis), `swipe` (sustained motion), `open`, `absent`.
 
+And for the pose stream, which needs nobody in frame either:
+
+    ~/.venvs/visionhands/bin/python tools/send_synthetic_pose.py --list
+    ~/.venvs/visionhands/bin/python tools/send_synthetic_pose.py two --cycles 4
+
+`walk` `wave` `two` (two people crossing — the slot rule) `depth` `absent`. Both
+senders refuse to run while the sidecar is up, because two writers on one port
+interleave into a plausible wrong answer rather than a visible fault.
+
 **Anything with memory cannot be verified from one frame.** The pattern that works
 is counter deltas over a generated sweep — `tools/td_verify_latches.py` does the
 before/after bookkeeping. It refuses to run alongside the sidecar, because
 interleaved streams give a plausible wrong answer rather than a visible fault.
 
-## The five things most likely to waste your time
+## The things most likely to waste your time
 
 All measured here, all in `DESIGN.md` 2.10/2.11, restated because they recur:
 
@@ -74,15 +98,52 @@ All measured here, all in `DESIGN.md` 2.10/2.11, restated because they recur:
 5. **TouchDesigner caches imported modules for the process's life.** Purge
    `visionhands*` from `sys.modules` at the top of any builder, or your edits are
    invisible.
+6. **A channel can disappear between the OSC In CHOP and the COMP output with
+   nothing saying so.** Four separate instances in one afternoon (2026-08-21):
+   `merge.inputs` reports a group COMP as its inner `out1`, so a name-keyed dedup
+   collapsed two groups into one and dropped 168 channels; the filter group ate
+   four channels that were in neither of its two named Selects; `^` does not
+   exclude in a Select CHOP's `channames` and the terms are ADDITIVE, so
+   `* ^*_x ^*_y` selected 423 channels from a 141-channel input; and a newly
+   appended parameter reads 0 whatever `.default` says. **Compare a data-path
+   group's output against its INPUT**, not against the contract — the contract is
+   not what arrived.
 
 And: `cook(force=True)` right after building anything makes every downstream
 `cookTime` meaningless — one profile read 2.946 ms and looked like a regression
 when the real number was 1.030.
 
-## Next — decided 2026-08-21
+## Next
 
-**1. The additional vision streams. This is the next task.** Every design question
-is settled, so it is implementation:
+**1. `allowCooking` gating for `temporal` and `latches` — approved, not started.**
+Small; `docs/BUILD_PLAN.md` 7.2 names the two things to handle.
+
+**2. Cook time, properly.** Re-measured this session and the honest answer is a
+range, not a number: **1.2 ms and 1.55 ms** on two single-frame reads, summing all
+162 operators with a synthetic 30 fps one-hand stream. Three reads inside one script
+returned the identical value three times — the same-frame trap — so a real
+distribution needs a Trail on `cookTime` across frames. What can be said already:
+grouping did not make the network cheaper, and the old 0.599 ms figure was as
+misleading as the build plan suspected.
+
+**3. visionface.** The port, the flag, the status channel, the box and the send path
+are all built and generic; `sc_face` is already published reading 0, and
+`parse_streams` refuses `face` with "not implemented yet". What is NOT generic is
+the shape: face landmarks are **12 named REGIONS of differing point counts**
+(`faceContour`, `medianLine`, `nose`, `noseCrest`, both eyes, both pupils, both
+eyebrows, inner and outer lips) plus a selectable 65/76-point constellation, all
+verified against the framework — `DESIGN.md` 2.12. So the channel table needs a
+level `pose_types.py` does not have, and the per-region counts must be READ rather
+than assumed.
+
+**4. An attribute layer for pose, if it is wanted.** There is none: no derived
+channels, no filtering, no temporal channels, and nothing depth-invariant. That was
+the brief (plumbing plus basic testing), not an oversight. `send_synthetic_pose.py
+depth` demonstrates what a naive consumer gets wrong.
+
+### Done 2026-08-21: the pose stream
+
+Left here because the reasoning is what generalises to face:
 
 - **Toggles are LAUNCH FLAGS**, read once at startup. The sidecar is a separate
   process TouchDesigner starts with `Popen`, and `start()` in
@@ -104,12 +165,6 @@ is settled, so it is implementation:
   launch flags say. Datum from the user: an existing TouchDesigner segmentation
   plugin **pins the frame rate at 50 fps**, so the question is whether 10 fps is an
   acceptable price, not whether it is possible.
-
-**2. `allowCooking` gating for `temporal` and `latches` — approved.** Small; see
-`docs/BUILD_PLAN.md` 7.2, which names the two things to handle.
-
-**3. Re-measure cook time properly.** The 0.599 ms after grouping counts only
-top-level operators and excludes the groups' children. Flat it was 1.040 ms.
 
 **Deferred to phase 2 by decision:** the remaining temporal channels —
 `hands_twist`, `steadiness`, `dwell`, `hands_scale`, and the

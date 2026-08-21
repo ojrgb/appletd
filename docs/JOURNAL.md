@@ -1836,3 +1836,108 @@ Trail + Analyze because it is not time-sliced, and might be replaceable by the
 native Filter the same way - one measurement would tell. The two DATs cost 0.057 ms
 between them and it is not obvious why they cook at all. And 7.3, grouping the
 network into COMPs, is now the main remaining item.
+
+## Body pose: a second stream, and four silent channel losses in one afternoon
+
+Built `visionpose`: the 19-joint contract, the Vision request, the stream registry,
+one bundle per stream on its own port, a synthetic body to test it with, and the
+TouchDesigner side. 223 tests to 284. Verified live in TouchDesigner with nobody in
+frame and the camera untouched: **123 pose channels on port 10001** with the right
+names and moving values, and the hands port now carrying **141** (137 + four `sc_*`
+status channels) with the COMP output at **499**.
+
+**The design questions were settled before this session and they held.** Launch
+flags rather than a control channel; one process and one camera with both requests
+performed on the same sample buffer, so the two streams share a `seq`; a disabled
+stream sends zeros rather than nothing. Two things I decided while building, both
+now in DESIGN.md 6.4: **one port per stream** (sharing one would put pose channels
+inside the hands COMP's output, and the alternative is the prefix Select that has
+already failed to partition these channels once), and **the sidecar DATs stay where
+they are** - moving them upstream would break the panel in a live project in
+exchange for tidiness.
+
+**What the framework gave me for free, and what it tried to take.**
+`VNDetectHumanBodyPoseRequest` enumerates its own joints - `supportedJointNames`
+returns all 19 - so the hardcoded table is checked against the request's own answer
+rather than a `dir()` scrape. That is a stronger check than hands gets. But the
+constant NAMES and their VALUES disagree about anatomy: `LeftElbow` is
+`left_forearm_joint`, `LeftWrist` is `left_hand_joint`, `Nose` is `head_joint`.
+Anyone building the table from the values maps an elbow to a forearm and it looks
+entirely plausible on screen. Our table keys on the constant suffix and carries the
+value as the dict key, which is the same three-name arrangement `types.py` uses for
+hands and for the same reason.
+
+**No chirality for a person, so no partition.** Slot assignment works for hands
+because Vision labels them left and right; there is no equivalent for people, and
+Vision's observation order is not stable. So bodies are sorted **left to right by
+the root joint** - p0 is the leftmost person - which is stateless, stable while
+people do not cross, and visible in the `two` sweep, which crosses them
+deliberately. The fallback matters: an occluded root reads x = 0.0, which is the far
+LEFT of frame, so a plain x sort would put a person we cannot locate in slot 0 and
+push a visible one to slot 1.
+
+### Four ways a channel disappeared without anything saying so
+
+This is the part worth reading. Every one of them presented as "the number is
+fine", and three were in code that already existed.
+
+**1. A newly appended toggle reads False whatever its default says.** The stream
+toggles came back off - `Streamhands` with `.default = True` and `val = False` - so
+`start()` refused to launch anything. The builder set `.val` only when the COMP was
+new, which is not the same question as whether the PARAMETER is new, and every
+parameter added to an existing COMP therefore arrived switched off. This is the
+sibling of the recorded `appendFloat`-resets-to-zero trap and the fix covers both:
+set `.val` exactly when the parameter did not exist before, which the `previous`
+dict already records. It was only noticed because my refusal-to-start check is loud;
+a version that silently launched with no streams would have looked like a dead
+camera.
+
+**2. `merge.inputs` reports a group COMP as its inner `out1`.** So
+`tools/td_add_derive.py`, which rebuilt the merge input list and deduped by NAME,
+saw `filter` and `coords` as two operators both called `out1` and kept one. The
+coordinate group was silently dropped: **392 channels to 224**, builder reporting
+success. Nobody had hit it because the documented build order had not been run end
+to end since the groups were introduced - I hit it on the first honest attempt.
+Fixed by using the `_attach_once` helper the other three builders already carry,
+which dedupes by the owner OBJECT. Third distinct way `.inputs` has lied in this
+repo.
+
+**3. The filter group ate the four new status channels.** It splits its input into
+positions and everything-else from two NAMED lists, and `sc_*` was in neither, so
+they vanished inside the group: OSC In CHOP 141 channels, COMP output unchanged at
+495, no error anywhere. The comment above that split already said "the two halves
+have to partition exactly - anything dropped from both vanishes from the COMP's
+output". It was right and it was not enough, because nothing CHECKED it. The check
+is now output-versus-INPUT rather than output-versus-contract, which is the only
+form that works: with `send_synthetic.py` as the sender there are no `sc_*` to
+reproduce, so a contract comparison would report a phantom failure.
+
+**4. `^` does not exclude in a Select CHOP's `channames`.** Trying to write that
+partition as a complement instead of a list: a 141-channel input, pattern
+`* ^*_x ^*_y`, gave **423 channels**. The terms are additive and each matched the
+whole lot again. `* ^h0_wrist_x` gave 282. So there is no complement pattern to be
+had; compute it in Python and name the channels.
+
+### Cook time, and an honest non-answer
+
+The task was to re-measure properly, since the 0.599 ms reported after grouping
+counted only top-level operators. Summing all **162** operators including the four
+groups' children, with a synthetic 30 fps one-hand stream and the 499-channel
+output: **1.2 ms and 1.55 ms** on two single-frame reads. Latches 0.45-0.55,
+temporal 0.30-0.34, `derive_chop` 0.23-0.32, coords 0.10-0.16, filter 0.13.
+
+Two things that must be said with it. Three reads inside one script returned the
+identical value three times - the same-frame trap again, so those are two samples
+and not six. And the 1.040 ms measured flat came from the camera with a real hand,
+so the comparison is not clean. What can be said: grouping has not made the network
+cheaper, and the earlier 0.599 ms figure was as misleading as the build plan
+suspected.
+
+### Left undone, deliberately
+
+No attribute layer for pose - no derived channels, no filter, no temporal - because
+the brief was plumbing plus basic testing. `allowCooking` gating for `temporal` and
+`latches` is still open. Face is next and does NOT fit this shape: its landmarks
+are 12 named REGIONS of differing point counts rather than one joint table
+(verified, DESIGN.md 2.12), so the channel list needs a level the pose table does
+not have.

@@ -109,6 +109,18 @@ def _package_files(subdir: str = "") -> list[Path]:
     return sorted(p for p in root.rglob("*.py") if "tests" not in p.parts)
 
 
+def test_the_pose_module_does_not_import_touchdesigner() -> None:
+    """`pose.py` is the second module that touches Vision (DESIGN.md 6.4), so it
+    inherits the engine's rule: a Vision-side module must be drivable with no TD
+    in the process at all. Enforced separately rather than folded into the engine
+    test, because the list of Vision-side modules is now something that grows.
+    """
+    pose = PACKAGE_ROOT / "pose.py"
+    assert pose.is_file()
+    offenders = _module_scope_imports(pose) & TD_MODULES
+    assert not offenders, "pose.py imports TouchDesigner: %s" % sorted(offenders)
+
+
 def test_engine_does_not_import_touchdesigner() -> None:
     """The engine must be drivable with no TD in the process at all.
 
@@ -145,7 +157,7 @@ def test_pure_core_imports_neither_pyobjc_nor_td() -> None:
     not), so they may depend on neither. This is the rule that makes the other
     two possible.
     """
-    for name in ("types.py", "coords.py"):
+    for name in ("types.py", "coords.py", "pose_types.py", "streams.py"):
         path = PACKAGE_ROOT / name
         assert path.is_file(), name
         imports = _module_scope_imports(path)

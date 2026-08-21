@@ -158,11 +158,26 @@ crossing frame at a known speed, a dwell needs a hand held still. The pattern is
 established; the instrument is the cheap part and it is what makes each channel
 assertable rather than plausible.
 
-## Step 5 — visionface, visionpose and person segmentation — REQUESTED, not started
+## Step 5 — visionpose — DONE 2026-08-21. visionface next; segmentation deferred
 
-Asked for on 2026-08-20 and not begun; the two hours went on the filter, the
-triggers and the temporal channels. Recorded here so it is a task rather than a
-remark in the journal.
+**Built and verified end to end with no camera:** `visionhands/pose_types.py` (the
+19-joint table and the 123-channel contract), `visionhands/pose.py` (the Vision
+request and the conversion), `visionhands/streams.py` (the stream registry, the
+ports and the `sc_*` status channels), the engine carrying both requests on one
+buffer, the sidecar sending one bundle per stream, `visionhands/synth_body.py` plus
+`tools/send_synthetic_pose.py` for testing without anybody in frame, and
+`tools/td_build_pose_comp.py` for the TouchDesigner side. 61 new tests.
+
+**Measured in TouchDesigner:** 123 pose channels arriving on port 10001 with the
+right names and moving values, and the hands port now carrying 141 (137 + four
+`sc_*`) with the COMP output at 499. DESIGN.md 6.4 has the design and 2.12 the API
+surface; the journal has the four things that went wrong.
+
+**What is NOT done:** the face stream, and any attribute layer for pose - there are
+no derived pose channels, no filtering and no temporal channels, by design. The
+brief was plumbing plus basic testing.
+
+**The original request, for the record.**
 
 **The shape of the request:** the same treatment as hands for
 `VNDetectFaceLandmarksRequest`, `VNDetectHumanBodyPoseRequest` and person
@@ -202,29 +217,46 @@ is contract-agnostic.
   10 fps is an acceptable price, and that is worth measuring against our own
   requirements rather than inheriting someone else's implementation.
 
-**Still to decide:**
+**DECIDED 2026-08-21 while building it**, and all four are written up in
+DESIGN.md 6.4 with the reasoning:
 
-- **One process or several?** One sidecar running several requests shares the
-  camera and one capture queue, which is cheaper and keeps frames aligned across
-  streams - and it is also how one stream's failure takes the others down. Several
-  processes isolate faults and let each be started independently, at the cost of
-  each opening the camera (measured possible - DESIGN.md 2.8 - but not measured for
-  three at once).
-- **One OSC port or several?** One port means one contract that grows, and every
-  consumer sees channels for streams it does not use. Several ports mean one OSC In
-  CHOP per stream and a COMP per stream, which is where the "move the sidecar DATs
-  upstream" note came from - the Start/Stop control would become one shared panel
-  rather than a page per COMP.
-- **Where the toggles live.** They have to reach the sidecar, not just TouchDesigner,
-  or a disabled stream still costs its inference. That means a control channel INTO
-  the sidecar - which does not exist yet, the OSC only flows outward - or restarting
-  it with different arguments. This is the substantive new piece of design.
-- **Segmentation is a mask, not landmarks**, so it is the one that breaks the
-  "137 floats and no pixels" property the whole architecture rests on (DESIGN.md
-  4.2). A mask has to reach TD as a TOP, which is either a shared-memory TOP or the
-  C++ path in DESIGN.md 9 - and it is the strongest trigger for that path yet.
-  Worth separating from face and pose, which are both landmark streams and fit the
-  existing shape.
+- **One process, several requests.** One camera open, one capture queue, both
+  requests performed on the same sample buffer - so the two streams share a `seq`
+  and a consumer can align them. Fault isolation, which was the argument for
+  several processes, is bought instead with a try/except per stream: a failing pose
+  request costs the pose stream and nothing else.
+- **One port PER STREAM**, hands 10000 and pose 10001, from one base constant in
+  `visionhands/streams.py`. Sharing a port would put pose channels inside the hands
+  COMP's output, and the alternative - a prefix Select per COMP - is the mechanism
+  that has already failed to partition these channels once (step 3 above).
+- **The toggles are launch flags**, appended to the command line in `start()`, and
+  the sidecar reports what it actually started as `sc_*` channels so the panel
+  cannot lie.
+- **The sidecar DATs did NOT move upstream.** They still live in the `visionhands`
+  COMP even though the process serves every stream now. Moving them would break the
+  panel in a live project and every callback's parameter path in exchange for
+  tidiness; the trigger for doing it is a second thing needing to control the
+  process, not the current asymmetry.
+
+**Still open, for face**, and it is a real difference rather than more of the same.
+VERIFIED against the live framework 2026-08-21 (DESIGN.md 2.12):
+`VNFaceObservation.landmarks()` returns a `VNFaceLandmarks2D` of **12 named
+REGIONS** - `faceContour`, `medianLine`, `nose`, `noseCrest`, `leftEye`,
+`rightEye`, `leftPupil`, `rightPupil`, `leftEyebrow`, `rightEyebrow`, `innerLips`,
+`outerLips` - each a `VNFaceLandmarkRegion2D` with its own `pointCount` and
+`normalizedPoints`, plus an `allPoints`. The constellation is selectable, 65 or 76
+points, and the request's default is 76. So `pose_types.py`'s flat table needs an
+extra level - region -> point count -> names - and the point count per region has
+to be READ from the framework rather than assumed, or the channel list is a guess. Everything else - the port,
+the flag, the status channel, the box, the send path - is already built and
+generic; `sc_face` is published, reading 0, and `parse_streams` refuses `face` with
+"in the channel contract but not implemented yet" rather than silently starting
+nothing.
+
+**Segmentation is a mask, not landmarks**, so it is the one that breaks the
+"137 floats and no pixels" property the whole architecture rests on (DESIGN.md
+4.2). A mask has to reach TD as a TOP, which is either a shared-memory TOP or the
+C++ path in DESIGN.md 9 - and it is the strongest trigger for that path yet.
 
 **Suggested order:** pose first (closest to hands - the same
 `VNRecognizedPointsObservation` shape, so `types.py`'s joint-table pattern and

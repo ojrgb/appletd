@@ -217,6 +217,7 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "visionhands" or n.startswith("visionhands.")]:
         del sys.modules[stale]
+    from visionhands.streams import status_channel_names
     from visionhands.types import channel_names
 
     comp = op(COMP_PATH)
@@ -232,7 +233,20 @@ def main():
     # pattern would silently reclassify a channel the moment the contract gained
     # one whose name happened to end in _x, and the two halves have to partition
     # exactly - anything dropped from both vanishes from the COMP's output.
-    names = channel_names()
+    #
+    # THAT EXACT FAILURE HAPPENED, measured 2026-08-21: the sidecar started
+    # sending four `sc_*` status channels on this port, they were in neither list,
+    # and they were dropped here - the OSC In CHOP showed 141 channels while the
+    # COMP output stayed at 495 with no `sc_*` in it, and nothing reported
+    # anything. So every channel list this port CARRIES has to be named here, and
+    # the check at the end of this script now compares the group's output against
+    # its input so the next omission is loud instead of silent.
+    #
+    # The complement cannot be written as a pattern, either: MEASURED in TD, `^`
+    # does NOT exclude in a Select CHOP's `channames`. The terms are ADDITIVE, so
+    # `* ^*_x ^*_y` selected 423 channels from a 141-channel input - each term
+    # matching the whole lot again - rather than the 57 a complement would give.
+    names = list(channel_names()) + list(status_channel_names())
     positions = [n for n in names if n.endswith(("_x", "_y"))]
     others = [n for n in names if not n.endswith(("_x", "_y"))]
     assert len(positions) + len(others) == len(names)
@@ -340,12 +354,28 @@ def main():
     # inside carries.
     group_out.cook(force=True)
     produced = tuple(c.name for c in group_out.chans())
-    if set(produced) != set(names) or len(produced) != len(names):
-        missing = sorted(set(names) - set(produced))
-        extra = sorted(set(produced) - set(names))
-        failures.append("the group output does not reproduce the contract: %d channels, "
-                        "missing %r, extra %r" % (len(produced), missing[:5],
-                                                  extra[:5]))
+    # Compared against what actually ARRIVED, not against the contract. This group
+    # is the only one in the data path, so its one hard property is that every
+    # channel entering it leaves it - and the contract cannot answer that: with
+    # tools/send_synthetic.py as the sender the input is 137 channels and there are
+    # no `sc_*` to reproduce, while with the sidecar it is 141. Comparing against
+    # the contract would report a phantom failure in the first case and, before the
+    # status channels were added to `names`, reported nothing at all in the second
+    # while silently dropping four channels.
+    group_in.cook(force=True)
+    arrived = tuple(c.name for c in group_in.chans())
+    dropped = sorted(set(arrived) - set(produced))
+    if dropped:
+        failures.append("%d channel(s) entered the group and did not leave it: %r. "
+                        "Every channel this port carries has to be named in "
+                        "`positions` or `others` - see the comment there."
+                        % (len(dropped), dropped[:6]))
+    duplicated = len(produced) - len(set(produced))
+    if duplicated:
+        failures.append("%d duplicate channel(s) on the group output - the two "
+                        "Selects overlap" % duplicated)
+    if arrived and not produced:
+        failures.append("channels arrived but none left the group at all")
     for node in (raw, rest, smoothed, out):
         if node.errors():
             failures.append("%s: %s" % (node.name, node.errors()))
@@ -354,8 +384,9 @@ def main():
     if not smoothed.isTimeSlice:
         failures.append("oef_smooth is not time-sliced, so it will be a silent "
                         "passthrough - see the docstring")
-    print("4. `%s` output: %d channels (contract has %d), filter time-sliced: %s"
-          % (GROUP, len(produced), len(names), smoothed.isTimeSlice))
+    print("4. `%s`: %d channels in, %d out (contract names %d), filter "
+          "time-sliced: %s" % (GROUP, len(arrived), len(produced), len(names),
+                               smoothed.isTimeSlice))
 
     # -- repoint everything that read in1 ----------------------------------
     # `lat_seq` deliberately stays on the RAW input: it watches `seq` to decide
