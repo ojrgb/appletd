@@ -1258,3 +1258,135 @@ to drive gesture sequences into TD without a camera.
 `Togetheron`, `Swipespeed` and the peace-sign spread are calibrated against
 synthetic geometry, which validates the arithmetic and says nothing about how a
 real hand sits. That is one session, not a rebuild.
+
+---
+
+## The proximity latches: pinch, snap and clap, and the cook that never happened
+2026-08-20
+
+**Built.** `visionhands/sequences.py` (gesture sweeps as pure functions of a
+phase), `tools/send_synthetic.py` (those sweeps over OSC, no camera),
+`tools/td_add_latches.py` (the latch bank, 30 native operators),
+`tools/td_verify_latches.py` (the verdict), `pinch_finger` on `HandPose` so the
+snap channel can be driven at all, and `h{i}_pinch_count` / `h{i}_snap_count` /
+`clap_count`. 164 tests, ruff and mypy clean. COMP output 476 → 497.
+
+**One five-channel network, not three copies.** `docs/BUILD_PLAN.md` specified a
+base COMP duplicated three times, one per gesture. Built instead as a single bank
+five channels wide: every distance, every validity flag and both threshold sets
+are renamed to the same five working names (`pinch0 pinch1 snap0 snap1
+together`), so one set of operators serves all five latches and every Logic CHOP
+pairs the right channels by name rather than by luck. Duplication is how two of
+three copies end up subtly different.
+
+That naming scheme also dissolves the alignment problem the build plan flagged.
+Rather than gate `h0_pinch_index` with a channel called `h0_valid` and hope, both
+are called `pinch0` by the time they meet.
+
+**The whole recurrence is native, and needs no Expression CHOP.** The Logic
+CHOP's `convert` parameter turns out to be a comparator — `lt` is "On When Less
+Than Zero" — so `distance < threshold` is a Math CHOP subtract and one Logic CHOP,
+with the threshold arriving as a *channel* from a Constant CHOP bound to the
+Tuning page. Zero Python in the cook path, and retuning takes effect on the next
+frame with nothing to rebuild.
+
+**THE FINDING: TouchDesigner does not cook a branch nobody consumes, and for a
+branch with memory that is fatal.** Promoted to `DESIGN.md` 2.10. The latch bank
+was built, structurally verified, correct on inspection — and dead. Measured:
+
+    merge_out    283,930 cooks
+    out1         283,929 cooks
+    derive_chop  178,976 cooks
+    lat_state          2 cooks   <- both of them forced by the build script
+
+This project's consumer of the COMP is two Select CHOPs taking `*_tx` and `*_ty`,
+so nothing ever pulled the branch the latches live in. For the stateless
+`derive_chop` that is a pure optimisation and entirely correct. For a recurrence
+it means `prev` holds a value from an arbitrarily distant past and every edge
+pulse is computed between two frames that were never adjacent. The state would
+eventually self-correct, because the recurrence is level-driven; the pulses never
+would.
+
+The fix is one operator: a Null CHOP with Cook Type = `always` consuming the
+deepest point of the bank. Every group with memory still to build — velocity
+Slopes, smoothing Filters, debounce Counts, dwell Timers — needs the same, and
+this is now the first thing to check when a temporal channel misbehaves.
+
+**Three wrong answers on the way there, each of which looked right.**
+
+*A Trail CHOP recorder.* The instinct was to record the whole trajectory and
+check every property at once. It reported a rock-steady distance through a sweep
+that had unquestionably swept — because a diagnostic branch with nothing
+downstream does not cook, so its 1200-sample "history" was a record of when the
+script forced it rather than of what the network did. Same root cause as the bug
+it was built to find, which is why it hid it.
+
+*`viewer = True`.* Measured: cooks did not advance. A node viewer cooks only when
+actually visible in an open pane.
+
+*A Null CHOP downstream.* It is itself unconsumed, so it does not cook either.
+Only Cook Type = `always` breaks the regress.
+
+**And two operators that lied quietly.** The Count CHOP's `offtoon` / `on` /
+`ontooff` / `off` parameters look exactly like toggles and are menus of actions
+(none / inc / dec / …); assigning `True` leaves them at `none`, with no error, and
+the counter reads zero for ever. Replaced with Feedback plus a Math add — the
+same construction the latch already uses for `prev`, so it adds no new unknowns
+and what it does is legible in the network. And `appendFloat` on an *existing*
+custom parameter resets its value to **zero**, not to its default; setting
+`.default` afterwards does not bring it back. A second run of the builder left
+every threshold at 0.000, which disabled every latch while the network still
+looked correct and reported nothing. The rule inherited from
+`tools/td_build_comp.py` — ".default always, .val only when creating" — is
+necessary and not sufficient; the builder now saves and restores.
+
+**A shipped bug found by re-running a tool.** `tools/td_add_derive.py` appended
+`derive_chop` to `merge_out` unconditionally, so every run added a duplicate. The
+COMP had been publishing 647 channels where 476 were meant since the previous
+session — 171 duplicates, invisible because `chan()` returns the first match and
+the channel count is the only symptom. Fixing it uncovered a second layer:
+connecting to a Merge CHOP connector that reports itself FREE can *insert* rather
+than fill, pushing the existing connection down and leaving it attached twice, so
+even the careful "append only if missing" version made things worse. Both
+builders now rebuild the whole input list. That also matters because the MCP
+bridge has been observed executing a script TWICE per call, so idempotence has to
+be structural rather than conventional.
+
+**VERIFIED, over time, with the sidecar stopped and nobody in frame.** A latch
+cannot be checked from one frame, so each property is a counter delta over a
+generated sweep. All five passed:
+
+| sweep | expected | measured |
+|---|---|---|
+| `ramp --cycles 4` | h0_pinch +4 | **+4** (and h0_snap +4) |
+| `deadband --cycles 6` | h0_pinch **+1** | **+1** |
+| `clap --cycles 3` | clap +3, pinch +0 | **+3, +0** |
+| `both --cycles 3` | all four per-hand +3, clap +0 | **+3, +0** |
+| `absent` | +0 everywhere | **+0** |
+
+`ramp +4` rather than +8 is what proves each pulse is exactly one frame wide,
+because the counter counts frames-high rather than transitions. `deadband +1` for
+six dips is the hysteresis: six crossings of `on`, none rising past `off`, so a
+correct latch engages once and holds — a comparator, or a parity counter that has
+lost sync, gives +6. It was also observed directly, sitting engaged at
+`pinch_index` 0.435 with `Pinchon` 0.35 and `Pinchoff` 0.50. `absent +0` is the
+trap `docs/ATTRIBUTES.md` opens with, defused: every distance reads 0.000, below
+every engage threshold, and only the validity gate stops all three firing at
+once. `both` exists because every other sweep leaves slot 1 empty, so hand 1's
+column had never been exercised.
+
+**Recorded rather than fixed: a full index pinch also engages the snap latch.**
+At `pinch` 1.0 the thumb sits 0.21 hand-sizes from the middle fingertip, below the
+`Snapon` default of 0.25. That is what a real hand does — the arithmetic is not in
+question — but it means `h0_snapping` does not discriminate a pinch from a snap at
+these defaults. One for the threshold-feel session.
+
+**Also fixed:** `derive_chop` was warning on every cook that editing `numSamples`
+is unsupported in Time Slice mode. It publishes a snapshot of one frame, so it is
+now explicitly not time-sliced, which also leaves the latch bank downstream a
+plain 1-sample CHOP with no rate negotiation of its own to get wrong.
+
+**Still to build:** the rest of the temporal channels (velocity, smoothing,
+debounce, dwell, steadiness, motion events), the group COMPs with `allowCooking`
+gating and the five parameter pages. **Still needs the user:** threshold feel, and
+a two-hand fixture before slot assignment.

@@ -86,8 +86,16 @@ desynchronisation - a missed edge, a double crossing, an odd startup state -
 corrects itself on the next frame where the distance is unambiguous. There is no
 accumulated state to get out of step, and no reset to wire.
 
-A Count CHOP is still worth having alongside it, for what it is actually good at:
-`h{i}_pinch_count`, how many times the gesture has fired. Just not as the state.
+A counter is still worth having alongside it, for what a counter is actually good
+at: `h{i}_pinch_count`, how many times the gesture has fired. Just not as the
+state.
+
+Built as a Feedback plus an add rather than as a Count CHOP — same accumulation,
+one fewer operator whose parameters have to be interpreted correctly. The Count
+CHOP's condition parameters are menus of actions rather than the toggles they
+resemble, and it reads zero through a sweep if its Time Slice setting disagrees
+with its input's. The accumulator is the same construction the latch already uses
+for `prev`, so it introduces nothing new.
 
 ## Why every distance is normalised by hand size
 
@@ -141,8 +149,16 @@ because pinch, snap and the two-hand "together" state are one family.
 | `h{i}_pinch_x`, `h{i}_pinch_y` | midpoint of thumb_tip and index_tip - the grab point, more stable than either tip |
 | `h{i}_pinching` | state on `pinch_index`, thresholds `Pinchon` / `Pinchoff` |
 | `h{i}_snapping` | state on `pinch_middle`, thresholds `Snapon` / `Snapoff`. Middle finger and thumb together |
+| `h{i}_pinch_count`, `h{i}_snap_count`, `clap_count` | how many times each has fired since the project opened. A Count CHOP doing the one job it is good at — see above |
 
-18 channels. The edge pulses for these live in the Events group.
+23 channels. The edge pulses for these live in the Events group.
+
+The counters are deliberately configured to count every FRAME the start pulse is
+high rather than every off-to-on transition. Both give the same answer when the
+network is correct, because `start = state AND NOT prev` is one frame wide by
+construction — so counting frames measures the pulse width as well as the fire
+count, and a pulse that ever lingered two frames would show up as a doubled
+count instead of passing silently.
 
 ## Group: Pose
 
@@ -279,7 +295,7 @@ signature of the pose, for gesture matching or as features for a model.
 | `Coordspx` — `_px`/`_py` for all 42 joints | 84 | off |
 | `Core` | 20 | on |
 | `Presence` | 10 | on |
-| `Contacts` | 18 | on |
+| `Contacts` | 23 | on |
 | `Pose` | 22 | on |
 | `Motion` | 14 | on |
 | `Twohands` | 14 | on |
@@ -288,8 +304,8 @@ signature of the pose, for gesture matching or as features for a model.
 | `Descriptor` | 84 | off |
 
 Presets on the `Verbosity` menu: **Minimal** = Landmarks + Coordstx (221),
-**Interaction** = everything except Coordspx and Descriptor (371), **Everything**
-= all of it (539).
+**Interaction** = everything except Coordspx and Descriptor (376), **Everything**
+= all of it (544).
 
 ## Parameters
 
@@ -373,7 +389,7 @@ are excluded from the output rather than left stale.
 | parameter | type | default | what it does |
 |---|---|---|---|
 | `Resw`, `Resh` | int | 1280, 720 | SOURCE resolution. Drives `_px`/`_py` only |
-| `Renderw`, `Renderh` | int | from render1 | RENDER resolution. Drives `_ty`. Not the same number as the source - see DESIGN.md 2.9 |
+| `Renderw`, `Renderh` | int | from render1 | RENDER resolution. Drives `_ty`. Not the same number as the source - see DESIGN.md 7 |
 | `Orthowidth` | float | from cam1 | match your ortho camera's Ortho Width |
 
 ### Page: Sidecar

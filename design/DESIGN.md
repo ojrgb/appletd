@@ -344,6 +344,127 @@ may behave unpredictably or terminate." The shipping code is already safe by
 construction — `engine.py` imports no TD — but any diagnostic must write to a
 file, not to TD storage.
 
+### 2.9 The OSC transport, measured — what the process boundary costs
+
+Prototyped in the live TouchDesigner before anything was designed around it. An
+`oscinCHOP` on port 10000 received all **137 channels with the exact contract
+names, in order**, from a hand-rolled bundle — no Script CHOP, no callbacks DAT,
+no Python in TD at all. The bundle is 3480 bytes, about 104 KB/s at 30 fps,
+comfortably inside loopback's 16 KB datagram limit. `sharedmeminCHOP` was
+considered and rejected: lower latency in principle, but it needs
+TouchDesigner's undocumented and version-sensitive shared-memory header layout
+reproduced in Python, to move 3.5 KB that UDP loopback already delivers in tens
+of microseconds.
+
+**Three costs, all measured rather than discovered in production.**
+
+1. **OSC floats are 32-bit, so raw timestamps are unusable.** `time.monotonic()`
+   IS comparable across processes on macOS — verified, TD read 580737.438
+   bracketed by shell readings either side, same boot epoch. But at that
+   magnitude float32 resolution is 1/16 s = 62 ms, so a raw timestamp cannot
+   carry a millisecond age. (A first test showed only 0.32 ms error, which was
+   luck: 580737.4375 is exactly representable.) So `age_ms` is computed at send
+   time, where the float32 error is 0.000002 ms.
+2. **`seq` is exact in float32 only to 2²⁴ = 16,777,216** — 6.5 days at 30 fps,
+   after which it silently stops incrementing. The worst kind of failure:
+   everything keeps working until a long installation quietly freezes its own
+   staleness detection. Sent modulo 2²³ instead, so a wrap reads as one negative
+   slope rather than as a counter that stopped counting.
+3. **A dead sidecar leaves the channels FROZEN, not zeroed.** The OSC In CHOP
+   holds its last value indefinitely, so "the process died" looks identical to
+   "nothing is moving" — including `age_ms`. Liveness has to be derived on the TD
+   side, which needs no Python: the slope of `seq` is zero when the camera stops,
+   and the slope of `age_ms` is zero when the process stops. The in-process
+   design got this for free; this one does not.
+
+**No pixel transport is needed.** TD's Video Device In TOP and the sidecar read
+the built-in camera simultaneously (§2.8), so TD can display the camera while the
+sidecar tracks it. Two independent readers, 3.5 KB of landmarks per frame, and
+nothing else crosses the boundary.
+
+### 2.10 TouchDesigner does not cook a branch nobody consumes — measured
+
+The single most consequential thing learned building the latch bank, and it is
+not a bug: TouchDesigner cooks on demand, per branch. A Merge CHOP whose only
+downstream consumer selects `*_tx` and `*_ty` never pulls the branches carrying
+the other channels.
+
+**MEASURED on the live network**, with a project whose only consumer of the COMP
+was two Select CHOPs taking the coordinate channels:
+
+| operator | totalCooks |
+|---|---|
+| `merge_out` | 283,930 |
+| `out1` | 283,929 |
+| `derive_chop` | 178,976 |
+| `lat_state`, `lat_start`, `lat_count` | **2** |
+
+Both of those two cooks were forced by the build script. The latch bank had never
+cooked on its own.
+
+For a **stateless** branch this is a pure optimisation and entirely correct — an
+uncooked distance is recomputed the instant anyone asks for it, which is why
+`derive_chop` is fine. For a branch with **memory** it is fatal. A recurrence
+advances once per cook, so a Feedback CHOP in an uncooked branch holds a value
+from an arbitrarily distant past, and every edge pulse derived from it is
+computed between two frames that were never adjacent. The state itself would
+eventually be right, because the recurrence is level-driven and self-correcting;
+the pulses never would be.
+
+It cannot be left to the project downstream either. Consuming any latch channel
+does pull the whole recurrence, so a project that reads `h0_pinching` gets correct
+behaviour by accident — but one that reads only the raw landmarks silently gets a
+latch bank frozen in the past, with nothing anywhere reporting it.
+
+**The fix is one operator**: a Null CHOP with Cook Type = `always`, consuming the
+deepest point of the bank. Everything upstream then cooks every frame regardless
+of what anyone downstream selects. Two things that look like they should work and
+do not: `viewer = True` (measured: cooks did not advance) and an ordinary Null
+CHOP downstream (it is itself unconsumed, so it does not cook either).
+
+**Rule for everything still to build.** Every group of operators with memory —
+the velocity Slopes, the smoothing Filters, the debounce Counts, the dwell
+Timers — needs a guaranteed clock, or it needs to be provably downstream of one.
+This is the first thing to check when a temporal channel misbehaves.
+
+### 2.11 Native CHOP behaviours that cost time, all verified live
+
+Against the running instance (099), not read anywhere:
+
+- **The Logic CHOP's `convert` parameter is a comparator.** `lt` is "On When Less
+  Than Zero", `gt` is "On When Greater Than Zero", plus `ge`/`le`/`eq`/`ne`. So
+  `distance < threshold` is a Math CHOP subtract and one Logic CHOP — no
+  Expression CHOP and no Python, and the threshold arrives as a channel.
+- **The Logic CHOP defaults to `match = index`.** It pairs channels by POSITION
+  and keeps the first input's names. ANDing a channel called `aaa` with one called
+  `zzz` produced one channel called `aaa`, with no error and no warning. Any
+  multi-input Logic or Math CHOP whose alignment matters must set `match = name`.
+- **The Feedback CHOP has no target parameter.** Input 0 is the operator whose
+  previous output it emits; input 1 supplies the channel template and the initial
+  values. With input 1 unconnected it produces ZERO channels, silently, and
+  everything downstream then evaluates on nothing. It also does not advance on a
+  second cook within the same frame (`output = previous` is time-based), which is
+  what makes it safe to force-cook while debugging.
+- **The Count CHOP's `offtoon` / `on` / `ontooff` / `off` parameters look like
+  toggles and are menus of actions** — none / inc / dec / inctime / dectime /
+  reset. Assigning `True` leaves them at `none` with no error, and the counter
+  then reads zero for ever while everything around it works.
+- **Connecting to a Merge CHOP input connector that reports itself FREE can
+  INSERT rather than fill**, pushing the existing connection down and leaving it
+  attached at both positions. Five nodes connected that way produced five
+  duplicate `derive_chop` connections — 1710 published channels where 171 were
+  meant, invisible downstream because `chan()` returns the first match. A builder
+  must rebuild the whole input list, not append to it.
+- **`appendFloat` on an EXISTING custom parameter resets its value to zero** —
+  not to its default, to zero — and setting `.default` afterwards does not bring
+  it back. The known rule ".default always, .val only when creating" is necessary
+  and not sufficient: a builder has to save the tuned values and restore them.
+- **Select CHOP `channames` order determines output order**, and its built-in
+  `renamefrom = *` / `renameto = <list>` maps the list positionally onto that
+  order — so one operator can pick, reorder and rename in a single step.
+- **The MCP bridge has been observed executing a script TWICE per call.** Every
+  builder must be idempotent by construction rather than by convention.
+
 ---
 
 ## 3. Traps — all of these cost real time in the spike

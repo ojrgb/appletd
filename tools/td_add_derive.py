@@ -66,6 +66,13 @@ def _groups(comp):
 
 
 def onCook(scriptOp):
+    # Not time-sliced. A Script CHOP defaults to Time Slice mode, where editing
+    # numSamples is unsupported - TD warned about it on every cook - and where
+    # the sample count per frame varies with the cook rate. This CHOP publishes a
+    # SNAPSHOT of one frame's channels, so one fixed sample is what it is, and
+    # the native latch bank downstream then sees a plain 1-sample CHOP with no
+    # rate negotiation of its own to get wrong.
+    scriptOp.isTimeSlice = False
     scriptOp.clear()
     if not scriptOp.inputs:
         return
@@ -111,8 +118,33 @@ def main():
 
     merge = comp.op("merge_out")
     if merge is not None:
-        # Append as a new input rather than replacing one.
-        merge.inputConnectors[len(merge.inputs)].connect(chop)
+        # Rebuild the whole input list rather than appending. Two measured
+        # behaviours of the Merge CHOP make "append if missing" wrong:
+        #
+        #   * it accepts the same operator on any number of inputs, silently, and
+        #     the duplicate channels are invisible downstream because chan()
+        #     returns the first match - the channel COUNT is the only symptom.
+        #     This script's previous version appended unconditionally and left
+        #     derive_chop connected TEN times, publishing 1710 channels where 171
+        #     were meant;
+        #   * connecting to a connector that reports itself FREE can INSERT rather
+        #     than fill, pushing the existing connection down and leaving it
+        #     attached twice - so even the careful version made it worse.
+        #
+        # Deterministic and idempotent, which matters because the MCP bridge has
+        # been observed executing these scripts TWICE per call.
+        keep, seen = [], set()
+        for existing in merge.inputs:
+            if existing.name != chop.name and existing.name not in seen:
+                keep.append(existing)
+                seen.add(existing.name)
+        for _attempt in range(256):
+            if not merge.inputs:
+                break
+            merge.inputConnectors[0].disconnect()
+        for index, node in enumerate([*keep, chop]):
+            merge.inputConnectors[index].connect(node)
+        print("merge_out inputs: %s" % ", ".join(o.name for o in merge.inputs))
 
     chop.cook(force=True)
     print("derive_chop: %d channels, errors=%r" % (chop.numChans, chop.errors()))

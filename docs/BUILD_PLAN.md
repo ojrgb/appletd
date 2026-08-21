@@ -6,42 +6,39 @@ the gating, and a dev tool. The design is settled in `docs/ATTRIBUTES.md`; this
 file is the implementation recipe plus the TouchDesigner facts that cost real time
 to learn.
 
-## Step 1 — the proximity latches (highest value; do first)
+## Step 1 — the proximity latches — DONE 2026-08-20
 
-Delivers `pinching`, `snapping`, `hands_together` and their edge pulses, which is
-`clap` and `snap`. Three instances of one sub-network, differing only in the
-channel they watch and the two thresholds.
+`tools/td_add_latches.py` builds it, `tools/td_verify_latches.py` judges it, and
+`docs/JOURNAL.md` records how. Delivered `h{i}_pinching`, `h{i}_snapping`,
+`hands_together`, every edge pulse (so `e_clap` and `e_snap`), `both_pinching` and
+three fire counters. COMP output 476 → 497.
 
-The recurrence, from `docs/ATTRIBUTES.md`:
+Built as ONE five-channel-wide bank rather than the three duplicated base COMPs
+this file originally specified — every distance, validity flag and threshold is
+renamed to the same five working names, so one set of operators serves all five
+latches and the name-alignment problem disappears at the source rather than being
+worked around downstream.
 
-    state = valid AND ( below_on OR (prev AND NOT above_off) )
+Verified by counter deltas over generated sweeps, with the sidecar stopped and
+nobody in frame: `ramp` +4 for four sweeps, `deadband` **+1** for six dips (the
+hysteresis), `clap` +3, `both` +3 on all four per-hand counters, `absent` +0
+everywhere.
 
-Operator chain per instance, built inside a small base COMP so it can be
-duplicated:
+**READ THIS BEFORE BUILDING STEP 2.** The bank was structurally perfect and
+completely dead, because TouchDesigner does not cook a Merge branch that nothing
+downstream consumes — measured, `merge_out` 283,930 cooks against `lat_state` 2.
+Harmless for stateless maths; fatal for anything with memory, and it silently
+corrupts every edge pulse rather than failing. `DESIGN.md` 2.10 has the numbers.
+Every group below needs a Null CHOP with Cook Type = `always`, or needs to be
+provably downstream of one. `viewer = True` does not work and neither does an
+ordinary Null.
 
-| op | type | notes |
-|---|---|---|
-| `sel_d` | Select | the distance channel(s), e.g. `h*_pinch_index` |
-| `below_on` | Expression | `1 if me.inputVal < parent().par.Pinchon else 0` |
-| `above_off` | Expression | `1 if me.inputVal > parent().par.Pinchoff else 0` |
-| `fb` | Feedback | Target CHOP = `state`. This is what breaks the loop |
-| `held` | Logic | inputs `fb` + `above_off`; chopop AND, with `above_off` inverted via `preop` |
-| `state` | Logic | inputs `below_on` + `held`; chopop OR, then AND with validity |
-| `start` | Logic | inputs `state` + `fb`; state AND NOT prev |
-| `end` | Logic | inputs `fb` + `state`; prev AND NOT state |
-
-**The one risk to watch.** Logic CHOP combines multiple input CHOPs *pairwise by
-channel*, so the channel NAMES must line up across its inputs. `below_on`,
-`above_off` and `fb` all derive from `sel_d`, so they match by construction - but
-the validity channel does not (`h0_valid` against `h0_pinch_index`). Either
-rename validity to match, or apply it with a Math CHOP multiply after `state`.
-Check `Logic CHOP`'s `align` and `match` parameters before assuming.
-
-**Verify it like this**, because a latch cannot be verified from one frame: send
-a descending then ascending ramp of `h0_pinch_index` over OSC across ~20 frames
-and assert the state engages only below `on`, releases only above `off`, holds in
-the dead band, and that `start` fires exactly once per crossing. A synthetic ramp
-is the only way to test the dead band deliberately.
+`DESIGN.md` 2.11 lists the seven other native-operator behaviours that cost time
+here — the Logic CHOP's `convert` being a comparator, its `match` defaulting to
+index, the Feedback CHOP emitting nothing without its second input, the Count
+CHOP's action menus that look like toggles, Merge connectors that insert rather
+than fill, `appendFloat` zeroing an existing value, and the MCP bridge running a
+script twice. Do not rediscover them.
 
 ## Step 2 — the rest of the temporal channels
 
@@ -72,11 +69,20 @@ violent twist.
   `tools/td_add_derive.py`; it already falls back to spec defaults with `getattr`,
   so adding a parameter needs no code change there.
 
-## Step 4 — `tools/send_synthetic.py`
+## Step 4 — `tools/send_synthetic.py` — DONE 2026-08-20
 
-Stream generated sequences over OSC so gestures can be exercised with no camera:
-`--gesture pinch|clap|snap|swipe|ramp`, using `visionhands.synth` and
-`visionhands.osc`. The ramp mode is what step 1's verification needs.
+`visionhands/sequences.py` holds the sweeps as pure functions of a phase (tested,
+23 tests, no sockets); `tools/send_synthetic.py` is the CLI that puts them on the
+wire. Sequences: `ramp`, `snap`, `clap`, `both`, `deadband`, `open`, `absent`.
+
+`deadband` is the one worth understanding: it dips below `on` and rises only into
+the dead band, never past `off`, so a correct latch engages ONCE however many
+cycles are sent and a comparator engages every time. One number separates them.
+
+Add a sequence per temporal group as step 2 proceeds — a swipe needs a palm
+crossing frame at a known speed, a dwell needs a hand held still. The pattern is
+established; the instrument is the cheap part and it is what makes each channel
+assertable rather than plausible.
 
 ## TouchDesigner facts that cost time to learn
 

@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Final
 
 from visionhands.types import (
     CHIRALITY_RIGHT,
+    JOINT_NAMES,
     MAX_HANDS,
     Confidence,
     Hand,
@@ -71,6 +73,13 @@ _THUMB_CMC_HEIGHT = 0.28
 _FULL_CURL_DEGREES = 108.0
 _FULL_CURL_DEGREES_THUMB = 150.0
 
+# finger name -> that finger's tip index in a Hand's joints tuple. Derived from
+# JOINT_NAMES rather than written out, so reordering the joint table cannot leave
+# a stale literal behind - the one failure mode types.py warns about loudest.
+TIP_INDEX: Final[dict[str, int]] = {
+    finger: JOINT_NAMES.index(finger + "_tip") for finger in _FINGERS
+}
+
 
 @dataclass
 class HandPose:
@@ -93,6 +102,12 @@ class HandPose:
     # curled thumb-index pair still sits 0.91 hand-sizes apart. A pinch is the
     # thumb reaching ACROSS to the index, so it is modelled directly.
     pinch: float = 0.0
+    # WHICH fingertip the thumb reaches for. "index" is a pinch; "middle" is the
+    # snap gesture, which docs/ATTRIBUTES.md defines as middle finger and thumb
+    # together. Without this the `h{i}_pinch_middle` channel cannot be driven at
+    # all, so the snap latch would have to be taken on trust - and a latch that
+    # has never seen its own input cross a threshold is not a tested latch.
+    pinch_finger: str = "index"
     chirality: int = CHIRALITY_RIGHT
     confidence: float = 0.9
 
@@ -152,15 +167,20 @@ def synthetic_hand(pose: HandPose) -> Hand:
     unit = math.hypot(*middle_mcp_local)
     local = [(x / unit, y / unit) for x, y in local]
 
-    # The pinch: move the thumb's IP and tip towards the index tip. Applied in
-    # local space, before rotation, so it is unaffected by hand orientation.
+    # The pinch: move the thumb's IP and tip towards the target fingertip.
+    # Applied in local space, before rotation, so it is unaffected by hand
+    # orientation.
     if pose.pinch > 0.0:
-        index_tip_local = local[8]                       # JOINT_NAMES index 8
+        # TIP_INDEX rather than a literal: the index tip is JOINT_NAMES[8] and
+        # the thumb IP is [3], one character apart in the Vision constant names
+        # (types.py flags that collision), and a hard-coded 8 here silently
+        # became wrong the moment the pinch could target another finger.
+        target_local = local[TIP_INDEX[pose.pinch_finger]]
         for joint_index in (3, 4):                       # thumb_ip, thumb_tip
             x, y = local[joint_index]
             local[joint_index] = (
-                x + (index_tip_local[0] - x) * pose.pinch,
-                y + (index_tip_local[1] - y) * pose.pinch,
+                x + (target_local[0] - x) * pose.pinch,
+                y + (target_local[1] - y) * pose.pinch,
             )
 
     # Rotate about the wrist, scale, then place. The pose's palm_x/palm_y name
@@ -244,3 +264,18 @@ def pinching(amount: float = 1.0, **kwargs: float) -> HandPose:
     and any engage threshold must fire.
     """
     return HandPose(pinch=float(amount), **kwargs)                  # type: ignore[arg-type]
+
+
+def snapping(amount: float = 1.0, **kwargs: float) -> HandPose:
+    """The snap shape: thumb against the MIDDLE fingertip, `amount` 0 to 1.
+
+    docs/ATTRIBUTES.md defines snap as middle finger and thumb together, watched
+    on `h{i}_pinch_middle` - a different channel from pinch, so it needs its own
+    generator rather than a re-used pinch.
+    """
+    # Built from pinching() rather than from scratch, because that IS the
+    # relationship: a snap is a pinch aimed at a different fingertip. Written out
+    # separately, the two would drift the first time either changed.
+    pose = pinching(amount, **kwargs)
+    pose.pinch_finger = "middle"
+    return pose
