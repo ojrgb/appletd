@@ -152,6 +152,65 @@ crossing frame at a known speed, a dwell needs a hand held still. The pattern is
 established; the instrument is the cheap part and it is what makes each channel
 assertable rather than plausible.
 
+## Step 5 — visionface, visionpose and person segmentation — REQUESTED, not started
+
+Asked for on 2026-08-20 and not begun; the two hours went on the filter, the
+triggers and the temporal channels. Recorded here so it is a task rather than a
+remark in the journal.
+
+**The shape of the request:** the same treatment as hands for
+`VNDetectFaceLandmarksRequest`, `VNDetectHumanBodyPoseRequest` and person
+segmentation, with **a toggle per stream so not every model runs at once**. The
+brief was explicitly plumbing plus basic testing - not a full attribute layer per
+stream, and not running vision models continuously to prove it.
+
+**What already generalises.** The sidecar takes any `HandSource`, so a second
+detector is a new source rather than a rewrite. `types.py` holds the channel
+contract as one table with an import-time self-check. `synth.py` and
+`sequences.py` mean a stream can be tested with no camera at all. The OSC encoder
+is contract-agnostic.
+
+**What does not, and needs deciding first:**
+
+- **One process or several?** One sidecar running several requests shares the
+  camera and one capture queue, which is cheaper and keeps frames aligned across
+  streams - and it is also how one stream's failure takes the others down. Several
+  processes isolate faults and let each be started independently, at the cost of
+  each opening the camera (measured possible - DESIGN.md 2.8 - but not measured for
+  three at once).
+- **One OSC port or several?** One port means one contract that grows, and every
+  consumer sees channels for streams it does not use. Several ports mean one OSC In
+  CHOP per stream and a COMP per stream, which is where the "move the sidecar DATs
+  upstream" note came from - the Start/Stop control would become one shared panel
+  rather than a page per COMP.
+- **Where the toggles live.** They have to reach the sidecar, not just TouchDesigner,
+  or a disabled stream still costs its inference. That means a control channel INTO
+  the sidecar - which does not exist yet, the OSC only flows outward - or restarting
+  it with different arguments. This is the substantive new piece of design.
+- **Segmentation is a mask, not landmarks**, so it is the one that breaks the
+  "137 floats and no pixels" property the whole architecture rests on (DESIGN.md
+  4.2). A mask has to reach TD as a TOP, which is either a shared-memory TOP or the
+  C++ path in DESIGN.md 9 - and it is the strongest trigger for that path yet.
+  Worth separating from face and pose, which are both landmark streams and fit the
+  existing shape.
+
+**Suggested order:** decide the process/port/control questions first, then pose
+(closest to hands, same `VNRecognizedPointsObservation` shape), then face, then
+segmentation last as its own decision.
+
+## Deferred by the user, so not oversights
+
+Raised and explicitly set aside on 2026-08-20, listed so nobody re-raises them as
+gaps:
+
+- **README** - later.
+- **Two-hand behaviour and slot assignment** (milestone 11) - later; still needs a
+  two-hand fixture.
+- **Per-joint jitter measurement** - not wanted for now. It is what should set
+  `Beta` and `Velocityfilter`, so those defaults stay labelled guesses.
+- **`Sidecar.run()` tests** - later. Five mutations still survive a green suite,
+  including one where the loop sends nothing.
+
 ## TouchDesigner facts that cost time to learn
 
 - `CookLevel` exists ONLY in a DAT's globals. Not `builtins`, not the `td` module.
