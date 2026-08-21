@@ -91,7 +91,10 @@ the head, so it separates "wired to the wrong point" from "just following the
 bounding box".
 
 Every sender refuses to run while the sidecar is up: two writers on one port
-interleave into a plausible wrong answer rather than a visible fault.
+interleave into a plausible wrong answer rather than a visible fault. **The reverse
+is NOT checked** — the sidecar does not look for a running sender — so the senders
+were stopped at the end of this session, and the COMP is holding its last synthetic
+values. Start one, or start the sidecar; not both.
 
 ## The state this project's TouchDesigner file is in
 
@@ -104,6 +107,7 @@ streams, and two things in it depend on toggles that now gate cooking:
 | | (these went 42 → 50 channels when the derived positions gained companions — palm, pinch, the two centres and velocity) | |
 | `null2` → nothing yet | out2 (pose) | `Streampose` |
 | `null3` → `select6` `select7`, `*f0*_x` / `*f0*_y` | out3 (face) | `Streamface`, and `Screenspaceonly` OFF — on, it deletes exactly those channels |
+| | those two select the RAW box-relative points (88 channels each, 87 landmarks plus `f0_bbox_x`). Now that `f0_*_tx`/`_ty` exist they may want `*f0*_tx` instead — the raw points are normalised to the face's box, so drawing them directly puts the whole face in the bottom-left corner of the frame | |
 
 So the streams are all left ON and `Screenspaceonly` OFF. `select3`/`select4`/
 `select5` were reconnected by hand this session after `td_build_vision.py` orphaned
@@ -221,9 +225,21 @@ re-research it. The one thing still unmeasured needs a camera: the per-frame cos
 ### 4. Smaller, and each is self-contained
 
 - **`face/coords/lm_world` is 0.83–1.08 ms** and it is the most expensive thing in
-  the COMP when it is on. The cost is 348 channels through two operators at about
-  1.2 µs each; there is no cleverer network, only fewer channels. If it matters,
-  the honest lever is publishing 76 distinct points instead of 87 region slots.
+  the COMP when it is on. I looked for a cheaper native shape and there is not one:
+  348 output channels through two operators at about 1.2 µs per channel per operator
+  IS the floor, and every rearrangement tried moves work rather than removing it
+  (a shared per-axis pre-filter costs 348 channel-passes instead of 174; folding the
+  Select into the Math with `scope` puts 284 unwanted channels through the Math).
+  Three levers exist, in increasing order of how much they cost somebody:
+  **(a)** leave it on its toggle, which is where it is;
+  **(b)** publish 76 DISTINCT points instead of 87 region slots — 348 → 304
+  channels, a 13% saving, and a contract change that needs the user;
+  **(c)** one Script CHOP doing the whole composition in numpy. Estimated at ~0.3 ms
+  from this session's own measurements (0.16 to read 371 channels into a dict, 0.03
+  to write 348 back, ~0.05 of Script CHOP framework overhead) — so roughly 3x
+  better. It also puts main-thread Python in the coordinate path to do arithmetic
+  that native CHOPs can already do correctly, which this project has deliberately
+  avoided everywhere except atan2. **Do not do (c) without asking.**
 - **A `Coordspx`-style default hazard exists for `Lmcoordspx`** and does not matter
   yet, because nothing has read those channels. It will the moment something does.
 - **Phase-2 temporal channels**: `hands_twist`, `steadiness`, `dwell`,
