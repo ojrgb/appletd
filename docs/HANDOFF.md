@@ -79,36 +79,54 @@ And: `cook(force=True)` right after building anything makes every downstream
 `cookTime` meaningless — one profile read 2.946 ms and looked like a regression
 when the real number was 1.030.
 
-## Next, in the order I would take it
+## Next — decided 2026-08-21
 
-1. **`allowCooking` gating for `temporal` and `latches`** (step 7.2). Both are
-   safe: nothing outside reads their channels except through `merge_out`, and each
-   has its clock inside it. `filter` is NOT a candidate — it is in the data path,
-   and its `Smoothing` toggle already gates it via the bypass flag.
-2. **Re-measure cook time properly.** The 0.599 ms after grouping counts only
-   top-level operators and excludes the groups' children. Flat it was 1.040 ms.
-   Sum each group's children before claiming grouping changed anything.
-3. **Finish step 2's temporal channels** — `hands_twist` (publish sin/cos of
-   `hands_angle` from `derive()` so it survives the ±180 wrap), `steadiness`,
-   `dwell`, `hands_scale`, then the swipe/wave/cross/twist events, which now have
-   `dir` and `moving` to build on.
-4. **Step 5, the vision streams.** Design decisions are settled: launch flags read
-   at startup, constant channel contract with zeros for disabled streams, the
-   sidecar reports which streams it started. Pose first, then face. Segmentation is
-   deferred to the C++ path — note the user's datum that an existing TD
-   segmentation plugin pins the frame rate at 50 fps.
+**1. The additional vision streams. This is the next task.** Every design question
+is settled, so it is implementation:
+
+- **Toggles are LAUNCH FLAGS**, read once at startup. The sidecar is a separate
+  process TouchDesigner starts with `Popen`, and `start()` in
+  `tools/td_build_comp.py` already builds the command line — a stream toggle is a
+  flag appended there, exactly as `--slots` is. Restart to apply. No control
+  channel into the sidecar, no live reconfiguration of a running capture session.
+- **The channel contract stays CONSTANT whatever is enabled.** A disabled stream
+  sends zeros; it does not stop sending. TD's OSC In CHOP creates channels as they
+  arrive, so omitting them makes them VANISH — and `DESIGN.md` 6.2 records that a
+  downstream reference to a vanished channel fails silently, with no error
+  anywhere. The saving worth having is the inference, not the bytes.
+- **The sidecar reports which streams it actually started**, as channels, so the
+  panel cannot lie after someone flips a toggle without restarting.
+- **Pose first.** `VNDetectHumanBodyPoseRequest` returns the same
+  `VNRecognizedPointsObservation` shape as hands, so `types.py`'s joint-table
+  pattern and `derive()`'s structure both carry over. Then face.
+- **Segmentation is deferred to the C++ path.** It is a mask, not floats, so it
+  breaks the "137 floats and no pixels" property (`DESIGN.md` 4.2) whatever the
+  launch flags say. Datum from the user: an existing TouchDesigner segmentation
+  plugin **pins the frame rate at 50 fps**, so the question is whether 10 fps is an
+  acceptable price, not whether it is possible.
+
+**2. `allowCooking` gating for `temporal` and `latches` — approved.** Small; see
+`docs/BUILD_PLAN.md` 7.2, which names the two things to handle.
+
+**3. Re-measure cook time properly.** The 0.599 ms after grouping counts only
+top-level operators and excludes the groups' children. Flat it was 1.040 ms.
+
+**Deferred to phase 2 by decision:** the remaining temporal channels —
+`hands_twist`, `steadiness`, `dwell`, `hands_scale`, and the
+swipe/wave/cross/twist events. Step 2 of the build plan lists what each needs.
 
 ## Waiting on the user
 
-- **Confirm `Triggeron`/`Triggeroff` at 0.13 / 0.17.** They tuned that against a
-  real hand against my guessed 0.40 / 0.55 — about 3× looser, and 0.40 fires while
-  the fingers are still visibly apart. Recorded in `ATTRIBUTES.md` but the shipped
-  default is unchanged, because I could not tell whether 0.13 was settled or a
-  value in passing. A measured number should replace the guess.
 - **A two-hand fixture**, for one question only now: whether real Vision's
   chirality flickers or drops out edge-on, which decides how often slot
   assignment's proximity fallback is reached.
 - **Threshold feel** generally. Every threshold not listed above is a guess.
+
+`Triggeron`/`Triggeroff` are now **0.13 / 0.17, measured and confirmed** — the only
+measured thresholds in the system, replacing a guess that was three times too loose
+and fired while the fingers were still visibly open. Treat that as the cautionary
+case for every remaining threshold: synthetic geometry validates arithmetic and
+says nothing about how a hand sits.
 
 ## Deferred by the user — decisions, not oversights
 

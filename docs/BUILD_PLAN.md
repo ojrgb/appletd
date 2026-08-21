@@ -75,7 +75,13 @@ Differentiate with `(x - x_prev) * rate`; smooth with Trail + Analyze. And a
 derivative must be *averaged* rather than smoothed to be correct at all, because
 positions update at the camera rate and are differentiated at the cook rate.
 
-### Still to build, and what each needs
+### DEFERRED TO PHASE 2, by decision 2026-08-21
+
+The remaining temporal channels are earmarked rather than next. What is built -
+presence with a real debounce, the velocity family, heading, and the closing rate -
+covers what the latches and the gesture work need.
+
+### Still to build in phase 2, and what each needs
 
 | channel | what it needs |
 |---|---|
@@ -388,11 +394,20 @@ children before claiming grouping changed anything either way.
 
 **Still to do**, both now unblocked by the grouping:
 
-- `allowCooking` gating for `temporal` and `latches`. Both are safe candidates -
-  nothing outside reads their channels except through `merge_out` - and each has
-  its clock INSIDE it, which is what makes disabling one genuinely free. `filter`
-  is not a candidate: it is in the data path, and its `Smoothing` toggle already
-  gates it properly via the bypass flag.
+- **`allowCooking` gating for `temporal` and `latches` — APPROVED 2026-08-21.**
+  Both are safe candidates: nothing outside reads their channels except through
+  `merge_out`, and each has its clock INSIDE it, which is what makes disabling one
+  genuinely free. `filter` is not a candidate - it is in the data path, and its
+  `Smoothing` toggle already gates it via the bypass flag.
+
+  Bind each group's `allowCooking` to the matching Attributes toggle. Two things to
+  handle rather than discover: `allowCooking` is an ATTRIBUTE, so a Parameter
+  Execute DAT applies it - the pattern `filter_callbacks` and
+  `lat_threshold_callbacks` already use - and a group resuming after being disabled
+  comes back with a `prev` from whenever it stopped, so the first frame after
+  re-enabling can produce one wrong edge pulse. Measured, bounded, acceptable;
+  write it into ATTRIBUTES.md beside the toggles rather than leaving it to be
+  found.
 - The channel-to-group registry for trimming disabled groups' channels out of the
   output. Now cheaper than it was: each group has one output, so the map is
   group COMP -> its own channel list, which each builder already knows.
