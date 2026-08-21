@@ -45,11 +45,16 @@ LATCH_THRESHOLDS: Final[dict[str, tuple[float, float]]] = {
     # differing per finger changes how far the thumb has to travel, not whether
     # the contact fires.
     #
-    # Deliberately a little looser than `Pinch`, because the ring and little
-    # fingers meet the thumb less squarely than the index does and a threshold
-    # tuned on the index tends to make them feel dead. GUESSED - this is one of
-    # the numbers the threshold-feel session exists to settle.
-    "Trigger": (0.40, 0.55),
+    # MEASURED against a real hand, 2026-08-21, and confirmed as settled. These
+    # replace a guess of 0.40 / 0.55 that came from synthetic geometry, where a
+    # "contact" pose puts the fingertips exactly coincident. A real fingertip and
+    # thumb in contact sit far closer than 0.40 of a hand-size apart, and 0.40
+    # fired while the fingers were still visibly open.
+    #
+    # Worth keeping as the cautionary case for every remaining guess in this file:
+    # synthetic geometry validates arithmetic and says nothing about how a hand
+    # sits. The error was a factor of three, in the direction of firing too easily.
+    "Trigger": (0.13, 0.17),
     # Grab is the ONE pair here that is not a ratio of hand size: `openness` is
     # already a 0..1 quantity - the mean of the four long-finger curls, inverted -
     # so these are absolute positions on that scale. Below `on` is a closed hand.

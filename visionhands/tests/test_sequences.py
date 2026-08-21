@@ -155,11 +155,25 @@ def test_each_sweep_crosses_both_thresholds_with_room_to_spare(name: str) -> Non
     values = _swept(name)
     assert min(values) < on, "%s never gets below Xon: min %.3f" % (channel, min(values))
     assert max(values) > off, "%s never gets above Xoff: max %.3f" % (channel, max(values))
-    # Not a value in the dead band, but many: the dead band is where the latch's
-    # memory is the only thing deciding the output, so a sweep that crosses it in
-    # one frame cannot tell a Schmitt trigger from a plain comparator.
+    # Frames INSIDE the dead band, which is where the latch's memory is the only
+    # thing deciding the output - a sweep that crosses it in a single frame cannot
+    # tell a Schmitt trigger from a plain comparator.
+    #
+    # Two is the minimum that can demonstrate a hold: one on the way in and one on
+    # the way out. This asked for eight until the `Trigger` thresholds were replaced
+    # by measured ones (0.13 / 0.17 against a guessed 0.40 / 0.55), which narrowed
+    # that band from 0.15 to 0.04 and made the ring and little sweeps fail. The
+    # tests were right and the constant was arbitrary: a narrower band legitimately
+    # gives fewer in-band frames at the same sweep rate, and demanding eight was
+    # demanding a sweep four times slower for no extra proof.
+    #
+    # The property that actually proves hysteresis is asserted separately, in
+    # test_the_state_holds_through_the_dead_band_rather_than_chattering: at least
+    # one in-band frame engaged AND at least one released.
     in_band = sum(1 for v in values if on <= v <= off)
-    assert in_band >= 8, "%s spends only %d frames in the dead band" % (channel, in_band)
+    assert in_band >= 2, ("%s spends only %d frames in its dead band (%.3f..%.3f) "
+                          "- too coarse to exercise a hold"
+                          % (channel, in_band, on, off))
 
 
 @pytest.mark.parametrize("finger", ["index", "middle", "ring", "little"])
