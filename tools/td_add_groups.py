@@ -251,8 +251,21 @@ def _page(comp, name="Attributes"):
     menu.menuNames = list(PRESETS)
     menu.menuLabels = list(PRESETS)
     menu.default = "Interaction"
-    if "Verbosity" not in was:
-        menu.val = "Interaction"
+    # ALWAYS written back, not only when the parameter is new - and this line is a
+    # bug fix. MEASURED: `appendMenu` on an EXISTING parameter resets it, and a menu
+    # resets to INDEX 0, which here is "Minimal". That is the recorded
+    # append-clobbers-a-value trap (DESIGN.md 2.11) wearing a different costume: for
+    # a menu the reset lands on the first entry rather than on zero-as-false.
+    #
+    # And it does not stay a one-parameter problem, because a Parameter Execute DAT
+    # is watching: the reset FIRED the preset callback, which correctly turned every
+    # derive group off, which took `derive_chop` to 0 channels, which left the latch
+    # bank nothing to select - the COMP output fell from 499 to 381 and every latch
+    # channel disappeared. All of it downstream of one menu quietly reverting.
+    #
+    # The toggles below are restored from `was` after this, so a preset firing here
+    # cannot have the last word.
+    menu.val = was.get("Verbosity", "Interaction")
 
     cost_gating = {name for names in COOK_GATED.values() for name in names}
     for group, default, gated in GROUPS:

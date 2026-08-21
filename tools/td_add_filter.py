@@ -266,6 +266,33 @@ def main():
         print("   then toggle Smoothing and compare")
 
 
+def _clear_keeping_ports(td, group, ports):
+    """Empty a group of its working operators but KEEP its In/Out CHOPs.
+
+    MEASURED, and it is the reason this function exists rather than a plain
+    "destroy every child": a group's In and Out CHOPs ARE its connectors, and
+    destroying the Out CHOP drops an external connection from a plain CHOP
+    consumer while leaving a COMP-to-COMP connection intact.
+
+    Reproduced deterministically: re-running the filter builder left `coords` (a
+    COMP) reading `filter` and silently disconnected `derive_chop` (a Script CHOP)
+    from the same output connector - so every derived attribute went to zero
+    channels, the COMP output fell from 499 to 366, and the builder reported
+    success. Keeping the ports makes a rebuild invisible to everything downstream,
+    whatever kind of operator it is.
+
+    `ports` names the operators to preserve; they are re-wired by the caller, since
+    what they connect to is what the rebuild changes.
+    """
+    kept = {}
+    for child in list(group.children):
+        if child.name in ports:
+            kept[child.name] = child
+        else:
+            child.destroy()
+    return kept
+
+
 def _build_one(td, master, child, stream, smoothed, passthrough, failures):
     """Build one stream's filter group. Returns (stream, chans in, chans out, ms).
 
@@ -290,9 +317,7 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures):
     group = child.op(GROUP)
     if group is None:
         group = child.create(td.baseCOMP, GROUP)
-    else:
-        for existing in list(group.children):
-            existing.destroy()
+    kept = _clear_keeping_ports(td, group, ("in1", "out1"))
     group.nodeX, group.nodeY = -400, ROW_Y
     group.color = (0.35, 0.45, 0.55)
 
@@ -301,7 +326,7 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures):
         node.nodeX, node.nodeY = x, y
         return node
 
-    group_in = group.create(td.inCHOP, "in1")
+    group_in = kept.get("in1") or group.create(td.inCHOP, "in1")
     group_in.nodeX, group_in.nodeY = -1600, 0
     group.inputConnectors[0].connect(source)
 
@@ -333,7 +358,7 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures):
     out = make(td.mergeCHOP, "out", -800)
     out.inputConnectors[0].connect(smooth)
     out.inputConnectors[1].connect(rest)
-    group_out = group.create(td.outCHOP, "out1")
+    group_out = kept.get("out1") or group.create(td.outCHOP, "out1")
     group_out.nodeX, group_out.nodeY = -600, 0
     group_out.inputConnectors[0].connect(out)
 

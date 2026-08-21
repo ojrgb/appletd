@@ -228,6 +228,29 @@ def _attach_once(merge, node, drop_names=()):
     return removed
 
 
+def _clear_keeping_ports(td, group, ports):
+    """Empty a group of its working operators but KEEP its In/Out CHOPs.
+
+    MEASURED: a group's In and Out CHOPs ARE its connectors, and destroying the Out
+    CHOP drops an external connection from a plain CHOP consumer while leaving a
+    COMP-to-COMP connection intact. Reproduced deterministically on the filter group:
+    `coords` (a COMP) kept reading it and `derive_chop` (a Script CHOP) was silently
+    disconnected, taking the COMP output from 499 channels to 366 while the builder
+    reported success. Keeping the ports makes a rebuild invisible downstream,
+    whatever kind of operator is reading.
+
+    `ports` names the operators to preserve; the caller re-wires them, since what
+    they connect to is what a rebuild changes.
+    """
+    kept = {}
+    for child in list(group.children):
+        if child.name in ports:
+            kept[child.name] = child
+        else:
+            child.destroy()
+    return kept
+
+
 def main():
     import td
 
@@ -255,9 +278,7 @@ def main():
     group = comp.op(GROUP)
     if group is None:
         group = comp.create(td.baseCOMP, GROUP)
-    else:
-        for child in list(group.children):
-            child.destroy()
+    kept = _clear_keeping_ports(td, group, ("in1", "in2", "out1", "out2"))
     group.nodeX, group.nodeY = -1100, -900
     group.color = (0.3, 0.5, 0.4)
     removed = 0
@@ -289,9 +310,9 @@ def main():
     # stream, used only for `seq`, because liveness must not depend on a filter
     # chain that could itself be misconfigured. Two In CHOPs make that visible in
     # the network instead of hidden in a path expression.
-    derived_in = group.create(td.inCHOP, "in1")
+    derived_in = kept.get("in1") or group.create(td.inCHOP, "in1")
     derived_in.nodeX, derived_in.nodeY = -1600, 0
-    raw_seq_in = group.create(td.inCHOP, "in2")
+    raw_seq_in = kept.get("in2") or group.create(td.inCHOP, "in2")
     raw_seq_in.nodeX, raw_seq_in.nodeY = -1600, -150
     group.inputConnectors[0].connect(source)
     group.inputConnectors[1].connect(comp.op("in1"))
@@ -683,10 +704,10 @@ def main():
     # The group's output. `tmp_ready` goes out too, on a second connector, because
     # the latch bank gates on it - which makes that cross-group dependency a wire
     # in the network rather than an `op('tmp_ready')` buried in an expression.
-    group_out = group.create(td.outCHOP, "out1")
+    group_out = kept.get("out1") or group.create(td.outCHOP, "out1")
     group_out.nodeX, group_out.nodeY = 400, 0
     group_out.inputConnectors[0].connect(merged)
-    ready_out = group.create(td.outCHOP, "out2")
+    ready_out = kept.get("out2") or group.create(td.outCHOP, "out2")
     ready_out.nodeX, ready_out.nodeY = 400, -150
     ready_out.inputConnectors[0].connect(ready)
 

@@ -2194,3 +2194,62 @@ bundle.
 and named; watching them move needs the camera until somebody writes a plausible
 76-point synthetic face. `Face.landmarks` is the field to fill and
 `face_channel_values` already pads what is missing, so it is additive.
+
+## Two builders that broke their own network, and the cascade one of them caused
+
+Verifying the face landmarks in TouchDesigner turned up something worse than a face
+bug: the hands stream had quietly lost 133 channels. `derive_chop` was publishing
+**0** and the COMP output read 366 instead of 499, with no error anywhere.
+
+**Bug one: a rebuild unwired its consumer, and only one of them.** Re-running
+`td_add_filter.py` left `coords` reading `filter` and disconnected `derive_chop`
+from the same output connector. Reproduced deterministically - connect, verify 87
+channels, re-run the builder, gone. The difference is what is doing the reading: a
+group's In/Out CHOPs ARE its connectors, and destroying the Out CHOP breaks a plain
+CHOP's wire while a COMP-to-COMP connection survives.
+
+That is a new measured behaviour, and it retroactively explains why the old
+`td_add_filter.py` had a "repoint every consumer" step that I deleted in the
+restructure. Deleting it was right - each consumer stating its own input is the only
+arrangement that survives a change of build order - but it was load-bearing for a
+reason I had not identified: somebody had to re-establish the wires a rebuild broke.
+The better fix is not to break them. Every group builder now PRESERVES `in1`/`out1`
+and replaces only the working operators, so a rebuild is invisible downstream
+whatever is reading.
+
+**Bug two, and this one cascaded.** After fixing that, the output was 381 with every
+latch channel missing and `derive_chop` still at 0 - but connected, and with no
+errors. The toggles told the story: `Verbosity` read **"Minimal"**, whose preset is
+exactly `(Landmarks, Coordstx)`, which is exactly the state observed.
+
+`appendMenu` on an existing parameter resets it, and a MENU resets to INDEX 0 -
+"Minimal" happens to be first in the dict. This is the recorded
+`appendFloat`-clobbers-a-value trap in a different costume, and the guard for it was
+already in the file one line away: the toggles are restored from a snapshot taken
+before the appends, but the menu was restored only `if "Verbosity" not in was` -
+i.e. only when it was NEW. Which is never, on a re-run.
+
+What makes it worth a journal entry is the amplification. A Parameter Execute DAT was
+watching `Verbosity`, so the reset did not stay a one-parameter problem: the callback
+faithfully applied the Minimal preset, which disabled every derive group, which took
+`derive()` to zero channels, which left the latch bank nothing to select. **One menu
+reverting cost 118 channels and every latch, and every operator involved behaved
+exactly as designed.** Callbacks turn a clobbered parameter into a clobbered network.
+
+The rule that covers all of it, now written into DESIGN.md 2.11: read a stored value
+before an append and write it back UNCONDITIONALLY. "Only when the parameter is new"
+is a different question from "only when the COMP is new", and both are the wrong
+question.
+
+**A workflow finding, too.** Running six builders in one `exec` raised "Invalid OP
+object. The node this python object referenced has likely been deleted" partway
+through and left the temporal group with 5 operators instead of 73 - while the
+surrounding script carried on. The same six, one per call, all succeed. They share a
+Python namespace when chained and each destroys operators the previous one's
+module-level state may still reference. One builder per call, as the docs always
+said.
+
+Verified after both fixes: 499 channels, every probe channel present, no operator
+errors, re-running `td_add_filter` and `td_add_groups` changes nothing, and
+`td_verify_latches` reports ramp **+4** with fires - releases == engaged on all five
+rows.

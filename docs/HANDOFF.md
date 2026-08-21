@@ -118,14 +118,26 @@ All measured here, all in `DESIGN.md` 2.10/2.11, restated because they recur:
 5. **TouchDesigner caches imported modules for the process's life.** Purge
    `visionhands*` from `sys.modules` at the top of any builder, or your edits are
    invisible.
-6. **A builder that repoints its CONSUMERS depends on build order, and lost.**
+6. **Re-running a group builder can silently unwire its consumers.** A group's
+   In/Out CHOPs are its connectors: destroying the Out CHOP breaks a CHOP
+   consumer's wire and leaves a COMP consumer's intact. Measured - `coords` kept
+   reading `filter` while `derive_chop` was cut loose, output 499 -> 366, builder
+   reported success. Every group builder now PRESERVES `in1`/`out1` and replaces
+   only the working operators.
+7. **`appendMenu` resets an existing menu to index 0, and a callback amplifies it.**
+   `Verbosity` reverted to "Minimal", which disabled every derive group, which took
+   `derive_chop` to 0 channels and every latch channel with it. Read stored values
+   before an append and write them back UNCONDITIONALLY.
+8. **Run builders ONE PER CALL.** Six chained in one `exec` raised "Invalid OP
+   object" and left a half-built group; the same six run individually all succeed.
+9. **A builder that repoints its CONSUMERS depends on build order, and lost.**
    `td_add_filter.py` forced a named list onto its output; two of the five names
    had moved into a group, and `derive_chop` does not exist yet when the filter is
    built - so it wired itself to the RAW input and stayed there. Every derived
    attribute was computed on unsmoothed landmarks while the coordinate spaces used
    smoothed ones. **Each consumer states its own input**, which is the only
    arrangement that cannot depend on build order.
-7. **A channel can disappear between the OSC In CHOP and the COMP output with
+10. **A channel can disappear between the OSC In CHOP and the COMP output with
    nothing saying so.** Four separate instances in one afternoon (2026-08-21):
    `merge.inputs` reports a group COMP as its inner `out1`, so a name-keyed dedup
    collapsed two groups into one and dropped 168 channels; the filter group ate

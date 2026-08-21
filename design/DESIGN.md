@@ -601,6 +601,29 @@ Against the running instance (099), not read anywhere:
   error. That is what makes shared parameters possible without `parent(N)`, which
   has to be counted per operator and breaks the next time anything moves. The
   shortcut namespace is global to the project.
+- **A group's In/Out CHOPs ARE its connectors, and destroying the Out CHOP breaks a
+  CHOP consumer's wire while leaving a COMP consumer's intact.** Reproduced
+  deterministically: re-running the filter builder left `coords` (a base COMP)
+  reading `filter` and silently disconnected `derive_chop` (a Script CHOP) from the
+  same output connector. Every derived attribute went to 0 channels, the stream
+  output fell from 499 to 366, and the builder reported success. So a rebuild must
+  PRESERVE the ports and replace only the working operators - which is a better
+  invariant than repointing consumers afterwards, because it makes a rebuild
+  invisible downstream whatever kind of operator is reading.
+- **`appendMenu` on an EXISTING parameter resets it to INDEX 0**, which is the same
+  clobbering trap as `appendFloat` wearing a different costume - for a menu the
+  reset lands on the first entry rather than on zero-as-false. And a Parameter
+  Execute DAT AMPLIFIES it: `Verbosity` reverted to "Minimal", whose callback
+  correctly disabled every derive group, which took `derive_chop` to 0 channels,
+  which left the latch bank nothing to select. One menu quietly reverting cost the
+  COMP output 118 channels and every latch. The rule for all of them: read the
+  stored value before the append and write it back after, unconditionally - "only
+  when the parameter is new" is not the same question.
+- **Do not chain builders in one `exec`.** Six of them in a single call raised
+  "Invalid OP object. The node this python object referenced has likely been
+  deleted" partway through and left a half-built group; the same six run one per
+  call all succeed. They share one Python namespace when chained, and each destroys
+  operators the previous one's module-level state may still reference.
 - **A builder that repoints its CONSUMERS depends on build order, and lost.**
   `td_add_filter.py` forced a named list of operators onto its output -
   `derive_chop`, `sel_tx`, `sel_ty`, `sel_px`, `sel_py`. Two of those failed at once:

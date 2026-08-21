@@ -504,6 +504,29 @@ def _verify_hysteresis(comp):
     return problems
 
 
+def _clear_keeping_ports(td, group, ports):
+    """Empty a group of its working operators but KEEP its In/Out CHOPs.
+
+    MEASURED: a group's In and Out CHOPs ARE its connectors, and destroying the Out
+    CHOP drops an external connection from a plain CHOP consumer while leaving a
+    COMP-to-COMP connection intact. Reproduced deterministically on the filter group:
+    `coords` (a COMP) kept reading it and `derive_chop` (a Script CHOP) was silently
+    disconnected, taking the COMP output from 499 channels to 366 while the builder
+    reported success. Keeping the ports makes a rebuild invisible downstream,
+    whatever kind of operator is reading.
+
+    `ports` names the operators to preserve; the caller re-wires them, since what
+    they connect to is what a rebuild changes.
+    """
+    kept = {}
+    for child in list(group.children):
+        if child.name in ports:
+            kept[child.name] = child
+        else:
+            child.destroy()
+    return kept
+
+
 def main():
     global THRESHOLD_DEFAULTS
     import td
@@ -548,9 +571,7 @@ def main():
     group = comp.op(GROUP)
     if group is None:
         group = comp.create(td.baseCOMP, GROUP)
-    else:
-        for child in list(group.children):
-            child.destroy()
+    kept = _clear_keeping_ports(td, group, ("in1", "in2", "out1"))
     group.nodeX, group.nodeY = -1100, -1500
     group.color = (0.5, 0.35, 0.45)
     removed = 0
@@ -580,9 +601,9 @@ def main():
     # flags every latch watches. Input 1 is `ready` from the temporal group, which
     # is what the gate ANDs in. Wired rather than looked up by name, so the
     # dependency is a line in the network.
-    derived_in = group.create(td.inCHOP, "in1")
+    derived_in = kept.get("in1") or group.create(td.inCHOP, "in1")
     derived_in.nodeX, derived_in.nodeY = -1600, ROW_Y
-    ready_in = group.create(td.inCHOP, "in2")
+    ready_in = kept.get("in2") or group.create(td.inCHOP, "in2")
     ready_in.nodeX, ready_in.nodeY = -1600, ROW_Y - 150
     group.inputConnectors[0].connect(source)
     ready_group = comp.op(READY_SOURCE)
@@ -854,7 +875,7 @@ def main():
     # One output for the whole bank - 76 channels - instead of five Merge inputs at
     # the top level. `lat_terminals` already merges everything the clock has to
     # pull, so it is exactly what should go out.
-    group_out = group.create(td.outCHOP, "out1")
+    group_out = kept.get("out1") or group.create(td.outCHOP, "out1")
     group_out.nodeX, group_out.nodeY = 600, ROW_Y - 900
     group_out.inputConnectors[0].connect(terminals)
 
