@@ -25,13 +25,14 @@ import pytest
 
 from visionhands.face_types import (
     BLANK_FACE,
-    EXPECTED_TOTAL_POINTS,
+    CONSTELLATION_DISTINCT_POINTS,
     FACE_REGION_NAMES,
     FACE_REGIONS,
     FACE_SCALARS,
     LANDMARKS_PUBLISHED,
     MAX_FACES,
     N_FACE_CHANNELS,
+    REGION_SLOT_TOTAL,
     Face,
     blank_face_frame,
     face_channel_names,
@@ -76,12 +77,20 @@ def test_no_region_carries_a_GUESSED_point_count() -> None:
     assert all(region.point_count is None for region in FACE_REGIONS)
 
 
-def test_the_counts_must_sum_to_the_constellation_total() -> None:
-    """The check that catches a typo in a pasted table: the request is pinned to the
-    76-point constellation, so the parts have to add up to the whole."""
+def test_the_counts_sum_to_the_SLOT_total_not_the_distinct_one() -> None:
+    """The distinction that made the first attempt at this table fail its own check.
+
+    MEASURED: 76 DISTINCT coordinates, 87 region SLOTS, because the regions are not
+    a partition - `medianLine` shares points with five other regions and the nose
+    tip sits in three. So the sum legitimately exceeds the constellation's total,
+    and checking against 76 refused a correctly-measured table.
+    """
     if not LANDMARKS_PUBLISHED:
         pytest.skip("counts not measured yet")
-    assert sum(r.point_count or 0 for r in FACE_REGIONS) == EXPECTED_TOTAL_POINTS
+    assert sum(r.point_count or 0 for r in FACE_REGIONS) == REGION_SLOT_TOTAL
+    assert REGION_SLOT_TOTAL > CONSTELLATION_DISTINCT_POINTS
+    # The 11 duplicates are the price of named points, and they are deliberate.
+    assert REGION_SLOT_TOTAL - CONSTELLATION_DISTINCT_POINTS == 11
 
 
 def test_a_half_filled_table_is_refused_at_import(
@@ -94,10 +103,28 @@ def test_a_half_filled_table_is_refused_at_import(
     """
     from visionhands import face_types
 
+    # One count REMOVED, now that they are all measured: eleven filled and one None
+    # is the state a half-finished edit leaves behind, and it is the one that would
+    # publish some regions and silently omit others.
     half = list(FACE_REGIONS)
-    half[0] = dataclasses.replace(half[0], point_count=11)
+    half[0] = dataclasses.replace(half[0], point_count=None)
     monkeypatch.setattr(face_types, "FACE_REGIONS", tuple(half))
     with pytest.raises(RuntimeError, match="Fill in ALL of them or none"):
+        face_types._self_check()
+
+
+def test_a_mistyped_count_is_refused_at_import(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard that matters now the table is full: a full table whose counts do not
+    sum to the measured slot total. A wrong count does not shift a value, it shifts
+    every LATER channel onto the wrong data - so it has to fail at import rather
+    than in a channel list."""
+    from visionhands import face_types
+
+    typo = list(FACE_REGIONS)
+    typo[0] = dataclasses.replace(typo[0], point_count=71)      # 17 fat-fingered
+    monkeypatch.setattr(face_types, "FACE_REGIONS", tuple(typo))
+    with pytest.raises(RuntimeError, match="region slots"):
         face_types._self_check()
 
 
@@ -110,13 +137,17 @@ def test_every_region_has_a_distinct_accessor() -> None:
 # ---------------------------------------------------------------------------
 # The channel list
 # ---------------------------------------------------------------------------
-def test_the_channel_list_is_head_pose_and_box_for_now() -> None:
-    """23 channels: 3 frame scalars plus 10 per face. It grows once - when the point
-    counts land - and that growth happens before anything consumes the stream,
-    which is why `Streamface` ships off."""
+def test_the_channel_count_is_what_the_table_implies() -> None:
+    """371 with the landmarks published: 3 frame scalars, 10 per face, and 87 region
+    slots x 2 axes x 2 faces. MEASURED at 12,208 bytes on the wire - 75% of a 16 KB
+    datagram, which makes this stream the size constraint and MAX_FACES = 2 the
+    ceiling for a single bundle (visionhands/osc.py)."""
     assert N_FACE_CHANNELS == len(face_channel_names())
-    if not LANDMARKS_PUBLISHED:
-        assert N_FACE_CHANNELS == 3 + MAX_FACES * len(FACE_SCALARS) == 23
+    scalars = 3 + MAX_FACES * len(FACE_SCALARS)
+    if LANDMARKS_PUBLISHED:
+        assert N_FACE_CHANNELS == scalars + MAX_FACES * REGION_SLOT_TOTAL * 2 == 371
+    else:
+        assert N_FACE_CHANNELS == scalars == 23
 
 
 def test_names_and_values_stay_the_same_length() -> None:

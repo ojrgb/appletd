@@ -696,7 +696,35 @@ published as a faithful mirror and must not be gated on until measured;
 
 ---
 
+### 2.13 The UDP datagram ceiling is the SEND buffer, measured
+
+Found by the face contract growing to 371 channels and simply not arriving.
+
+```
+net.inet.udp.maxdgram              9216 bytes
+a UDP socket's default SO_SNDBUF   9216 bytes
+sendto() of 12208 bytes            REFUSED - not fragmented, not truncated
+```
+
+**Raising `SO_SNDBUF` on the SENDER removes the limit entirely, with no
+privileges:** 65000 bytes sent and received on loopback. And the RECEIVER needs
+nothing — a socket with the default buffer accepted 20000 bytes — which is the only
+reason this is fixable at all, since TouchDesigner owns the receiving end and we
+cannot configure it. `osc.datagram_socket()` is what every sender uses now.
+
+**How it presented, which is the part worth remembering.** Two streams kept working
+perfectly and the third one's channels never appeared in TouchDesigner. Nothing in
+the sidecar's own reporting distinguishes "the socket refused a datagram" from
+"nobody is sending", so it read as a broken stream rather than a wrong socket
+option. The test suite caught it before TouchDesigner did, because a bound socket in
+a test refuses the same datagram.
+
+Measured bundle sizes, for the next time a contract grows: hands 4188 bytes (141
+channels), pose 3720 (123), face **12208** (371). At roughly 33 bytes per channel, a
+default socket tops out near 280 channels.
+
 ---
+
 
 ## 3. Traps — all of these cost real time in the spike
 
@@ -1097,26 +1125,44 @@ not cross over, costs one sort, and holds no state. Real tracking through a
 crossing is the same proximity fallback `slots.py` already has and is phase 2 —
 with one person, which is the case this was built for, the question does not arise.
 
-**Face contract, and the one number it is missing.** 23 channels today, prefix
-`f{i}_`, `MAX_FACES = 2`:
+**Face contract.** **371 channels**, prefix `f{i}_`, `MAX_FACES = 2`:
 
 ```
 face_n, face_seq, face_age_ms
 f<i>_found, f<i>_score, f<i>_quality
 f<i>_roll, f<i>_yaw, f<i>_pitch                  DEGREES, converted from radians
 f<i>_bbox_x, f<i>_bbox_y, f<i>_bbox_w, f<i>_bbox_h    normalised, y = BOTTOM edge
+f<i>_<region>_<nn>_x, _y                         87 slots per face, 12 regions
 ```
 
-**The 76 landmark points are not in it, and that is deliberate.** A face does not
-come back as a joint table: `VNFaceObservation.landmarks()` gives 12 named REGIONS,
-each with its own `pointCount`, and **nothing in the framework publishes those
-counts before a face has been observed** (§2.12). The constellation pins the total
-at 76 and says nothing about the split. A guessed split does not fail — it lays a
-nose's points into an eyebrow's channels and looks entirely plausible — so
-`face_types.py` carries the 12 regions with `point_count = None`, publishes no
-landmark channels while any is None, and `tools/probe_face_regions.py` settles it
-from one camera frame without writing an image. Filling the counts in grows the
-channel list once, before anything consumes it, which is why `Streamface` ships off.
+**The landmark counts had to be MEASURED, and they were not what a guess would
+give.** A face does not come back as a joint table: `VNFaceObservation.landmarks()`
+gives 12 named REGIONS, each with its own `pointCount`, and nothing in the framework
+publishes those counts before a face has been observed (§2.12). So `face_types.py`
+carried them as `None` and published no landmark channels until
+`tools/probe_face_regions.py` asked a real face. MEASURED 2026-08-21:
+
+```
+sum of the 12 regions   87 slots
+DISTINCT coordinates    76           <- what "the 76-point constellation" means
+```
+
+**The regions OVERLAP.** `medianLine` shares points with `noseCrest` (4), `nose`
+(2), `outerLips` (2), `innerLips` (2) and `faceContour` (1), and `nose` shares one
+more with `noseCrest` — twelve pair-overlaps for eleven duplicate points, so nine
+points sit in two regions and one, the nose tip, sits in three. The channel list is
+built from the 87 SLOTS, so those 11 points are published twice under both region
+names: the price of `f0_nose_crest_00_x` over `f0_lm43_x`, and the same trade §6.2
+made for hands.
+
+The first self-check written for this REFUSED the correctly-measured table, because
+it asserted that the regions partition the constellation. They do not. Worth
+remembering as a shape of mistake: the guess that got caught was in the check, not
+in the data.
+
+**12208 bytes on the wire, which is over a default UDP send buffer** (§2.13). That
+makes face the size-constrained stream and `MAX_FACES = 2` the practical ceiling for
+one bundle.
 
 **Two units traps on the face path**, both silent, both handled in `face.py`:
 `roll`/`yaw`/`pitch` arrive in RADIANS and every angle in this system is degrees

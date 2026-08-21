@@ -34,7 +34,6 @@ DESIGN.md 6.2 (the channel contract), docs/ATTRIBUTES.md (the thresholds swept).
 from __future__ import annotations
 
 import argparse
-import socket
 import subprocess
 import sys
 import time
@@ -44,7 +43,7 @@ from pathlib import Path
 # Insert the repo root so `visionhands` imports, exactly as the other tools do.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from visionhands.osc import encode_channels
+from visionhands.osc import datagram_socket, encode_channels
 from visionhands.sequences import SEQUENCES, frames
 from visionhands.sidecar import DEFAULT_HOST, DEFAULT_PORT, SEQ_MODULUS
 from visionhands.slots import SLOT_MODE_CHIRALITY, SLOT_MODES, SlotAssigner
@@ -144,7 +143,7 @@ def send(sequence_name: str, host: str, port: int, fps: float,
     # that no end-to-end test could reach - it lives in the engine, and this tool
     # bypasses the engine entirely.
     assigner = SlotAssigner(slot_mode)
-    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp = datagram_socket()
     sent = 0
     started = time.monotonic()
     last_status = started

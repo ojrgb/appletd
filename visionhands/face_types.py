@@ -13,22 +13,24 @@ publishes those counts before a face has been seen**. The constellation is
 selectable - 65 or 76 points, default 76 - so the TOTAL is pinned by our own
 request, but the split across regions is not.
 
-So this module publishes the part that is knowable today and refuses to invent the
-rest:
+So this module shipped in two stages, and the second one is the reason the first
+was worth the trouble:
 
   * `FACE_SCALARS` - found, confidence, capture quality, roll/yaw/pitch, and the
     bounding box. All of it comes off the observation itself, needs no landmarks,
-    and is verified against the live framework at start-up by `face.py`.
-  * `FACE_REGIONS` - the 12 region names, with `point_count = None`. A None means
-    "not measured yet", and while any is None the landmark channels are NOT
-    published at all. There is no guessed count anywhere in this file, because a
-    guessed count does not fail loudly - it lays a nose's points into an eyebrow's
-    channels and looks entirely plausible.
+    and is verified against the live framework at start-up by `face.py`. 23 channels.
+  * `FACE_REGIONS` - the 12 regions, whose point counts sat at `None` for as long as
+    nobody had measured them. **MEASURED 2026-08-21** by
+    `tools/probe_face_regions.py` against a real face, and the numbers were not what
+    a reasonable guess would have produced: the regions sum to 87 slots over 76
+    distinct points, because they OVERLAP. 371 channels now.
 
-TO FILL THE COUNTS IN: run `tools/probe_face_regions.py`, which asks the camera for
-one face, prints each region's `pointCount`, writes no image and keeps nothing.
-Paste the numbers in, and the landmark channels appear. That is the whole change -
-`face_channel_names()` is already written to emit them.
+There is no guessed count anywhere in this file, and the reason to hold that line
+was borne out: a guessed count does not fail loudly - it lays a nose's points into
+an eyebrow's channels and looks entirely plausible - and the first self-check this
+module carried was written around an assumption (that the regions partition the
+constellation) that turned out to be false. To RE-measure, on another macOS or after
+a Vision update, run the probe again; it prints a paste-ready table.
 
 ANGLES ARE DEGREES HERE AND RADIANS IN VISION. Every angle in this system is
 degrees (docs/ATTRIBUTES.md), and `roll`/`yaw`/`pitch` arrive in radians. The
@@ -61,10 +63,10 @@ class FaceRegionSpec:
     """One landmark region, and how many points it carries.
 
     `accessor` is the selector on `VNFaceLandmarks2D`; `name` is ours, and appears
-    in the channel names. `point_count` is None until somebody measures it - see the
-    module docstring. Nothing here may be filled in from memory or from a blog post:
-    the number has to come off the framework on this machine, because a wrong one
-    silently lays one region's points into another's channels.
+    in the channel names. `point_count` stays None until somebody MEASURES it -
+    nothing here may be filled in from memory or from a blog post, because a wrong
+    count silently lays one region's points into another's channels. The counts
+    below were measured on 2026-08-21; `tools/probe_face_regions.py` re-measures.
     """
 
     name: str
@@ -77,18 +79,21 @@ class FaceRegionSpec:
 # the counts land, so it is pinned by a test now rather than after a project
 # references it.
 FACE_REGIONS: Final[tuple[FaceRegionSpec, ...]] = (
-    FaceRegionSpec("face_contour", "faceContour"),
-    FaceRegionSpec("median_line", "medianLine"),
-    FaceRegionSpec("left_eyebrow", "leftEyebrow"),
-    FaceRegionSpec("right_eyebrow", "rightEyebrow"),
-    FaceRegionSpec("left_eye", "leftEye"),
-    FaceRegionSpec("right_eye", "rightEye"),
-    FaceRegionSpec("left_pupil", "leftPupil"),
-    FaceRegionSpec("right_pupil", "rightPupil"),
-    FaceRegionSpec("nose", "nose"),
-    FaceRegionSpec("nose_crest", "noseCrest"),
-    FaceRegionSpec("outer_lips", "outerLips"),
-    FaceRegionSpec("inner_lips", "innerLips"),
+    # MEASURED 2026-08-21 by tools/probe_face_regions.py, against a real face on
+    # this machine: pyobjc 12.2.2 / macOS 26.5.2, request revision 3, constellation
+    # 76 points. Not copied from anywhere.
+    FaceRegionSpec("face_contour", "faceContour", 17),
+    FaceRegionSpec("median_line", "medianLine", 10),
+    FaceRegionSpec("left_eyebrow", "leftEyebrow", 6),
+    FaceRegionSpec("right_eyebrow", "rightEyebrow", 6),
+    FaceRegionSpec("left_eye", "leftEye", 6),
+    FaceRegionSpec("right_eye", "rightEye", 6),
+    FaceRegionSpec("left_pupil", "leftPupil", 1),
+    FaceRegionSpec("right_pupil", "rightPupil", 1),
+    FaceRegionSpec("nose", "nose", 8),
+    FaceRegionSpec("nose_crest", "noseCrest", 6),
+    FaceRegionSpec("outer_lips", "outerLips", 14),
+    FaceRegionSpec("inner_lips", "innerLips", 6),
 )
 
 FACE_REGION_NAMES: Final[tuple[str, ...]] = tuple(r.name for r in FACE_REGIONS)
@@ -98,11 +103,30 @@ FACE_REGION_NAMES: Final[tuple[str, ...]] = tuple(r.name for r in FACE_REGIONS)
 # which is the part that is knowable without a face in front of the camera.
 LANDMARKS_PUBLISHED: Final = all(r.point_count is not None for r in FACE_REGIONS)
 
-# What the request is pinned to, so the TOTAL point count is ours to choose rather
-# than something to discover. MEASURED: the request's default constellation is 2,
-# which is `VNRequestFaceLandmarksConstellation76Points`.
+# What the request is pinned to, so the point count is ours to choose rather than
+# something to discover. MEASURED: the request's default constellation is 2, which
+# is `VNRequestFaceLandmarksConstellation76Points`.
 CONSTELLATION_76: Final = 2
-EXPECTED_TOTAL_POINTS: Final = 76
+
+# TWO totals, and conflating them is what made the first attempt at this table fail
+# its own self-check. MEASURED 2026-08-21, both:
+#
+#   76  DISTINCT coordinates across all 12 regions - which is what "the 76-point
+#       constellation" means;
+#   87  region SLOTS, because the regions are not a partition. `medianLine` runs
+#       down the centre of the face and shares points with `noseCrest` (4), `nose`
+#       (2), `outerLips` (2), `innerLips` (2) and `faceContour` (1), and `nose`
+#       shares one more with `noseCrest`. Twelve pair-overlaps for eleven duplicate
+#       points, which means nine points sit in two regions and one sits in three -
+#       the nose tip.
+#
+# The channel list is built from the SLOT total, so 11 points are published twice,
+# under both of their regions' names. That is the price of `f0_nose_crest_00_x`
+# instead of `f0_lm43_x`, and it is the same trade DESIGN.md 6.2 made for hands:
+# "which one is lm43" is exactly the question a name should answer. 44 duplicate
+# channels across two faces, against a translation layer in every project.
+CONSTELLATION_DISTINCT_POINTS: Final = 76
+REGION_SLOT_TOTAL: Final = 87
 
 
 @dataclass(frozen=True)
@@ -227,12 +251,15 @@ _FRAME_SCALARS: Final = ("face_n", "face_seq", "face_age_ms")
 def face_channel_names() -> tuple[str, ...]:
     """The complete, fixed face channel list, in publication order.
 
-    Contract: 3 + MAX_FACES * len(FACE_SCALARS) today, which is 23. When the region
-              point counts are measured it grows by MAX_FACES * 2 * total_points,
-              and that growth is a ONE-TIME event before anything consumes the
-              stream - `Streamface` ships off and the `visionface` COMP does not
-              exist in any project yet. After that the list is fixed like every
-              other one here (DESIGN.md 6.2).
+    Contract: 3 + MAX_FACES * (len(FACE_SCALARS) + REGION_SLOT_TOTAL * 2), which is
+              **371**. It was 23 until the point counts were measured, and that
+              growth was a one-time event before anything consumed the stream -
+              `Streamface` ships off and the COMP was new. The list is fixed now,
+              like every other one here (DESIGN.md 6.2).
+    Size: 12208 bytes on the wire, MEASURED - which is 75% of a 16 KB datagram and
+              MORE than a default UDP send buffer allows. `osc.datagram_socket()` is
+              what makes it sendable, and MAX_FACES = 2 is the practical ceiling for
+              one bundle.
     """
     names: list[str] = list(_FRAME_SCALARS)
     for face_i in range(MAX_FACES):
@@ -307,12 +334,19 @@ def _self_check() -> None:
             % (len(counted), len(FACE_REGIONS)))
     if LANDMARKS_PUBLISHED:
         total = sum(r.point_count or 0 for r in FACE_REGIONS)
-        if total != EXPECTED_TOTAL_POINTS:
+        if total != REGION_SLOT_TOTAL:
+            # The SLOT total, not the constellation's 76: the regions overlap, so
+            # the sum legitimately exceeds the number of distinct points. Checking
+            # against 76 here is what refused the correctly-measured table on the
+            # first attempt. This still catches the thing worth catching - a typo in
+            # a pasted count.
             raise RuntimeError(
-                "the region point counts sum to %d, but the request is pinned to "
-                "the %d-point constellation. One of the two is wrong, and the "
-                "channel list is built from these numbers."
-                % (total, EXPECTED_TOTAL_POINTS))
+                "the region point counts sum to %d, expected %d region slots "
+                "(%d distinct points plus %d carried under two names). A count has "
+                "been mistyped, or this macOS reports a different constellation - "
+                "re-run tools/probe_face_regions.py."
+                % (total, REGION_SLOT_TOTAL, CONSTELLATION_DISTINCT_POINTS,
+                   REGION_SLOT_TOTAL - CONSTELLATION_DISTINCT_POINTS))
     names = face_channel_names()
     if len(set(names)) != len(names):
         raise RuntimeError("duplicate face channel name")

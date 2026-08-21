@@ -591,7 +591,7 @@ distance between two pose joints is measuring how far away the person is standin
 
 ## The face stream — head pose and a box, on a third port
 
-Built 2026-08-21. `visionface` is plumbing only: **23 channels**, no derived
+Built 2026-08-21. `visionface` is plumbing only: **387 channels**, no derived
 attributes. Build it with `tools/td_build_vision.py`; drive it with the Face
 Stream toggle, or with `tools/send_synthetic_face.py` and no camera.
 
@@ -635,15 +635,43 @@ near face has a wide box and would sort left of a face that is genuinely further
 left. Two faces that cross over exchange slots; `send_synthetic_face.py two` does
 exactly that so the limit is visible rather than surprising.
 
-**THE 76 LANDMARK POINTS ARE NOT HERE YET**, and the reason is worth reading before
-adding them yourself. A face does not come back as a joint table - it comes back as
-12 named regions, each with its own point count, and nothing in Vision publishes
-those counts until a face has been seen. A guessed count lays one region's points
-into another's channels and looks completely plausible. So: run
-`tools/probe_face_regions.py` once, with your own face in front of the camera - it
-prints integers, writes no image, keeps nothing - paste the counts into
-`visionhands/face_types.py`, and the landmark channels appear. That will grow this
-channel list once, which is safe precisely because the stream ships off.
+### The 76 landmark points
+
+MEASURED 2026-08-21 and published: `f<i>_<region>_<nn>_x` / `_y`, over 12 regions.
+
+```
+face_contour  17   median_line   10   left_eyebrow  6   right_eyebrow  6
+left_eye       6   right_eye      6   left_pupil    1   right_pupil    1
+nose           8   nose_crest     6   outer_lips   14   inner_lips     6
+```
+
+**87 slots over 76 distinct points, because the regions overlap.** `median_line`
+shares points with `nose_crest` (4), `nose` (2), both lip rings (2 each) and
+`face_contour` (1); `nose` shares one more with `nose_crest`. Eleven points are
+therefore published TWICE, under both of their regions' names - which is the price
+of `f0_nose_crest_00_x` instead of `f0_lm43_x`, and the same trade the hand contract
+made. If you sum two regions expecting disjoint sets, you will double-count those
+eleven.
+
+**These points are normalised to the FACE'S BOUNDING BOX, not to the image.** That
+is what `normalizedPoints` means, and it is why they have no `_tx`/`_px` companions:
+transforming them with the image rules would put every facial feature in one corner
+of the frame. To place one in the image, compose it through the box:
+
+```
+image_x = f0_bbox_x + point_x * f0_bbox_w
+image_y = f0_bbox_y + point_y * f0_bbox_h
+```
+
+**387 channels in total** on this COMP - 371 from the wire plus 16 transformed box
+components. The bundle is 12208 bytes, which is more than a default UDP socket will
+send; `visionhands/osc.py` raises the send buffer, and `MAX_FACES = 2` is the
+practical ceiling for one datagram.
+
+`tools/send_synthetic_face.py` leaves the landmark channels at zero - the
+synthesiser has a box and three angles, not a face - so the way to watch them move
+is the Face Stream toggle and a camera. `tools/probe_face_regions.py` re-measures
+the counts on another machine or after a Vision update.
 
 ### The sidecar's own status channels
 

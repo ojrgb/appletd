@@ -51,7 +51,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from visionhands.face_types import EXPECTED_TOTAL_POINTS, FACE_REGIONS
+from visionhands.face_types import CONSTELLATION_DISTINCT_POINTS, FACE_REGIONS
 
 # How long to wait for a face before giving up. Long enough to walk into frame,
 # short enough that a forgotten process releases the camera on its own.
@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Imported here, not at module scope: this is the one tool that pulls in
     # pyobjc, and a `--help` should not.
-    from visionhands.face import region_point_counts
+    from visionhands.face import region_point_report
     from visionhands.source import InProcessSource
     from visionhands.streams import STREAM_FACE
 
@@ -93,11 +93,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     deadline = time.monotonic() + args.timeout
-    counts: dict[str, int] = {}
+    report: dict[str, object] = {}
     try:
-        while time.monotonic() < deadline and not counts:
+        while time.monotonic() < deadline and not report:
             time.sleep(POLL_INTERVAL_S)
-            counts = region_point_counts(source.latest_face())
+            report = region_point_report(source.latest_face())
             faces = sum(1 for face in source.latest_face().faces if face.found)
             print("  waiting... faces in frame: %d" % faces, end="\r", flush=True)
     finally:
@@ -106,40 +106,70 @@ def main(argv: list[str] | None = None) -> int:
         source.stop()
     print()
 
-    if not counts:
+    if not report:
         print("no face was seen in %.0f s, so there is nothing to report."
               % args.timeout)
         for error in source.errors:
             print("  engine error: %s" % error)
         return 1
 
+    counts = report["counts"]
+    assert isinstance(counts, dict)
     print("MEASURED on this machine, %s:" % time.strftime("%Y-%m-%d"))
     print()
-    total = 0
     for region in FACE_REGIONS:
         count = counts.get(region.name)
-        total += count or 0
         print('    FaceRegionSpec("%s", "%s", %s),'
               % (region.name, region.accessor,
                  "None  # NOT REPORTED" if count is None else count))
     print()
-    print("total: %d points (the 76-point constellation expects %d)"
-          % (total, EXPECTED_TOTAL_POINTS))
-    if total != EXPECTED_TOTAL_POINTS:
-        print("MISMATCH. Do not paste these in until it is understood: the channel")
-        print("list is built from them, and face_types.py's self-check will refuse")
-        print("a table that does not sum to the constellation's total.")
-        return 1
+
+    total, distinct = report["sum"], report["distinct_rounded"]
+    assert isinstance(total, int) and isinstance(distinct, int)
+    print("sum of the regions:     %d points" % total)
+    print("DISTINCT coordinates:   %d points  (exact: %s)"
+          % (distinct, report["distinct_exact"]))
+    print("the constellation says: %d points" % CONSTELLATION_DISTINCT_POINTS)
+    print()
+
+    overlaps = report["overlaps"]
+    assert isinstance(overlaps, dict)
+    if overlaps:
+        # The explanation the first run of this tool could not give: regions that
+        # share points make the sum exceed the constellation's total without either
+        # number being wrong.
+        print("regions that SHARE points (%d pairs):" % len(overlaps))
+        for pair, shared in sorted(overlaps.items(), key=lambda kv: -kv[1]):
+            print("    %-34s %d shared" % (pair, shared))
+        print()
+    else:
+        print("no region shares a point with another - the regions are DISJOINT.")
+        print()
+
+    if distinct == CONSTELLATION_DISTINCT_POINTS:
+        print("So the constellation total is intact and the regions overlap: %d - %d"
+              % (total, CONSTELLATION_DISTINCT_POINTS))
+        print("= %d points carried under two names. Publishing per REGION means"
+              % (total - CONSTELLATION_DISTINCT_POINTS))
+        print("those %d appear twice, which is the price of every point having a"
+              % (total - CONSTELLATION_DISTINCT_POINTS))
+        print("meaningful name instead of an index.")
+    elif total == distinct:
+        print("The regions are disjoint and carry %d distinct points, which is NOT"
+              % total)
+        print("the %d the constellation constant implies. That assumption is what"
+              % CONSTELLATION_DISTINCT_POINTS)
+        print("has to change - not these numbers.")
+    else:
+        print("Neither figure matches the constellation. Do not paste anything in")
+        print("until this is understood: the channel list is built from it.")
+    print()
     unnamed = sorted(set(counts) - {r.name for r in FACE_REGIONS})
     if unnamed:
         print("this Vision also reported regions our table does not name: %s"
               % unnamed)
-    print()
-    print("Paste the block above over FACE_REGIONS in visionhands/face_types.py,")
-    print("then re-run tools/td_add_filter.py - that is what classifies the new")
-    print("channels, and anything it does not classify is dropped silently.")
-    print("The coordinate builder needs no re-run: face landmarks are normalised")
-    print("to the BOUNDING BOX, not the image, so they are not transformed.")
+    print("Send this whole block back before pasting: the counts are the easy half,")
+    print("and what they SUM to decides the shape of the contract.")
     return 0
 
 

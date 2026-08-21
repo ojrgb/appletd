@@ -71,7 +71,6 @@ from __future__ import annotations
 import argparse
 import os
 import signal
-import socket
 import sys
 import time
 from collections.abc import Callable
@@ -82,7 +81,7 @@ from visionhands.face_types import (
     face_channel_names,
     face_channel_values,
 )
-from visionhands.osc import encode_channels
+from visionhands.osc import datagram_socket, encode_channels
 from visionhands.pose_types import blank_pose_frame, pose_channel_names, pose_channel_values
 from visionhands.slots import SLOT_MODE_CHIRALITY, SLOT_MODES
 from visionhands.source import (
@@ -184,7 +183,11 @@ class Sidecar:
         # UDP: this is a stream of the most recent state, and a retransmitted
         # stale frame is worth less than the next fresh one. Loss on loopback is
         # not a practical concern, and `seq` makes any loss visible downstream.
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Through the helper, which raises SO_SNDBUF: the default 9216-byte send
+        # buffer is a hard ceiling on the DATAGRAM, and the face bundle is 12208
+        # (MEASURED, osc.py). Without it that stream's channels never appear in
+        # TouchDesigner while the other two work perfectly.
+        self.socket = datagram_socket()
         self.names = channel_names()
         # Sent on the BASE port, with the hands bundle - a status channel that
         # travelled only on an optional stream's port would vanish exactly when

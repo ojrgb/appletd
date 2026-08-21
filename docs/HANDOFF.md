@@ -1,6 +1,6 @@
 # Handoff — 2026-08-21
 
-**342 tests**, `ruff check` and `mypy visionhands` clean. Working tree clean apart
+**345 tests**, `ruff check` and `mypy visionhands` clean. Working tree clean apart
 from `tools/vision_landmarks.py` and `tools/vision_landmarks_live.py`, which are
 the user's own untracked files — leave them alone.
 
@@ -9,12 +9,12 @@ TouchDesigner with no camera. See `docs/BUILD_PLAN.md` step 5 and the last two
 journal entries. **Four separate silent channel losses** came out of the pose work,
 three in code that already existed; they are all in `DESIGN.md` 2.11 now.
 
-**One thing is deliberately unfinished and it needs ten seconds of camera:** the
-face stream publishes head pose and the bounding box but NOT the 76 landmark points,
-because their split across the 12 regions cannot be known before a face has been
-observed and a guessed split misaligns a region invisibly.
-`tools/probe_face_regions.py` prints the counts from one frame, writes no image, and
-keeps nothing. That is the only outstanding piece of the streams work.
+**The face landmark counts were measured on 2026-08-21** and all 76 points are
+published: 371 channels on the wire, 387 after the coordinate spaces. Two findings
+came with them - the regions OVERLAP, 87 slots over 76 distinct points, which no
+guess would have produced; and the bundle at 12208 bytes exceeds a default UDP send
+buffer, so nothing arrived at all until `osc.datagram_socket()` raised it.
+`DESIGN.md` 2.13 and 6.4.
 
 ## Read these, in this order
 
@@ -39,7 +39,7 @@ and 6.5):
     /project1/vision          every parameter, six pages, the sidecar control
       hands_osc 10000  ->  hands  ->  out1     499 channels
       pose_osc  10001  ->  pose   ->  out2     275
-      face_osc  10002  ->  face   ->  out3      39
+      face_osc  10002  ->  face   ->  out3     387
       status                                   the sidecar's own sc_* channels
 
 **Paths changed in that restructure:** `/project1/visionhands` is now
@@ -142,18 +142,14 @@ when the real number was 1.030.
 
 ## Next
 
-**1. The face landmark points — ten seconds of camera, then one paste.** Everything
-else about the face stream is built and verified. Run, with a face in frame:
+**1. A plausible synthetic face**, so the landmark channels can be exercised without
+a camera. The counts are measured and all 76 points are published, but
+`visionhands/synth_face.py` still emits a box and three angles - so
+`send_synthetic_face.py` leaves 304 of the 371 channels flat, and the only way to
+watch a landmark move is the Face Stream toggle and a camera. `Face.landmarks` is
+the field to fill; `face_channel_values` already pads whatever is missing with
+zeros, so nothing else has to change.
 
-    ~/.venvs/visionhands/bin/python tools/probe_face_regions.py
-
-It prints a `FaceRegionSpec` block, writes no image and keeps nothing. Paste it over
-`FACE_REGIONS` in `visionhands/face_types.py`, re-run `tools/td_add_filter.py` -
-which is what classifies the new channels, and anything it does not classify is
-dropped silently - and the 76 points appear as channels. The coordinate builder
-needs no re-run: those points are box-relative, so they are not transformed. The self-check refuses a half-filled table and
-one that does not sum to 76, so a typo fails at import. **Ask before running it** —
-it is the only tool in the repo that opens the camera.
 
 **2. An attribute layer for pose or face, if either is wanted.** There is none: no
 derived channels, no filtering, no temporal channels, and nothing depth-invariant.

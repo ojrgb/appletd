@@ -5,14 +5,15 @@ the conversion out of pyobjc, and it does NOT own the camera - `engine.py` hands
 a sample buffer that has already been delivered, so every enabled stream sees the
 same frame and shares its `seq` (DESIGN.md 6.4).
 
-WHAT IT PUBLISHES, and what it deliberately does not. The observation's own
-numbers - confidence, capture quality, roll, yaw, pitch and the bounding box - are
-published now. The 76 LANDMARK POINTS are not, because their split across the 12
+WHAT IT PUBLISHES: the observation's own numbers - confidence, capture quality,
+roll, yaw, pitch and the bounding box - and, since the region point counts were
+MEASURED on 2026-08-21, all 76 landmark points across the 12 regions. 371 channels.
+
+The points spent a day unpublished on purpose, because their split across the
 regions cannot be known before a face has been seen and this repo does not ship
-guessed constants (`face_types.py` has the whole argument, and
-`tools/probe_face_regions.py` is how it gets settled). The conversion below reads
-the regions anyway and records what it found, so the moment the counts are filled
-in the points flow with no further work.
+guessed constants. `face_types.py` has that argument and the measurement, and it was
+worth holding: the regions turned out to OVERLAP - 87 slots over 76 distinct
+points - which no reasonable guess would have produced.
 
 THE TWO UNITS TRAPS, both silent:
 
@@ -189,6 +190,55 @@ def face_frame_from_observations(observations: list[ObjCObject], seq: int,
     faces = [face_from_observation(observation) for observation in observations]
     return FaceFrame(seq=seq, captured_at=captured_at, width=width_px,
                      height=height_px, faces=order_faces(faces))
+
+
+def region_point_report(frame: FaceFrame) -> dict[str, object]:
+    """What the regions actually contain, for the FIRST found face. Pure.
+
+    The measurement that had to come after the counts, because the counts alone
+    produced an arithmetic that did not add up: the 12 regions summed to 87 points
+    on a request pinned to the 76-point constellation (MEASURED 2026-08-21). Two
+    explanations fit, and they lead to different channel contracts:
+
+      * the regions SHARE points - `medianLine` runs down the centre of the face and
+        could plausibly repeat points that `faceContour`, `nose` and `noseCrest`
+        also carry - in which case 87 is the sum with 11 duplicates and the
+        constellation total is intact;
+      * or the regions are disjoint and the "76-point constellation" does not mean
+        what we assumed, in which case the total is 87 and the assumption goes.
+
+    Distinct COORDINATES answer it without needing `allPoints`: if the distinct
+    count is 76, the regions overlap.
+
+    Returns counts per region, the sum, the distinct-coordinate count both exactly
+    and rounded, and every overlapping pair with how many points it shares. Rounded
+    as well as exact because two regions carrying "the same" point could differ in
+    the last bit if Vision computes them separately - an almost-duplicate is a
+    different finding from a duplicate, and it should be visible rather than
+    rounded away silently.
+    """
+    for face in frame.faces:
+        if not (face.found and face.landmarks):
+            continue
+        counts = {name: len(points) for name, points in face.landmarks}
+        every: list[tuple[float, float]] = [
+            point for _name, points in face.landmarks for point in points]
+        rounded = [(round(x, 6), round(y, 6)) for x, y in every]
+        overlaps = {}
+        for i, (name_a, points_a) in enumerate(face.landmarks):
+            for name_b, points_b in face.landmarks[i + 1:]:
+                shared = len({(round(x, 6), round(y, 6)) for x, y in points_a}
+                             & {(round(x, 6), round(y, 6)) for x, y in points_b})
+                if shared:
+                    overlaps["%s + %s" % (name_a, name_b)] = shared
+        return {
+            "counts": counts,
+            "sum": len(every),
+            "distinct_exact": len(set(every)),
+            "distinct_rounded": len(set(rounded)),
+            "overlaps": overlaps,
+        }
+    return {}
 
 
 def region_point_counts(frame: FaceFrame) -> dict[str, int]:

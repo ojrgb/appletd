@@ -5,11 +5,14 @@ either, because the face contract is currently the OBSERVATION's own numbers -
 bounding box, head pose, confidence, quality - and none of that needs geometry. A
 box and three angles.
 
-WHAT IT DOES NOT DO: landmark points. They are not published yet (the per-region
-point counts need one camera frame to settle - see `face_types.py`), so
-synthesising them would be inventing the very numbers that module refuses to guess.
-When the counts land, this is where a plausible 76-point face goes, and
-`tools/send_synthetic_face.py` will pick it up with no changes.
+WHAT IT DOES NOT DO YET: landmark points. The contract publishes all 76 of them
+since their counts were measured, and this synthesiser leaves them at zero - so
+`tools/send_synthetic_face.py` exercises the 23 observation channels and the
+coordinate spaces, and the 304 landmark channels are present and flat. Generating a
+plausible face here is the follow-up; until then, the way to see real points move is
+the camera, via the Face Stream toggle. `Face.landmarks` is already the field to
+fill, and `face_channel_values` pads whatever is missing with zeros, so nothing else
+has to change.
 
 Thread: pure functions over immutable values. Safe anywhere.
 Ref: DESIGN.md 6.4, visionhands/face_types.py.

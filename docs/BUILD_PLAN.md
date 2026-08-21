@@ -174,24 +174,43 @@ right names and moving values, and the hands port now carrying 141 (137 + four
 `sc_*`) with the COMP output at 499. DESIGN.md 6.4 has the design and 2.12 the API
 surface; the journal has the four things that went wrong.
 
-**visionface followed the same afternoon**, and one number short of complete:
+**visionface followed the same afternoon**, and finished later the same day:
 `visionhands/face_types.py`, `visionhands/face.py`, `visionhands/synth_face.py`,
 `tools/send_synthetic_face.py`, `tools/td_build_face_comp.py`. **Verified in
-TouchDesigner: 23 channels on port 10002**, head pose sweeping, with no camera.
+TouchDesigner: 387 channels on port 10002** - 23 observation scalars, 348 landmark
+slots, and 16 transformed box components.
 
-**The missing number, and why it is missing rather than guessed.** A face is not a
-joint table: `VNFaceObservation.landmarks()` gives **12 named REGIONS**, each with
-its own `pointCount`, and nothing in the framework publishes those counts before a
-face has been observed. The constellation pins the TOTAL at 76 and says nothing
-about the split. A guessed split lays a nose's points into an eyebrow's channels and
-looks entirely plausible, so the table carries `point_count = None`, no landmark
-channels are published, and `tools/probe_face_regions.py` settles it from one
-camera frame - printing integers, writing no image. Paste the counts in, re-run
-`tools/td_build_face_comp.py`, and the points appear with no other change.
+**The landmark counts, MEASURED 2026-08-21** by `tools/probe_face_regions.py` with a
+real face, and they were not what a guess would have produced:
 
-**What is NOT done:** the face landmark points (above), and any attribute layer for
-either new stream - no derived channels, no filtering, no temporal channels, by
-design. The brief was plumbing plus basic testing.
+```
+sum of the 12 regions   87 slots
+DISTINCT coordinates    76        <- what "the 76-point constellation" means
+```
+
+**The regions overlap.** `medianLine` shares points with `noseCrest` (4), `nose` (2),
+`outerLips` (2), `innerLips` (2) and `faceContour` (1); `nose` shares one more with
+`noseCrest`. Twelve pair-overlaps for eleven duplicate points - nine points in two
+regions, the nose tip in three. The channel list is built from the SLOTS, so those
+eleven are published twice under both names: the price of `f0_nose_crest_00_x` over
+`f0_lm43_x`.
+
+Two things fell out of it, both now in `DESIGN.md`:
+
+- **the first self-check refused the correct table** (2.12), because it asserted the
+  regions partition the constellation. The guess that got caught was in the CHECK,
+  not in the data.
+- **the 371-channel bundle is 12208 bytes and a default UDP socket refuses it**
+  (2.13). Two streams kept working and face's channels simply never appeared.
+  Raising `SO_SNDBUF` on the sender fixes it with no privileges, and the receiver
+  needs nothing - which is the only reason it is fixable when TouchDesigner owns the
+  receiving end.
+
+**What is NOT done:** a synthetic face that moves its landmarks - the synthesiser
+emits a box and three angles, so 304 of the 371 channels are flat under
+`send_synthetic_face.py` - and any attribute layer for either new stream: no derived
+channels, no temporal channels, by design. The brief was plumbing plus basic testing.
+
 
 **The original request, for the record.**
 

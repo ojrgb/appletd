@@ -2123,3 +2123,74 @@ these would have quietly broken the thing it was written to set up.
 342 tests, and the new ones are mostly about `spaces.py`: that the filter split
 partitions every stream exactly, that an extent is never offset, and that nothing
 box-relative or angular reaches a coordinate branch.
+
+## The face landmark counts, and a datagram that was never sent
+
+Ran `tools/probe_face_regions.py` against a real face - the user's, with their
+say-so, at the machine. The 12 region counts came back immediately and the tool
+refused them:
+
+    sum of the regions: 87 points
+    the constellation says: 76
+    MISMATCH. Do not paste these in until it is understood.
+
+**The check was right to fire and wrong about why.** It asserted that the regions
+partition the constellation, which they do not. Extending the probe to count
+DISTINCT coordinates settled it in one more run: 76 distinct points across 87 region
+slots, with `medianLine` sharing points with `noseCrest` (4), `nose` (2), both lip
+rings (2 each) and `faceContour` (1), plus `nose` and `noseCrest` sharing one more.
+Twelve pair-overlaps for eleven duplicate points, which means nine points sit in two
+regions and one sits in three - the nose tip.
+
+Worth naming the shape of that mistake, because it is not the usual one: the guess
+that got caught was in the CHECK, not in the data. The table was correct on the first
+try; the invariant I wrote to protect it encoded an assumption I had not measured. A
+self-check is code like any other and can be the thing that is wrong.
+
+**Publishing per region means those eleven points appear twice**, under both of their
+regions' names - 44 duplicate channels across two faces. That is the price of
+`f0_nose_crest_00_x` over `f0_lm43_x`, and it is the same trade DESIGN.md 6.2 made
+for hands: "which one is lm43" is exactly the question a name should answer. 371
+channels, 387 after the coordinate spaces.
+
+### And then nothing arrived
+
+The suite went red the moment the counts landed: three face tests timed out waiting
+for a datagram, and `n_sent` was 6 where 9 was expected. The face bundle is **12208
+bytes**, and:
+
+    net.inet.udp.maxdgram              9216
+    a UDP socket's default SO_SNDBUF   9216
+    sendto(12208)                      REFUSED
+
+Not fragmented, not truncated - refused outright. `osc.py` had a note claiming the
+bundles sat "comfortably inside the 16 KB loopback datagram limit", which was a guess
+that had never been tested against anything bigger than 3480 bytes.
+
+**The fix is one socket option, and the reason it works is the important part:**
+raising `SO_SNDBUF` on the SENDER lifts the limit completely with no privileges
+(65000 bytes sent and received on loopback), and the RECEIVER needs nothing - a
+socket with the default buffer accepted 20000 bytes. That asymmetry is the only
+reason this was fixable at all, because TouchDesigner owns the receiving end and we
+cannot configure it. Every sender in the repo now goes through
+`osc.datagram_socket()`.
+
+**How it presented is the part to remember.** Two streams kept working perfectly and
+the third one's channels never appeared in TouchDesigner. Nothing in the sidecar's
+reporting distinguishes "the socket refused a datagram" from "nobody is sending", so
+it reads as a broken stream rather than a wrong socket option. The tests caught it
+before TouchDesigner did, which is the first time the socket-level tests have earned
+their keep - a bound socket in a test refuses the same datagram a real one does.
+
+Measured, for the next contract that grows: hands 4188 bytes (141 channels), pose
+3720 (123), face 12208 (371). About 33 bytes per channel, so a default socket tops
+out near 280 channels and `MAX_FACES = 2` is the practical ceiling for one face
+bundle.
+
+### Left undone
+
+`visionhands/synth_face.py` still emits a box and three angles, so
+`send_synthetic_face.py` leaves 304 of the 371 channels flat. The channels are real
+and named; watching them move needs the camera until somebody writes a plausible
+76-point synthetic face. `Face.landmarks` is the field to fill and
+`face_channel_values` already pads what is missing, so it is additive.

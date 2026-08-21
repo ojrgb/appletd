@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import math
-import socket
 import sys
 import time
 from collections.abc import Callable
@@ -44,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from send_synthetic import sidecar_pids
 
 from visionhands.face_types import face_channel_names, face_channel_values
-from visionhands.osc import encode_channels
+from visionhands.osc import datagram_socket, encode_channels
 from visionhands.sidecar import DEFAULT_HOST, DEFAULT_PORT, SEQ_MODULUS
 from visionhands.streams import STREAM_FACE, port_for
 from visionhands.synth_face import FacePose, synthetic_face_frame
@@ -112,7 +111,7 @@ def send(sequence_name: str, host: str, base_port: int, fps: float,
     sequence = SEQUENCES[sequence_name]
     names = face_channel_names()
     port = port_for(STREAM_FACE, base_port)
-    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp = datagram_socket()
     total = max(1, round(fps * period_s * cycles))
     sent = 0
     started = time.monotonic()

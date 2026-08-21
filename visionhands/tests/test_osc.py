@@ -107,3 +107,69 @@ def test_values_survive_the_encoding_at_the_precision_we_rely_on() -> None:
         encoded = encode_message("/x", value)
         back = struct.unpack(">f", encoded[-4:])[0]
         assert abs(back - value) <= abs(value) * 1e-6 + 1e-6, value
+
+
+# ---------------------------------------------------------------------------
+# The socket, and the ceiling it removes
+# ---------------------------------------------------------------------------
+def test_the_largest_bundle_we_send_does_not_fit_a_default_socket() -> None:
+    """The measurement behind `datagram_socket`, pinned so it cannot rot quietly.
+
+    macOS: `net.inet.udp.maxdgram` is 9216 and a UDP socket's default SO_SNDBUF is
+    9216 too, so `sendto` REFUSES anything larger - it does not fragment and does
+    not truncate. The face bundle is 12208 bytes. The failure presents as one
+    stream's channels never appearing in TouchDesigner while the other two work,
+    which is a very confusing way to find a socket option.
+    """
+    import socket as socket_module
+
+    from visionhands.face_types import (
+        blank_face_frame,
+        face_channel_names,
+        face_channel_values,
+    )
+
+    payload = encode_channels(face_channel_names(),
+                              face_channel_values(blank_face_frame(), 0.0, 0))
+    assert len(payload) > 9216, (
+        "the face bundle no longer exceeds the default send buffer, so this test "
+        "has stopped testing anything - check whether the contract shrank")
+
+    receiver = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+    receiver.bind(("127.0.0.1", 0))
+    receiver.settimeout(0.5)
+    plain = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+    try:
+        with pytest.raises(OSError):
+            plain.sendto(payload, receiver.getsockname())
+    finally:
+        plain.close()
+        receiver.close()
+
+
+def test_datagram_socket_sends_that_bundle_and_a_default_receiver_gets_it() -> None:
+    """Both halves of the fix in one test: the SENDER needs the bigger buffer and the
+    RECEIVER needs nothing - which is what makes this fixable at all, since
+    TouchDesigner owns the receiving end and we cannot configure it.
+    """
+    import socket as socket_module
+
+    from visionhands.face_types import (
+        blank_face_frame,
+        face_channel_names,
+        face_channel_values,
+    )
+    from visionhands.osc import datagram_socket
+
+    payload = encode_channels(face_channel_names(),
+                              face_channel_values(blank_face_frame(), 0.0, 0))
+    receiver = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+    receiver.bind(("127.0.0.1", 0))          # DEFAULT receive buffer, deliberately
+    receiver.settimeout(1.0)
+    sender = datagram_socket()
+    try:
+        sender.sendto(payload, receiver.getsockname())
+        assert len(receiver.recv(1 << 17)) == len(payload)
+    finally:
+        sender.close()
+        receiver.close()
