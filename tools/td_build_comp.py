@@ -389,43 +389,31 @@ def main():
     chop_in = make(td.inCHOP, "in1", -600, 0)
 
     print("3. no rename stage: the sidecar already sends readable joint names")
+    print("   coordinate branches are built by tools/td_add_coords.py - see the")
+    print("   build order in the comment above merge_out")
 
-    # Branches. Each is Select -> Math -> Rename, which is the whole trick:
-    # pick the channels, do the arithmetic, give the result its own suffix.
-    def branch(label, select_pattern, suffix, pre_offset, mult_expr, y):
-        select = make(td.selectCHOP, "sel_%s" % label, -200, y)
-        select.inputConnectors[0].connect(chop_in)
-        select.par.channames = select_pattern
-
-        math = make(td.mathCHOP, "math_%s" % label, 0, y)
-        math.inputConnectors[0].connect(select)
-        # Math CHOP applies pre-offset, then multiply. So (v - 0.5) * aspect is
-        # exactly preoff=-0.5, mult=aspect - no expression gymnastics needed.
-        math.par.preoff = pre_offset
-        math.par.gain.expr = mult_expr
-
-        rename = make(td.renameCHOP, "ren_%s" % label, 200, y)
-        rename.inputConnectors[0].connect(math)
-        rename.par.renamefrom = select_pattern
-        rename.par.renameto = select_pattern.replace("_x", "_%s" % suffix).replace(
-            "_y", "_%s" % suffix)
-        return rename
-
-    # World units for an orthographic camera of the given Ortho Width. x spans
-    # the full width; y spans width/aspect, because a 16:9 render is shorter than
-    # it is wide and the camera's number describes the WIDTH.
-    tx = branch("tx", "*_x", "tx", -0.5,
-                "me.parent().par.Orthowidth", -150)
-    ty = branch("ty", "*_y", "ty", -0.5,
-                "me.parent().par.Orthowidth * me.parent().par.Renderh "
-                "/ me.parent().par.Renderw", -300)
-    # Pixels.
-    px = branch("px", "*_x", "px", 0.0, "me.parent().par.Resw", -450)
-    py = branch("py", "*_y", "py", 0.0, "me.parent().par.Resh", -600)
-
+    # THE COORDINATE BRANCHES LIVE IN tools/td_add_coords.py NOW, as a `coords`
+    # group COMP. Two reasons they moved out: twelve loose operators at this level
+    # made the network unreadable, and this script destroys every child of the COMP
+    # when it runs - so rebuilding the coordinate branches meant flattening
+    # `filter`, `latches` and `temporal` too. One concern per builder is what makes
+    # any one of them re-runnable (docs/BUILD_PLAN.md step 7.3).
+    #
+    # BUILD ORDER from scratch, and it matters because each group wires itself to
+    # the one before:
+    #     td_build_comp.py    this - the shell, the parameters, the sidecar control
+    #     td_add_filter.py    `filter`, which everything downstream reads
+    #     td_add_coords.py    `coords`
+    #     td_add_derive.py    the stateless attributes
+    #     td_add_temporal.py  `temporal` - presence, liveness, velocity
+    #     td_add_latches.py   `latches`, which gates on temporal's `tmp_ready`
+    #     td_add_groups.py    the Attributes page
+    # Empty apart from the raw input. Each group builder attaches itself exactly
+    # once, which is the only wiring discipline that has survived contact - see
+    # `_attach_once` in tools/td_add_coords.py for the three ways piecemeal Merge
+    # wiring failed first.
     merge = make(td.mergeCHOP, "merge_out", 450, 0)
-    for index, source in enumerate((chop_in, tx, ty, px, py)):
-        merge.inputConnectors[index].connect(source)
+    merge.inputConnectors[0].connect(chop_in)
 
     chop_out = make(td.outCHOP, "out1", 650, 0)
     chop_out.inputConnectors[0].connect(merge)

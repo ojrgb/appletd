@@ -156,6 +156,56 @@ def _page(comp, name="Filter"):
     return page
 
 
+def _attach_once(merge, node, drop_names=()):
+    """Make `node` feed `merge` exactly once, dropping anything named in
+    `drop_names`, and leave every other input alone. Returns what it removed.
+
+    Traps, all of them measured in this repo (DESIGN.md 2.11):
+      * `.inputs` is STALE inside the same script that rewired anything, so this
+        reads `inputConnectors[i].connections` throughout - that is the truth.
+      * disconnecting SHIFTS the connector list, so a single pass over it skips
+        entries. This restarts after every removal. A single-pass version dropped
+        two of four old branches and left the other two to be destroyed while
+        still wired.
+      * "attach if not already attached" is not enough on its own: piecemeal
+        wiring of a Merge CHOP has produced a duplicate three times now, and a
+        Merge accepts the same operator on any number of inputs in silence. The
+        only symptom is the channel count - `filter` connected three times put 274
+        extra channels on the COMP output. So this asserts the END STATE: exactly
+        one connection from `node`.
+      * `connect()` accepts an operator only where it has one unambiguous output,
+        which a base COMP does not - hence `outputConnectors[0]`.
+    """
+    removed = []
+    for _attempt in range(256):
+        seen = False
+        cut = False
+        for conn in merge.inputConnectors:
+            owners = [x.owner for x in conn.connections]
+            if not owners:
+                continue
+            owner = owners[0]
+            if owner.name in drop_names or (owner is node and seen):
+                removed.append(owner.name)
+                conn.disconnect()
+                cut = True
+                break                       # the list has shifted; start again
+            if owner is node:
+                seen = True
+        if not cut:
+            break
+
+    attached = any(x.owner is node for conn in merge.inputConnectors
+                   for x in conn.connections)
+    if not attached:
+        target = node.outputConnectors[0] if node.isCOMP else node
+        for conn in merge.inputConnectors:
+            if not conn.connections:
+                conn.connect(target)
+                break
+    return removed
+
+
 def main():
     import td
 
@@ -333,33 +383,14 @@ def main():
         consumer.inputConnectors[0].connect(group.outputConnectors[0])
         moved.append(name)
 
-    # merge_out publishes the raw landmark group, and it is multi-input, so it gets
-    # the same treatment as everywhere else: whichever of its inputs was the raw
-    # stream or a previous filter becomes the group, exactly once.
-    # Read the CONNECTORS, never `.inputs`. `.inputs` is stale inside the same
-    # script that rewired anything - it reported an input list containing `out1`,
-    # which would have been a loop, while the connectors showed the correct 13.
-    # Third time that has cost time; DESIGN.md 2.11 now says so.
+    # merge_out publishes the raw landmark group. Exactly once, dropping the raw
+    # input and any leftover loose operator this group replaced - see _attach_once
+    # for why piecemeal wiring of a Merge CHOP kept producing duplicates.
     merge = comp.op("merge_out")
     if merge is not None:
-        def merge_owners():
-            return [x.owner for conn in merge.inputConnectors
-                    for x in conn.connections]
+        _attach_once(merge, group, drop_names=(source.name, "oef_out"))
+        moved.append("merge_out")
 
-        if group not in merge_owners():
-            for index, conn in enumerate(merge.inputConnectors):
-                owners = [x.owner for x in conn.connections]
-                if owners and (owners[0] is source
-                               or owners[0].name.startswith(PREFIX)):
-                    merge.inputConnectors[index].connect(group.outputConnectors[0])
-                    moved.append("merge_out")
-                    break
-            else:
-                for conn in merge.inputConnectors:
-                    if not conn.connections:
-                        conn.connect(group.outputConnectors[0])
-                        moved.append("merge_out")
-                        break
     print("5. repointed to `%s`: %s" % (GROUP, ", ".join(sorted(set(moved)))))
     print("   (the temporal group's liveness stays on the RAW input, so it cannot "
           "depend on a filter that might be misconfigured)")
@@ -376,11 +407,14 @@ def main():
             failures.append("%s does not read `%s` - it reads %r, so the filter "
                             "is bypassed" % (name, GROUP, reads))
     if merge is not None:
-        published = [o.name for o in merge_owners()]
-        if GROUP not in published:
-            failures.append("merge_out does not publish `%s`, so the raw landmark "
-                            "channels are missing or unfiltered: %r"
-                            % (GROUP, published))
+        owners = [x.owner for conn in merge.inputConnectors
+                  for x in conn.connections]
+        if owners.count(group) != 1:
+            failures.append("`%s` feeds merge_out %d times, not once - that puts "
+                            "%d duplicate channels on the COMP output, which is "
+                            "the only symptom a Merge CHOP gives"
+                            % (GROUP, owners.count(group),
+                               max(0, owners.count(group) - 1) * len(names)))
 
     comp.op("out1").cook(force=True)
     print("6. COMP output: %d channels" % comp.op("out1").numChans)
