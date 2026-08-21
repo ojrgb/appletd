@@ -542,83 +542,131 @@ building a latency backlog.
 
 ## 4. Architecture
 
+**Rewritten after §2.8.** The original version of this section described Vision
+running on a background thread inside TouchDesigner's process. That is measured to
+be 28x slower there than on the main thread, and it is the reason the whole
+pipeline moved out of process. What survives unchanged is the reasoning about
+blocking and about the handoff — it just applies one process to the left.
+
 ### 4.1 The constraint
 
-TouchDesigner cooks on a single main thread and everything on it is blocking.
-Vision inference must therefore not happen during a cook. The Script CHOP must
-only ever *read an already-computed result*, and that read must never wait.
+TouchDesigner cooks on a single main thread and everything on it is blocking, so
+Vision inference must not happen during a cook. The original conclusion was "the
+Script CHOP must only ever read an already-computed result". The measured
+conclusion is stronger: inference must not happen in TD's **process** at all,
+because a background thread there is starved by TD's frame loop (§2.8).
 
-### 4.2 Threads
+So there is no Script CHOP in the data path, and no Python of ours running in
+TouchDesigner during a cook. The TD-side surface is an OSC In CHOP, which is
+built-in C++.
 
-**Capture / Vision thread.** AVFoundation delivers `CMSampleBuffer` on a GCD
-dispatch queue; Vision runs there (~3.3 ms at 720p). Converts results to a
-plain-Python immutable `LandmarkFrame` — floats and tuples only, **no pyobjc
-objects escape this thread**. Never touches the TD API.
+### 4.2 Two processes, and what crosses between them
 
-**TD main thread.** Script CHOP cooks, reads the latest frame, writes a fixed
-channel set. Never blocks, never waits, never allocates a lock it could contend
-on.
+**The sidecar** (`visionhands/sidecar.py`, run as `python -m
+visionhands.sidecar`) owns the camera, the `AVCaptureSession`, Vision, and a UDP
+socket. Two threads of interest, exactly as before: the GCD capture queue
+AVFoundation delivers on, and the sidecar's own send loop. No run loop is turned
+by us — measured, §2.5.
 
-**Run loop — settled, no thread needed.** MEASURED (§2.5): frames arrive with
-no run loop turned by us, both inside TD and in a bare Python process. The
-spike's `CFRunLoopRun` was never the thing making delivery work;
-`AVCaptureVideoDataOutput` delivers on a GCD dispatch queue, which needs no run
-loop. **This design owns exactly two threads of interest: TD's main thread, and
-the capture queue AVFoundation gives us.** What the spike actually needed was
-for its main thread to *block* rather than poll — see §3.
+**TouchDesigner** owns its main thread and nothing else of ours. It receives 137
+floats per frame into an `oscinCHOP`. Everything after that is native CHOPs, plus
+one Script CHOP for the stateless derived maths, which runs on the main thread by
+design and measures 0.210 ms (§2.7).
 
-### 4.3 The handoff is lock-free
+**What crosses:** 137 floats, 3480 bytes, per frame. No pixels — TD's Video Device
+In TOP and the sidecar read the same camera simultaneously (§2.8), so there is no
+image to transport. See §2.9 for what the OSC boundary costs and how liveness is
+recovered on the TD side.
 
-A **single-slot latest-value box**, not a queue:
+### 4.3 The handoff is lock-free — still true, one process to the left
+
+The single-slot latest-value box is unchanged and still load-bearing. It now sits
+**inside the sidecar**, between the capture queue and the send loop, rather than
+between a worker thread and a TD cook:
 
 ```python
-# worker thread:  self._latest = frame     # atomic reference rebind in CPython
-# TD main thread: frame = self._latest     # never blocks, never waits
+# capture queue: self._latest = frame     # atomic reference rebind in CPython
+# send loop:     frame = self._latest     # never blocks, never waits
 ```
 
-`LandmarkFrame` is frozen/immutable, so a reader can never observe a
-half-constructed object, and a bare reference swap needs no lock at all. The
-result is that **the main thread has no code path that can block on the
-worker** — which is the property TD actually requires.
+`LandmarkFrame` is frozen, so a reader can never observe a half-constructed
+object and a bare reference swap needs no lock. Measured at 0.0047 ms median to
+read (§2.7). The structural tests that pin this — frozenness asserted directly,
+and `latest()` disassembled to prove it contains no CALL opcode — are in
+`tests/test_source.py`.
 
-A queue would be wrong. TD cooks at its own rate, unrelated to the camera's.
-A queue either grows unbounded (latency creep) or needs draining logic. "Most
-recent result, discard what the renderer never saw" is correct for a realtime
-overlay. Each frame carries a monotonic `seq` and a capture timestamp so the
-CHOP can publish `age_ms` and downstream can distinguish fresh from stale — a
-stalled engine must be *visible*, not silently serving old landmarks.
+A queue would still be wrong, for the original reason: the consumer runs at its
+own rate, so a queue either grows unbounded or needs draining logic. "Most recent
+result, discard what nobody saw" is correct here.
+
+One thing the process boundary changed: the sidecar sends on a **fixed clock**
+rather than only when a new frame arrives, so `age_ms` stays live and a stalled
+camera is distinguishable from a stalled sidecar.
+
+### 4.4 What has memory, and where it lives
+
+Settled in `docs/ATTRIBUTES.md` and worth stating here because it decides where
+new work goes:
+
+- **Stateless maths** — every distance, angle, curl, bounding box, two-hand
+  geometry — is a pure function of one frame, and lives in `visionhands/derive.py`
+  called from one Script CHOP. Pure Python, no TD, so every formula in the spec is
+  a unit test against a synthetic hand.
+- **Anything with memory** — latches, edge pulses, filters, debounce, dwell,
+  refractory windows — lives in native CHOPs, where TouchDesigner manages the
+  state, it is visible in the network, and no hidden Python state survives a
+  project reload unpredictably.
+- **A branch with memory must be clocked by time, not by data** (§2.10). This is
+  the rule most easily forgotten and the one whose violation is least visible.
 
 ---
 
 ## 5. Module layout
 
-Nothing imports anything outside this package.
+Actual, as built. `engine.py` imports nothing from TD; `td/` imports no pyobjc;
+nothing in the package imports `cv2` or `PIL` at module scope. A test enforces all
+three rather than trusting discipline (`tests/test_boundaries.py`).
 
 ```
 visionhands/
-  DESIGN.md            # this document
-  README.md            # how to run it
-  requirements.txt
-  types.py             # LandmarkFrame, Hand, JOINT_NAMES, JOINT_CODES
-  coords.py            # every coordinate conversion, and nothing else
-  engine.py            # TD-free: AVFoundation + Vision -> LandmarkFrame
-  source.py            # HandSource interface; InProcessSource (+ IpcSource later)
+  types.py        # LandmarkFrame, Hand, the joint table, the 137-channel contract
+  coords.py       # every coordinate conversion, and the single legal y-flip
+  engine.py       # TD-free: AVFoundation + Vision -> LandmarkFrame
+  source.py       # HandSource protocol; LatestFrameBox; InProcessSource; FakeSource
+  osc.py          # the OSC encoder, hand-rolled, byte-checked against python-osc
+  sidecar.py      # the process: camera + Vision + socket, on a fixed clock
+  derive.py       # the stateless half of docs/ATTRIBUTES.md, as one pure function
+  synth.py        # parameterised synthetic hands, for testing without a camera
+  sequences.py    # gesture sweeps over time, for testing anything with memory
+  tuning.py       # threshold defaults; one table, shared by builders and tests
   td/
-    bootstrap.py       # sys.path wiring, engine start/stop lifecycle
-    hands_chop.py      # Script CHOP callbacks (main thread)
-  tests/
-    test_coords.py
-    test_engine_replay.py      # against the fixture, deterministic
-    test_channel_contract.py
-    test_slot_assignment.py
-  fixtures/
-    hand_clip.mp4      # recorded take; the only honest benchmark input
-  reference/           # the working spike, kept for provenance
+    bootstrap.py  # sys.path wiring and engine lifecycle (in-process path, legacy)
+    hands_chop.py # Script CHOP callbacks for the in-process path (legacy)
+  tests/          # 168 tests, none of which need a camera or TouchDesigner
+
+tools/            # scripts pasted into a TD Text DAT, plus dev utilities
+  td_build_comp.py     # the COMP: coordinate spaces, Sidecar page, Start/Stop
+  td_add_derive.py     # the derived-attributes Script CHOP
+  td_add_latches.py    # the proximity latch bank
+  td_verify_latches.py # judges the latches by counter deltas over a sweep
+  send_synthetic.py    # drives sequences.py into TD over OSC, no camera
+  record_fixture.py    # records a hands-only fixture, gated on people detection
+  probe_m1_in_td.py    # the milestone-1 probe, kept
+
+design/DESIGN.md   docs/{STANDARDS,ATTRIBUTES,BUILD_PLAN,JOURNAL}.md
+fixtures/          # gitignored media; the only honest benchmark input
+reference/         # the frozen spike that produced every measurement in §2
 ```
 
-`HandSource` is the insulation layer. `engine.py` never imports TD; `td/` never
-imports pyobjc. That boundary is what makes both the C++ swap (§9) and any
-future out-of-process move a transport change rather than a rewrite.
+**`td/bootstrap.py` and `td/hands_chop.py` are the in-process path and are no
+longer how this runs.** They are correct, tested, and superseded by the sidecar
+(§2.8). Kept because `hands_chop.py` is where the channel contract was first
+pinned and because the in-process path remains the fallback if the OSC boundary
+ever becomes the problem. Anything new goes in the sidecar path.
+
+`HandSource` is still the insulation layer, and it is what made the out-of-process
+move a transport change rather than a rewrite — `sidecar.py` takes any
+`HandSource`, which is also how it is tested with no camera.
 
 ---
 
@@ -709,71 +757,137 @@ pipeline, discard them.
 
 ## 8. Lifecycle
 
-A background thread calling into native frameworks is a liveness hazard, not
-just a tidiness problem — a call landing on a torn-down capture session is a
-native crash that `except Exception` will not catch and that takes the whole
-process, i.e. TouchDesigner, down with it.
+**Rewritten after the sidecar.** The original hazard was that a TouchDesigner
+project reload could leave an old `AVCaptureSession` fighting a new one over the
+camera, inside TD's process, with a native crash as the failure mode. That hazard
+is gone: nothing of ours runs in TD's process any more. What replaced it is a
+process lifecycle, which is a different and more tractable problem.
 
-- `stop()` sets an atomic flag, stops the `AVCaptureSession`, stops the run loop
-  if we own one, and joins with a timeout.
-- The capture delegate checks the flag before touching anything.
-- **A TD reload must stop the old engine before starting a new one**, or two
-  sessions fight over the camera. State surviving a project reload is the most
-  likely way this misbehaves in practice — wire an explicit teardown into the
-  project's unload path and make start idempotent.
-- The camera TCC prompt attaches to TouchDesigner.app, not to our code. Verify
-  the permission is granted before diagnosing anything else;
-  `AVCaptureDevice.authorizationStatusForMediaType_` returns 3 when authorised.
+### 8.1 Inside the sidecar — unchanged and still necessary
+
+A background thread calling into native frameworks is a liveness hazard, not a
+tidiness problem: a call landing on a torn-down capture session is a native crash
+that `except Exception` does not catch and that takes the process down.
+
+- `stop()` order is flag → `stopRunning()` → brief sleep → **drain the capture
+  queue** → teardown. The drain is `dispatch_sync` of a no-op onto the serial
+  capture queue, which is a real barrier. It replaced a `time.sleep()` that was
+  not one: with a consumer slower than the grace period, `stop()` returned while a
+  delegate callback was still executing, and a following `start()` put two threads
+  inside one `HandDetector` — which published `found=False` for a hand that was in
+  shot, silently. See the M2b review in `docs/JOURNAL.md`.
+- The delegate holds the engine **weakly**. `AVCaptureVideoDataOutput` does not
+  retain its delegate, so the engine must hold it; the delegate holding the engine
+  back closed a cycle the garbage collector cannot break, because pyobjc's
+  Objective-C subclass instances do not expose their Python attributes to it.
+  Measured: `gc.collect()` collected 0 and left the engine alive, leaking the
+  camera permanently.
+- `start()` resets `delivered_px`, `first_frame` and `errors`, so the
+  delivered-versus-requested assertion runs once per session rather than once per
+  engine. `_seq` deliberately does not reset — a consumer should see a restart as a
+  gap, not as time running backwards.
+
+### 8.2 The process, and how TouchDesigner controls it
+
+- The COMP's **Sidecar** page has Start, Stop and Status pulses and a read-only
+  PID. Start launches `python -m visionhands.sidecar` detached; Stop matches the
+  process by argv and signals it.
+- **Process matching is by full argv, not by pattern.** `pgrep -f` matches the
+  grep's own command line, which is how an early version of the Stop button
+  SIGTERMed the shell that ran it; macOS `ps -o comm=` truncates to 16 characters
+  so the interpreter cannot be identified that way; and `ps -Ao args=` is not
+  tokenised by argv, so the body of a `python -c "..."` script splits into words
+  and can impersonate a `-m` invocation. The check walks the leading interpreter
+  options the way CPython parses them. §2.11.
+- **The sidecar watches its parent.** Given a parent PID it exits when that
+  process disappears, so closing TouchDesigner does not leave an orphan holding
+  the camera.
+- **A dead sidecar leaves TD's channels frozen, not zeroed** (§2.9), so liveness
+  is derived on the TD side from the slope of `seq`. Every latch is gated on it,
+  because without that a gesture engaged when the sidecar died stays engaged for
+  ever (§2.10).
+- The camera TCC prompt attaches to the process that opens the camera — now the
+  sidecar's own interpreter rather than TouchDesigner.app. Verify the permission
+  before diagnosing anything else; `AVCaptureDevice.authorizationStatusForMediaType_`
+  returns 3 when authorised.
+
+### 8.3 A project reload
+
+No engine, no camera and no Python of ours lives in TD's process, so a reload
+cannot produce two sessions fighting. What a reload does affect is the native
+CHOP state: every Feedback CHOP in the latch bank is initialised from an all-zero
+Constant, so the bank comes back **released** with its counters at zero. That is
+the safe direction — the phantom end-pulse-on-reload that `docs/ATTRIBUTES.md`
+warns about cannot happen. The converse does: reloading while a gesture is
+physically ongoing fires one spurious start pulse. That is inherent to a
+level-driven latch and is accepted.
 
 ---
 
-## 9. C++ upgrade path — deliberately not v1
+## 9. C++ upgrade path — deliberately not v1, and less attractive than it was
 
 TouchDesigner supports C++ custom operators; the SDK ships in the install at
 `Contents/Resources/tfs/Samples/CPlusPlus` (headers `CPlusPlus_Common.h`,
-`CHOP_CPlusPlusBase.h`, `TOP_CPlusPlusBase.h`, plus Xcode projects; macOS
-custom ops are `BNDL` bundles).
+`CHOP_CPlusPlusBase.h`, `TOP_CPlusPlusBase.h`, plus Xcode projects; macOS custom
+ops are `BNDL` bundles).
 
-**A C++ plugin does not solve the threading problem.** `execute()` is called on
-TD's cooking thread — blocking there blocks TD exactly as much as Python would.
-Derivative's own `CPUMemoryTOP` sample demonstrates the required pattern:
-`std::thread`, `std::atomic<bool> myThreadShouldExit`, `join()` on destruct, and
-a `FrameQueue` guarded by `std::mutex` that `execute()` drains. That is
-structurally identical to §4.3, which is a good sign the design is sound.
+**Two of the three original arguments have since been settled the other way.**
 
-The usual reason to go C++ — escaping the GIL — **does not apply**, per §2.2.
+- The original text said "the usual reason to go C++ — escaping the GIL — does not
+  apply, per §2.2". §2.2 was **reversed by §2.8**: escaping the GIL is exactly the
+  problem. But a separate process escapes it too, for none of the cost, and
+  measured at 4.38 ms while TD renders at 60 fps. So the GIL argues for *getting
+  out of TD's process*, which is done, not specifically for C++.
+- The strongest original trigger was "TD needs the camera image as well as
+  landmarks, and `TOP_Buffer` upload is where Python gets awkward". Measured
+  (§2.8): TD's Video Device In TOP and our engine read the same camera
+  **simultaneously**, both getting live frames. TD can display the camera itself,
+  so there is no image to transport and the trigger is moot.
 
-Go C++/Objective-C++ if and when:
+**A C++ plugin still does not solve the threading problem** on its own —
+`execute()` is called on TD's cooking thread, so blocking there blocks TD exactly
+as much as Python would. Derivative's own `CPUMemoryTOP` sample demonstrates the
+required pattern: `std::thread`, `std::atomic<bool>`, `join()` on destruct, and a
+queue that `execute()` drains. That is structurally identical to §4.3, which is a
+good sign the design is sound.
 
-- TD needs the camera **image** as well as landmarks. `TOP_Buffer` upload is the
-  correct mechanism and is where Python gets genuinely awkward. This is the
-  strongest trigger.
-- pyobjc inside TD's Python proves unstable (milestone 1 answers this).
-- The pyobjc bridge or venv bootstrap becomes a deployment liability. Obj-C++
-  calls `VNDetectHumanHandPoseRequest` natively; pyobjc is a bridge we are
-  choosing to keep.
+What would still justify it: the pyobjc bridge or the venv bootstrap becoming a
+deployment liability, or a need to run Vision on frames TD itself produced (a
+rendered TOP rather than a camera), where the process boundary would mean pushing
+pixels rather than pulling them.
 
-Costs: an Xcode project per TD version, bundle signing, far slower iteration
-than editing a Python DAT live, and harder in-process debugging.
+Costs unchanged: an Xcode project per TD version, bundle signing, far slower
+iteration than editing a Python file live, and harder debugging.
 
 ---
 
 ## 10. Milestones
 
-1. ~~**Go/no-go: pyobjc inside TD.**~~ **DONE — passed.** See §2.5: pyobjc
-   loads in TD's process, Vision runs there at 2.06 ms median on live camera
-   buffers, and no run loop of our own is needed. Probe kept at
-   `tools/probe_m1_in_td.py`.
-2. **`engine.py` headless.** Camera → `LandmarkFrame`, no TD. Largely a port of
-   `reference/spike_vision_hands_live.py`.
-3. **`HandSource` + lock-free slot.** Tested headless against a fake source, so
-   the concurrency contract is verified without a camera.
-4. **Script CHOP.** Fixed channel contract, verified against the fixture clip.
-5. **Slot assignment** with a two-hand fixture.
-6. **Teardown and reload hardening** (§8).
-7. **README**, and fold anything newly measured back into §2.
+Rewritten to match what exists. The original list stopped at "Script CHOP" and
+predates both the sidecar and the attribute layer.
 
-Milestone 1 needs TD running. Everything from 2 onward is headless.
+1. ~~**Go/no-go: pyobjc inside TD.**~~ **DONE.** §2.5. Probe kept at
+   `tools/probe_m1_in_td.py`.
+2. ~~**`engine.py` headless.**~~ **DONE**, reviewed, and hardened — see §8.1 for
+   the two defects that review found.
+3. ~~**`HandSource` + lock-free slot.**~~ **DONE**, reviewed. §2.7, §4.3.
+4. ~~**Script CHOP.**~~ **DONE**, and then superseded: the GIL measurement (§2.8)
+   moved everything out of process. `td/hands_chop.py` is kept as the in-process
+   fallback (§5).
+5. ~~**The sidecar.**~~ **DONE.** Camera and Vision in their own process,
+   landmarks over OSC. 13.4 → 29.8 fps, jitter 20.8 → 7.7 ms (§2.8, §2.9).
+6. ~~**The COMP.**~~ **DONE.** Readable channel names, three coordinate spaces
+   matched to the render aspect, Start/Stop on the Sidecar page.
+7. ~~**Derived attributes, stateless half.**~~ **DONE.** `derive.py`, 171 channels
+   at 0.210 ms, every formula a unit test against a synthetic hand.
+8. ~~**Proximity latches.**~~ **DONE**, reviewed. Pinch, snap, clap; hysteresis,
+   edge pulses and counters verified by counter deltas over generated sweeps.
+9. **The rest of the temporal channels** — velocity, smoothing, debounce, dwell,
+   steadiness, motion events. `docs/BUILD_PLAN.md` step 2.
+10. **Groups and parameter pages**, gated by `allowCooking`. Step 3.
+11. **Slot assignment**, which needs a two-hand fixture. The only milestone
+    blocked on something outside the repo.
+12. **README**, and fold anything newly measured back into §2.
 
 ---
 
@@ -790,13 +904,27 @@ Milestone 1 needs TD running. Everything from 2 onward is headless.
   inside TD: numpy correctly resolved to TD's own 2.1.2 rather than the venv's
   2.2.6, which is the outcome that keeps TD's extension modules matched to the
   numpy they were built against. Inserting at position 0 would invert that.
-- Two-hand behaviour is entirely unmeasured — throughput, chirality stability
-  and slot assignment were all validated single-hand only.
-- Deferred by explicit decision, all cheap to measure once the fixture-replay
-  path exists: end-to-end latency (photons → channels), dropout rate under
-  motion and occlusion, and per-joint jitter with a still hand. Jitter in
-  particular determines whether smoothing is needed downstream, and it is the
-  usual reason a demo that looks fine on stills feels bad live.
+- Two-hand behaviour is **partly** answered. The attribute layer is exercised
+  two-handed with synthetic hands (`sequences.py`'s `both` and `clap`), so the
+  arithmetic and the channel wiring are verified. What remains unmeasured is
+  two-hand behaviour of the *tracker*: throughput with two hands in shot,
+  chirality stability, and slot assignment. All three need a two-hand fixture.
+- Deferred by explicit decision: end-to-end latency (photons → channels), dropout
+  rate under motion and occlusion, and per-joint jitter with a still hand. Jitter
+  is the one that matters most — it should set the default strength of the
+  smoothing filter, and it is the usual reason a demo that looks fine on stills
+  feels bad live. Measurable from the existing fixture with nobody present.
+- **How much does the adaptive smoothing filter actually help, and at what
+  latency cost?** A one-euro filter trades jitter against lag through `beta`, and
+  the honest way to set the defaults is to measure jitter first and then measure
+  the residual. Currently the defaults are guessed, and labelled as such.
+- **What is the cost of the always-cook clock in a real project?** It pulls the
+  stateless Script CHOP every frame, measured at 0.210 ms for 171 channels, but
+  that figure predates the temporal groups. Worth re-measuring once they exist.
+- **Does `allowCooking` group gating interact safely with the clock?** A disabled
+  group cannot run a Cook Type = Always operator inside it, so its latches would
+  freeze and resume with a stale `prev`. The intended answer is that the clock
+  lives outside any gated group; unverified until the groups are built.
 
 ---
 
