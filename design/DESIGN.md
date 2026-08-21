@@ -382,57 +382,74 @@ the built-in camera simultaneously (§2.8), so TD can display the camera while t
 sidecar tracks it. Two independent readers, 3.5 KB of landmarks per frame, and
 nothing else crosses the boundary.
 
-### 2.10 A branch with memory must be clocked by TIME, not by data — measured
+### 2.10 A branch with memory needs its own clock — two reasons, measured
 
-**This section replaces an earlier version that got the reason wrong.** The wrong
-version is kept below, because the way it was wrong is the useful part.
+**This section has been wrong twice. What follows is what is measured, and a
+design that does not depend on which explanation is right.** The history is kept
+at the end because it is the useful part.
 
-**What is true.** A CHOP branch containing a recurrence has to cook every frame,
-and the reason is not efficiency — it is that *the event it must react to is the
-absence of data*. When the sidecar stops, the OSC In CHOP freezes rather than
-zeroing (§2.9), so `in1` stops changing, so nothing downstream of it cooks. That
-includes any detector whose job is to notice that nothing is arriving. MEASURED:
-with a `seq`-slope liveness detector wired from `in1`, nothing sending, and no
-independent clock, `lat_live` sat at **1** indefinitely — the absence of data was
-exactly what stopped the detector from being recomputed. A latch engaged at that
-moment stayed engaged for ever and never emitted its end pulse.
+**Reason one: TouchDesigner does not cook a Merge input whose channels nothing
+downstream asks for.** MEASURED, six operators at once: every terminal branch of
+the latch bank — `lat_out_state`, `lat_out_start`, `lat_out_end`, `lat_out_count`,
+`lat_out_count_end`, `lat_both_pinching` — had cooked **4** times, all four forced
+by the build script, while the `merge_out` they all feed had cooked **420,613**.
+This project's consumers of the COMP select `*_tx` and `*_ty`; nothing else was
+pulled.
 
-The fix is a Null CHOP with Cook Type = `always` consuming the deepest point of
-the chain, so everything upstream cooks on the clock whether or not a frame
-arrived. Two things that look like they should work and do not: `viewer = True`
-(measured: cooks did not advance) and an ordinary Null CHOP downstream (itself
-unconsumed, so it does not cook either).
+For a stateless branch that is a pure optimisation and entirely correct — an
+uncooked distance is recomputed the moment anyone asks. For a recurrence it is
+fatal and it fails **silently**: the state self-corrects, because the recurrence is
+level-driven, but every edge pulse is computed between two frames that were never
+adjacent. Observed as exactly that: release counters stuck at zero while the fire
+counters climbed, because the clock pulled only the start counter and `lat_end`
+had cooked 4 times against `lat_start`'s 4,845.
 
-**MEASURED, after the fix.** With `deadband` sent until the latch was engaged and
-then the sender stopped: `h0_pinch_index` frozen at 0.435 — inside the dead band,
-below the release threshold — and `h0_valid` frozen at 1, yet `h0_pinching` went
-to 0 and `h0_pinch_end_count` incremented. The gesture ended because the *stream*
-ended, which is the only correct answer.
+**Reason two, which holds even where consumption is guaranteed: the bank must
+react to data STOPPING.** When the sidecar dies the OSC In CHOP freezes rather
+than zeroing (§2.9), so `in1` stops changing and nothing downstream of it cooks —
+including a liveness detector whose entire job is to notice that. MEASURED: with a
+`seq`-slope detector and no independent clock, `lat_live` sat at **1**
+indefinitely, and a latch engaged at that moment stayed engaged for ever with no
+end pulse. After the fix, with the stream stopped: `h0_pinch_index` frozen at
+0.435 inside the dead band and `h0_valid` frozen at 1, yet `h0_pinching` went to 0
+and `h0_pinch_end_count` incremented.
 
-**What it costs, stated plainly.** The clock pulls `derive_chop`, which is
-main-thread Python at 0.210 ms (§2.7), so that cooks on 100% of frames rather than
-only when a frame arrives — about 1.3% of a 60 fps frame, paid always. It buys a
-latch bank that releases when the camera goes away.
+**The design, which sidesteps the argument.** One Null CHOP at Cook Type =
+`always`, consuming a Merge of **every terminal branch** of the bank — not one of
+them, which is the mistake that left the release counters dead. Nothing then
+depends on what any downstream project selects. Two things that look like they
+should work and do not: `viewer = True` (measured: cooks did not advance) and an
+ordinary Null downstream (itself unconsumed, so it does not cook either).
 
-**THE WRONG VERSION, and why it was believed.** This section first claimed that
-*TouchDesigner does not cook a Merge branch whose channels nothing downstream
-selects*, citing `merge_out` at 283,930 cooks against `lat_state` at 2. That claim
-is **false**, and the citation was an invalid comparison: `merge_out` is an
-operator that had existed for hours, while every build of the latch bank destroys
-and recreates `lat_state`, so its counter had restarted. The two numbers measured
-different spans and were never comparable.
+**Cost:** the clock pulls `derive_chop`, main-thread Python at 0.210 ms for 171
+channels (§2.7), so it cooks on 100% of frames rather than only when a frame
+arrives — about 1.3% of a 60 fps frame, paid always.
 
-Tested properly, under control — bank connected to `merge_out`, clock fully
-detached — `lat_state` and `merge_out` advanced **402 cooks to 402, in lockstep**.
-A Merge CHOP pulls all of its inputs, and there is no channel-level pruning.
+**The history, which is the lesson.** This section first claimed reason one, citing
+`merge_out` 283,930 against `lat_state` 2. A review pointed out that a Merge cannot
+emit output without cooking its inputs, and that the citation was invalid: those
+two counters had different ages, because every build recreates `lat_state`. Both
+objections were right about the citation. I then ran what I believed was a
+controlled A/B — clock detached, bank wired — and read `lat_state` and `merge_out`
+advancing **402 to 402**, and rewrote this section to say the pruning was not real.
 
-Two lessons worth more than the conclusion. First, `totalCooks` is a lifetime
-counter: comparing it across operators of different ages measures nothing, and
-the only valid use is a delta on one operator across a known interval. Second,
-the original diagnosis was reached from a single dramatic ratio and it *worked* —
-adding the clock did fix the symptom — which is precisely how a wrong explanation
-survives. It took a review challenging the arithmetic to notice, and the
-controlled A/B took thirty seconds.
+That single reading has never reproduced. The six-operator measurement above
+contradicts it directly and repeatedly. I do not know what pulled `lat_state` that
+once; the most likely explanation is a leftover diagnostic operator from the same
+session.
+
+Three things worth keeping from that:
+
+- `totalCooks` is a **lifetime** counter. Comparing it across operators of
+  different ages measures nothing. The only valid use is a delta on one operator
+  across a known interval — which is what the six-operator reading is.
+- A fix that works is not evidence that its rationale is right. The clock fixed the
+  symptom under both explanations, so nothing pushed back for two rewrites.
+- Where a mechanism is this slippery, stop arguing and make the design not care.
+  The clock now pulls every terminal branch explicitly, and
+  `tools/td_verify_latches.py` compares `lat_start`'s cook count against
+  `lat_end`'s on every run, so the specific failure that hid here is now checked
+  rather than reasoned about.
 
 ### 2.11 Native CHOP behaviours that cost time, all verified live
 

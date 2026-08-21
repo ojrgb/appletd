@@ -2,13 +2,17 @@
 """Add the proximity latch bank to the visionhands COMP. Paste, Run Script.
 
     WHAT IT BUILDS
-        h{i}_pinching       h{i}_e_pinch_start   h{i}_e_pinch_end
-        h{i}_snapping       h{i}_e_snap          h{i}_e_snap_end
-        hands_together      e_clap               e_apart
-        h{i}_pinch_count    h{i}_snap_count      clap_count
-        both_pinching
+        h{i}_pinching             h{i}_e_pinch_start   h{i}_e_pinch_end
+        h{i}_snapping             h{i}_e_snap          h{i}_e_snap_end
+        hands_together            e_clap               e_apart
+        h{i}_{finger}_trigger     h{i}_e_{finger}_trigger
+                                  h{i}_e_{finger}_release
+        ...plus a fire count and a release count for every one of them,
+        and both_pinching.
 
-    ...which is pinch, snap and clap. 21 channels, no Python in the cook path.
+    Pinch, snap, clap, and a uniform thumb-contact trigger for all four long
+    fingers on both hands. Thirteen latches, 66 channels, no Python in the cook
+    path.
 
 Idempotent: every operator it owns is prefixed `lat_` and destroyed before the
 rebuild, so running it twice leaves one network rather than two. Custom
@@ -18,12 +22,14 @@ THE ONE MECHANISM, from docs/ATTRIBUTES.md:
 
     state = valid AND ( below_on OR (prev AND NOT above_off) )
 
-Pinch, snap and clap are that same recurrence over three different distances, so
-this builds ONE five-channel-wide network rather than three copies of a
-one-channel one. Five latches, five channels, one set of operators. The
-alternative - a base COMP duplicated three times - was the original plan in
-docs/BUILD_PLAN.md; it was abandoned because duplication is how two of the three
-copies end up subtly different.
+Every one of them is that same recurrence over a different distance, so this
+builds ONE network as wide as there are latches rather than one copy per gesture.
+Thirteen latches, thirteen channels, one set of operators - and adding the eight
+finger triggers to the original five was a matter of adding rows to the table
+below, with no operator added and no logic touched. That is the whole argument for
+the shape: the alternative, a base COMP duplicated per gesture, was the original
+plan in docs/BUILD_PLAN.md and was abandoned because duplication is how most of
+the copies end up subtly different.
 
 WHY EVERY OPERATOR HERE IS NATIVE. The state has memory, and Python state inside
 a Script CHOP survives a project reload in ways nothing controls - a latch that
@@ -74,7 +80,7 @@ PREFIX = "lat_"
 # flags and both threshold sets are renamed to these, which is what lets one set
 # of operators serve all five latches: with the names identical across inputs,
 # every Logic CHOP pairs the right channels by name instead of by luck.
-LATCHES = (
+NAMED_LATCHES = (
     # 0 working  1 distance          2 valid       3 on          4 off
     # 5 state    6 start pulse       7 end pulse   8 fire count  9 release count
     ("pinch0",   "h0_pinch_index",   "h0_valid",   "Pinchon",    "Pinchoff",
@@ -98,6 +104,34 @@ LATCHES = (
      "clap_count", "apart_count"),
 )
 
+FINGER_LATCHES = tuple(
+    # THE FINGER TRIGGERS: thumb-to-fingertip contact for all four long fingers on
+    # both hands, one uniform grid, sharing a single `Trigger` threshold pair.
+    #
+    # They deliberately OVERLAP the named gestures: `h0_index_trigger` watches the
+    # same distance as `h0_pinching`, and `h0_middle_trigger` the same as
+    # `h0_snapping`. That is not redundancy to be tidied away - the two serve
+    # different jobs. Pinch and snap are named gestures you tune by feel, each
+    # with its own thresholds. The triggers are a uniform grid you map to eight
+    # things, and their value is that all eight behave identically, which a
+    # per-finger threshold would destroy.
+    #
+    # No thumb trigger. Every distance here is measured TO the thumb tip, so the
+    # thumb is the common reference and cannot contact itself. A thumb gesture
+    # would have to be a curl threshold rather than a distance, which is a
+    # different mechanism and not what was asked for.
+    ("%s%d" % (finger, hand), "h%d_pinch_%s" % (hand, finger), "h%d_valid" % hand,
+     "Triggeron", "Triggeroff",
+     "h%d_%s_trigger" % (hand, finger),
+     "h%d_e_%s_trigger" % (hand, finger),
+     "h%d_e_%s_release" % (hand, finger),
+     "h%d_%s_trigger_count" % (hand, finger),
+     "h%d_%s_release_count" % (hand, finger))
+    for hand in range(2)
+    for finger in ("index", "middle", "ring", "little")
+)
+
+LATCHES = (*NAMED_LATCHES, *FINGER_LATCHES)
 WORKING = tuple(row[0] for row in LATCHES)
 
 # Tuning defaults come from visionhands/tuning.py, not from a copy here. They were
@@ -154,8 +188,7 @@ def _threshold_page(comp, page_name="Tuning"):
     # preserving the damage faithfully for ever.
     tuned = {p.name: p.eval() for p in comp.customPars
              if p.name in THRESHOLD_DEFAULTS and p.eval() > 0.0}
-    for name in ("Pinchon", "Pinchoff", "Snapon", "Snapoff",
-                 "Togetheron", "Togetheroff"):
+    for name in sorted(THRESHOLD_DEFAULTS):
         par = page.appendFloat(name, label=name.replace("on", " On").replace(
             "off", " Off"))[0]
         par.default = THRESHOLD_DEFAULTS[name]
@@ -163,6 +196,61 @@ def _threshold_page(comp, page_name="Tuning"):
         # A value the user had tuned wins; otherwise the spec default.
         par.val = tuned.get(name, THRESHOLD_DEFAULTS[name])
     return page
+
+
+def _fan(td, make, wire, source, name, column, y):
+    """Pick `column` of every latch row out of `source`, renamed to the working
+    names, however often a source channel repeats. Returns the merged CHOP.
+
+    Traps: A Select CHOP can emit a given source channel only ONCE, and both
+           columns this serves now repeat. `h0_valid` gates six latches (pinch,
+           snap and four finger triggers), and `h0_pinch_index` is the distance
+           for BOTH `pinch0` and `index0`, because the named gestures and the
+           uniform trigger grid deliberately overlap.
+
+           Asking one Select for a repeated channel does not error. It emits the
+           unique set, silently, and the rename then maps each source to the first
+           target that claims it - so with thirteen latches `lat_dist` came back
+           with eleven renamed channels in a scrambled order and two still under
+           their source names. Caught by the structural check, which is the only
+           reason it was not shipped.
+
+           So the rows are packed first-fit into the fewest groups such that no
+           group asks for the same source twice, one Select per group, merged.
+           Computed rather than hand-listed, because the latch table is generated
+           and its shape will change again.
+
+           Keyed on NAMES rather than on position throughout: `renamefrom = "*"`
+           would map the To list onto whatever order channels arrive in, which
+           made channel identity positional - and `derive_chop` publishes
+           alphabetically, which is not this order. Worse, `derive()` takes an
+           enabled-groups set, so once the Attributes page exists, unchecking
+           Contacts would drop the pinch channels and silently publish the clap
+           latch as `h0_pinching`. A literal From/To list is pairwise by name
+           (verified live), and a missing source keeps its own name while the rest
+           still map correctly - so a dropped group costs one latch rather than
+           shifting every later one onto the wrong data.
+    """
+    groups = []
+    for row in LATCHES:
+        for group in groups:
+            if all(existing[column] != row[column] for existing in group):
+                group.append(row)
+                break
+        else:
+            groups.append([row])
+
+    parts = []
+    for index, rows in enumerate(groups):
+        part = make(td.selectCHOP, "%s_%d" % (name, index), y)
+        wire(part, source)
+        part.par.channames = " ".join(row[column] for row in rows)
+        part.par.renamefrom = " ".join(row[column] for row in rows)
+        part.par.renameto = " ".join(row[0] for row in rows)
+        parts.append(part)
+    merged = make(td.mergeCHOP, name, y)
+    wire(merged, *parts)
+    return merged
 
 
 def _rewire_merge(merge, nodes):
@@ -216,7 +304,8 @@ def _rewire_merge(merge, nodes):
 def _verify_hysteresis(comp):
     """Every `off` must exceed its `on`, or there is no dead band to hold in."""
     problems = []
-    for name in ("Pinch", "Snap", "Together"):
+    for name in sorted({n[:-2] if n.endswith("on") else n[:-3]
+                        for n in THRESHOLD_DEFAULTS}):
         on = float(getattr(comp.par, name + "on").eval())
         off = float(getattr(comp.par, name + "off").eval())
         if off <= on:
@@ -231,6 +320,21 @@ def main():
 
     if REPO_ROOT not in sys.path:
         sys.path.append(REPO_ROOT)
+    # PURGE FIRST. TouchDesigner's Python process outlives every run of this
+    # script, so `import visionhands.tuning` returns whatever was imported hours
+    # ago - editing the repo does nothing. Not a subtle failure, but a silent one:
+    # adding the Trigger thresholds to tuning.py and re-running this built a bank
+    # referencing `parent().par.Triggeron`, which the Tuning page did not have,
+    # because the page was built from the STALE table. Every affected Constant CHOP
+    # then errored once per channel per cook.
+    #
+    # Safe to purge: these are pure Python with no C extension state, and the only
+    # thing holding references into them is the callbacks DAT, whose text this
+    # script rewrites anyway - which is what makes TD recompile it against the
+    # fresh import.
+    for stale in [n for n in list(sys.modules)
+                  if n == "visionhands" or n.startswith("visionhands.")]:
+        del sys.modules[stale]
     # One table, shared with the tests. Its import-time self-check refuses a
     # threshold pair with no dead band, which is a build that would chatter.
     from visionhands.tuning import THRESHOLD_DEFAULTS as DEFAULTS
@@ -275,50 +379,12 @@ def main():
         node.cook(force=True)
         return [c.name for c in node.chans()]
 
-    # -- the five distances, renamed to the working names -----------------
-    # Select's channames order determines the OUTPUT order (verified live), and
-    # its built-in rename with from='*' maps the To list positionally onto that
-    # order (also verified). So one operator both picks and renames.
-    dist = make(td.selectCHOP, "dist")
-    wire(dist, source)
-    dist.par.chops = ""
-    dist.par.channames = " ".join(row[1] for row in LATCHES)
-    # KEYED ON NAMES, not on position. `renamefrom = "*"` maps the To list onto
-    # whatever order the channels happen to arrive in, which made every channel's
-    # IDENTITY positional - and `derive_chop` publishes in alphabetical order,
-    # which is not this order, so correctness rested entirely on the Select
-    # reordering to `channames`. Worse, `derive()` takes an enabled-groups set, so
-    # the moment the Attributes page exists, unchecking Contacts drops the eight
-    # `h*_pinch_*` channels, `hands_distance` becomes channel 0, and the clap
-    # latch is silently published as `h0_pinching`. Cooks cleanly, no error.
-    #
-    # A literal space-separated From/To list IS pairwise by name (verified live -
-    # the recorded trap about non-pairwise lists applies to WILDCARD patterns).
-    # And a missing source degrades safely: verified, the surviving channels still
-    # map correctly and the absent one simply keeps its own name, so a dropped
-    # group costs one latch instead of shifting four onto the wrong data.
-    dist.par.renamefrom = " ".join(row[1] for row in LATCHES)
-    dist.par.renameto = " ".join(WORKING)
+    # -- the distances and the validity flags, renamed to the working names
+    # One helper for both, because both columns repeat a source channel and a
+    # Select can emit each source only once - see _fan.
+    dist = _fan(td, make, wire, source, "dist", 1, ROW_Y)
 
-    # -- the five validity flags, renamed to the SAME working names -------
-    # Three Selects rather than one, because `h0_valid` has to appear twice -
-    # once gating the pinch latch and once gating the snap latch - and a single
-    # Select cannot emit the same source channel under two names.
-    #
-    # This is the alignment problem docs/BUILD_PLAN.md warned about, solved at
-    # the source: rather than gate `h0_pinch_index` with a channel called
-    # `h0_valid` and hope the operator pairs them, both are called `pinch0` by
-    # the time they meet.
-    valid_parts = []
-    for tag, rows in (("p", LATCHES[0:2]), ("s", LATCHES[2:4]), ("t", LATCHES[4:5])):
-        part = make(td.selectCHOP, "valid_" + tag, ROW_Y - 150)
-        wire(part, source)
-        part.par.channames = " ".join(row[2] for row in rows)
-        part.par.renamefrom = " ".join(row[2] for row in rows)
-        part.par.renameto = " ".join(row[0] for row in rows)
-        valid_parts.append(part)
-    valid_raw = make(td.mergeCHOP, "valid_raw", ROW_Y - 150)
-    wire(valid_raw, *valid_parts)
+    valid_raw = _fan(td, make, wire, source, "valid_raw", 2, ROW_Y - 150)
 
     # -- liveness: is anything still SENDING? ------------------------------
     # DESIGN.md 2.9 records that a dead sidecar leaves the OSC In CHOP frozen
@@ -541,49 +607,58 @@ def main():
     both.par.renameto = "both_pinching"
 
     # -- the clock ----------------------------------------------------------
-    # THE LEAST OBVIOUS OPERATOR HERE, and the reasoning matters because the first
-    # version of this comment had it wrong.
+    # THE LEAST OBVIOUS OPERATORS HERE, and the reasoning has now been wrong twice.
+    # What follows is what is actually measured, plus a design that does not depend
+    # on which explanation is right.
     #
-    # WRONG REASON (recorded so nobody re-derives it): "a Merge CHOP does not pull
-    # a branch whose channels nothing downstream selects." It does. Measured under
-    # control - with this Null fully detached, `lat_state` and `merge_out` advanced
-    # 402 cooks to 402, in lockstep. The earlier reading that suggested otherwise
-    # compared `merge_out`'s lifetime cook count against a `lat_state` that every
-    # build recreates from zero; the two numbers covered different spans.
+    # MEASURED, six operators at once, in this project: every terminal branch of
+    # this bank - `lat_out_state`, `lat_out_start`, `lat_out_end`, `lat_out_count`,
+    # `lat_out_count_end`, `lat_both_pinching` - had cooked FOUR times, all four
+    # forced by this script, while `merge_out` downstream of them had cooked
+    # 420,613 times. The only chain advancing was the one the clock happened to
+    # pull. So TouchDesigner really does not cook a Merge input whose channels
+    # nothing downstream asks for: this project's consumers select `*_tx` and
+    # `*_ty`, and nothing else gets pulled.
     #
-    # THE REAL REASON. The bank has to react to data STOPPING, and nothing else
-    # will wake it up to notice. When the sidecar dies the OSC In CHOP freezes
-    # rather than zeroing (DESIGN.md 2.9), so `in1` stops changing, so nothing
-    # downstream cooks - including the liveness detector above, whose whole job is
-    # to spot that. Measured: with nothing sending, `lat_live` sat at 1 and stayed
-    # there, because the absence of data is exactly what stopped it from being
-    # recomputed. A latch engaged at that moment stays engaged for ever, and no
-    # end pulse ever fires.
+    # An earlier, single measurement appeared to contradict that - a detached clock
+    # with `lat_state` still advancing in step with `merge_out`. It could not be
+    # reproduced, and it is one observation against six. Recorded because it was
+    # persuasive enough to make me rewrite DESIGN.md 2.10 in the wrong direction.
     #
-    # So the bank is clocked by TIME, not by data. A Null CHOP with Cook Type =
-    # Always consumes the deepest point, and everything upstream then cooks every
-    # frame whether or not anything arrived.
+    # WHY IT MATTERS AT ALL. For a stateless branch, cooking on demand is a pure
+    # optimisation - an uncooked distance is recomputed the moment anyone asks. For
+    # a recurrence it is fatal, and it fails silently: the state self-corrects
+    # because it is level-driven, but every edge pulse is computed between two
+    # frames that were never adjacent. Here it showed up as release counters stuck
+    # at zero while the fire counters climbed - `lat_end` had cooked 4 times.
     #
-    # WHAT IT COSTS, stated honestly: `derive_chop` is main-thread Python at
-    # 0.210 ms (DESIGN.md 2.7), and this makes it cook on 100% of frames instead
-    # of only when a frame arrives - about 1.3% of a 60 fps frame, paid always.
-    # That buys a latch bank that releases when the camera goes away, which is
-    # worth more than the 1.3%.
+    # AND SEPARATELY, the reason a clock is needed even where consumption is
+    # guaranteed: the bank has to react to data STOPPING. When the sidecar dies the
+    # OSC In CHOP freezes rather than zeroing (DESIGN.md 2.9), so `in1` stops
+    # changing and nothing downstream of it cooks - including the liveness detector
+    # whose whole job is to notice. Measured: `lat_live` sat at 1 for ever with
+    # nothing sending, and a latch engaged at that moment never released.
     #
-    # TODO(M-groups): step 3 of docs/BUILD_PLAN.md gates groups with
-    # `allowCooking` off on a group COMP. Cook Type = Always does NOT run inside a
-    # COMP whose cooking is disabled, so a disabled group would freeze its latches
-    # and resume with a stale `prev`. Decide that interaction before building the
-    # group COMPs - the likely answer is that this clock lives outside any gated
-    # group.
+    # SO: one Null at Cook Type = Always, consuming a Merge of EVERY terminal
+    # branch. Not just one of them, which is the mistake that left the end counters
+    # dead. Nothing here depends on what any project downstream happens to select.
+    terminals = make(td.mergeCHOP, "terminals", ROW_Y - 900)
+    wire(terminals, out_state, out_start, out_end, out_count, out_count_end,
+         both, live5)
     clock = make(td.nullCHOP, "tick", ROW_Y - 900)
-    wire(clock, counter)
+    wire(clock, terminals)
     clock.par.cooktype = "always"
-    # The liveness chain hangs off `in1` rather than off the bank, so it needs
-    # pulling too - it is not upstream of `counter`.
-    clock_live = make(td.nullCHOP, "tick_live", ROW_Y - 1050)
-    wire(clock_live, live5)
-    clock_live.par.cooktype = "always"
+
+    # WHAT IT COSTS, stated honestly: the clock pulls `derive_chop`, which is
+    # main-thread Python at 0.210 ms for 171 channels (DESIGN.md 2.7), so that
+    # cooks on 100% of frames rather than only when a frame arrives - about 1.3% of
+    # a 60 fps frame, paid always. It buys edge pulses that are correct and a bank
+    # that releases when the camera goes away.
+    #
+    # TODO(M-groups): step 3 of docs/BUILD_PLAN.md gates groups with `allowCooking`
+    # off on a group COMP. Cook Type = Always does not run inside a COMP whose
+    # cooking is disabled, so a disabled group would freeze its latches and resume
+    # with a stale `prev`. The clock has to live outside any gated group.
 
     print("3. built %d operators" % sum(1 for c in comp.children
                                         if c.name.startswith(PREFIX)))
@@ -612,7 +687,9 @@ def main():
               (both_sel, ("h0_pinching", "h1_pinching")),
               (both, ("both_pinching",)),
               (live, ("seq",)),
-              (clock, WORKING), (clock_live, WORKING)]
+              # 66 published channels plus the 13 broadcast liveness channels.
+              (terminals, (*(n for row in LATCHES for n in row[5:10]),
+                           "both_pinching", *WORKING))]
     for node, expected in checks:
         actual = tuple(named(node))
         # Compared as SETS. Every rename is now keyed on channel names rather than
@@ -661,6 +738,8 @@ def main():
     print("   liveness: lat_live=%.0f - 0 means nothing has sent for %.1f s, and "
           "every latch is then forced released" % (live.chan("seq")[0],
                                                    LIVENESS_WINDOW_S))
+    print("   clock pulls %d terminal channels; tools/td_verify_latches.py checks "
+          "that lat_end cooks as often as lat_start" % terminals.numChans)
 
     if failures:
         print("\nFAILURES (%d):" % len(failures))

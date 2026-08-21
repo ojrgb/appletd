@@ -112,7 +112,12 @@ EXPECTED = {
 # on its own or every measurement below is meaningless; `lat_live` says whether
 # anything is sending at all, which is the difference between "the gate correctly
 # refused" and "nothing arrived".
-HEALTH_OPS = ("lat_state", "lat_live", "merge_out")
+# `lat_end` is here because it is the one that was silently dead: the clock pulled
+# only the start counter, so `lat_end` had cooked 4 times against `lat_start`'s
+# 4,845 and every release counter sat at zero while the fire counters climbed. Any
+# terminal branch of the bank that cooks less often than the rest is that bug
+# again, so the two are compared on every run rather than trusted.
+HEALTH_OPS = ("lat_state", "lat_start", "lat_end", "lat_live", "merge_out")
 
 
 def _counts(comp):
@@ -200,6 +205,14 @@ def main():
                                   state["hands_together"], state["both_pinching"]))
     print("     lat_live=%s (0 = nothing has sent recently, so every latch is "
           "forced released)" % ("?" if live is None else int(live)))
+    starts, ends = health.get("lat_start"), health.get("lat_end")
+    if starts and ends:
+        # Equal, not merely both non-zero: they are the same depth in the same
+        # bank and must be pulled by the same clock.
+        gap = abs(starts - ends)
+        print("     lat_start cooks %d, lat_end cooks %d: %s"
+              % (starts, ends, "ok" if gap <= 2 else
+                 "MISMATCH - a terminal branch is not being clocked"))
     if stored_cooks is not None and health.get("lat_state") is not None:
         advanced = health["lat_state"] - stored_cooks
         verdict = "ok" if advanced > 0 else "STUCK - nothing below is meaningful"

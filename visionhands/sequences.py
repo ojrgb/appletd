@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from typing import Final
 
-from visionhands.synth import HandPose, open_hand, pinching, snapping, synthetic_frame
+from visionhands.synth import HandPose, open_hand, pinching, synthetic_frame
 from visionhands.types import LandmarkFrame
 
 # One sequence: phase in 0..1 -> the pose of each hand slot, None for absent.
@@ -74,32 +74,35 @@ def triangle(phase: float) -> float:
 # ---------------------------------------------------------------------------
 # The sequences
 # ---------------------------------------------------------------------------
-def _ramp_pinch(phase: float) -> list[HandPose | None]:
-    """One hand, thumb sweeping to the index tip and back.
+def _ramp_to_finger(finger: str) -> SequenceFn:
+    """One hand, thumb sweeping to `finger`'s tip and back.
 
-    Sweeps `h0_pinch_index` over roughly 1.16 -> 0.00 -> 1.16 hand-sizes, which
-    straddles the `Pinchon` 0.35 / `Pinchoff` 0.50 defaults.
+    A factory rather than four near-identical functions, because there are now
+    eight finger-trigger latches and each one wants its own sweep - the ONLY thing
+    that distinguishes them is which distance channel goes to zero, so writing
+    them out separately is how three of the four end up subtly different.
 
-    NOTE, and it is a property of hand geometry rather than of this generator: a
-    full index pinch also brings the thumb within 0.21 hand-sizes of the MIDDLE
-    fingertip, which is below `Snapon`. So this sequence engages the snap latch
-    too, near the peak. That is what a real hand does, and it means one ramp
-    exercises two latches - but it also means `h0_snapping` is not a clean
-    discriminator between a pinch and a snap at these default thresholds. Flagged
-    for the threshold-feel session; the arithmetic is not what is in question.
+    Sweeps `h0_pinch_<finger>` from its resting ratio down to 0.00 and back:
+    index 1.16, middle 1.31, and further for ring and little, which sit wider of
+    the thumb. All four straddle the `Trigger` defaults of 0.40 / 0.55 with room
+    to spare, which `test_each_sweep_clears_its_thresholds_by_a_real_margin`
+    checks rather than assumes.
+
+    NOTE, a property of hand geometry rather than of this generator: a full index
+    pinch also brings the thumb within 0.21 hand-sizes of the MIDDLE fingertip,
+    below `Snapon`. So the index sweep engages the middle latch too near its peak.
+    That is what a real hand does, and it means one ramp exercises two latches -
+    but it also means the middle-finger state is not a clean discriminator between
+    a pinch and a snap at these defaults. For the threshold-feel session; the
+    arithmetic is not what is in question.
     """
-    return [pinching(triangle(phase), palm_x=_CENTRE_X, palm_y=_CENTRE_Y,
-                     size=_SIZE), None]
-
-
-def _ramp_snap(phase: float) -> list[HandPose | None]:
-    """One hand, thumb sweeping to the MIDDLE tip and back.
-
-    Sweeps `h0_pinch_middle` over roughly 1.31 -> 0.00 -> 1.31, straddling
-    `Snapon` 0.25 / `Snapoff` 0.45. The snap latch's own input, driven directly.
-    """
-    return [snapping(triangle(phase), palm_x=_CENTRE_X, palm_y=_CENTRE_Y,
-                     size=_SIZE), None]
+    def sequence(phase: float) -> list[HandPose | None]:
+        pose = pinching(triangle(phase), palm_x=_CENTRE_X, palm_y=_CENTRE_Y,
+                        size=_SIZE)
+        pose.pinch_finger = finger
+        return [pose, None]
+    sequence.__doc__ = "One hand, thumb sweeping to the %s tip and back." % finger
+    return sequence
 
 
 def _ramp_clap(phase: float) -> list[HandPose | None]:
@@ -194,8 +197,12 @@ def _absent(_phase: float) -> list[HandPose | None]:
 
 
 SEQUENCES: Final[dict[str, SequenceFn]] = {
-    "ramp": _ramp_pinch,
-    "snap": _ramp_snap,
+    # `ramp` and `snap` keep their names: they are the index and middle sweeps,
+    # and every verification run and journal entry so far refers to them.
+    "ramp": _ramp_to_finger("index"),
+    "snap": _ramp_to_finger("middle"),
+    "ring": _ramp_to_finger("ring"),
+    "little": _ramp_to_finger("little"),
     "clap": _ramp_clap,
     "deadband": _deadband,
     "both": _ramp_both,

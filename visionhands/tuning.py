@@ -38,6 +38,17 @@ LATCH_THRESHOLDS: Final[dict[str, tuple[float, float]]] = {
     "Pinch": (0.35, 0.50),
     "Snap": (0.25, 0.45),
     "Together": (0.60, 0.95),
+    # One pair shared by all eight finger triggers - index, middle, ring and
+    # little, on both hands. Not one pair per finger: that would be sixteen
+    # sliders for a grid whose whole point is uniformity, and the resting distance
+    # differing per finger changes how far the thumb has to travel, not whether
+    # the contact fires.
+    #
+    # Deliberately a little looser than `Pinch`, because the ring and little
+    # fingers meet the thumb less squarely than the index does and a threshold
+    # tuned on the index tends to make them feel dead. GUESSED - this is one of
+    # the numbers the threshold-feel session exists to settle.
+    "Trigger": (0.40, 0.55),
 }
 
 # Flattened to the parameter names TouchDesigner carries, since that is the shape

@@ -170,6 +170,37 @@ because pinch, snap and the two-hand "together" state are one family.
 
 28 channels. The edge pulses for these live in the Events group.
 
+### Finger triggers — the same mechanism, as a uniform grid
+
+| channel | definition |
+|---|---|
+| `h{i}_index_trigger` | state on `pinch_index`, thresholds `Triggeron` / `Triggeroff` |
+| `h{i}_middle_trigger`, `h{i}_ring_trigger`, `h{i}_little_trigger` | the same for the other three fingertips |
+| `h{i}_e_{finger}_trigger`, `h{i}_e_{finger}_release` | the edge pulses |
+| `h{i}_{finger}_trigger_count`, `h{i}_{finger}_release_count` | and the counters |
+
+40 channels. Thumb-to-fingertip contact for all four long fingers on both hands,
+sharing **one** `Triggeron` / `Triggeroff` pair.
+
+**One shared threshold pair, not one per finger.** Sixteen sliders for a grid
+whose entire value is that all eight behave identically would defeat the purpose,
+and the resting distance differing per finger changes how far the thumb has to
+travel, not whether the contact fires. The default is a little looser than
+`Pinchon` because the ring and little fingers meet the thumb less squarely than the
+index does, and a threshold tuned on the index makes them feel dead.
+
+**They deliberately overlap the named gestures.** `h{i}_index_trigger` watches the
+same distance as `h{i}_pinching`, and `h{i}_middle_trigger` the same as
+`h{i}_snapping`. That is not redundancy to tidy away — the two serve different
+jobs. Pinch and snap are named gestures tuned by feel, each with their own
+thresholds; the triggers are a uniform grid to map eight things to. Either can be
+retuned without disturbing the other.
+
+**No thumb trigger.** Every distance here is measured *to* the thumb tip, so the
+thumb is the common reference and cannot contact itself. A thumb gesture would have
+to be a curl threshold rather than a distance — a different mechanism, and not what
+this group is.
+
 **The two counters are a standing invariant, not just a convenience:**
 
     fires - releases  ==  1 if the gesture is engaged right now, else 0
@@ -323,6 +354,7 @@ signature of the pose, for gesture matching or as features for a model.
 | `Core` | 20 | on |
 | `Presence` | 10 | on |
 | `Contacts` | 28 | on |
+| `Triggers` — thumb-to-fingertip grid | 40 | on |
 | `Pose` | 22 | on |
 | `Motion` | 14 | on |
 | `Twohands` | 14 | on |
@@ -331,8 +363,8 @@ signature of the pose, for gesture matching or as features for a model.
 | `Descriptor` | 84 | off |
 
 Presets on the `Verbosity` menu: **Minimal** = Landmarks + Coordstx (221),
-**Interaction** = everything except Coordspx and Descriptor (381), **Everything**
-= all of it (549).
+**Interaction** = everything except Coordspx and Descriptor (421), **Everything**
+= all of it (589).
 
 ## Parameters
 
@@ -371,6 +403,8 @@ are excluded from the output rather than left stale.
 | `Snapoff` | ratio | 0.45 | and above which it re-arms |
 | `Togetheron` | ratio | 0.60 | palm distance, over mean hand size, below which `hands_together` engages and `e_clap` fires |
 | `Togetheroff` | ratio | 0.95 | and above which it re-arms |
+| `Triggeron` | ratio | 0.40 | thumb-to-fingertip distance below which any finger trigger engages |
+| `Triggeroff` | ratio | 0.55 | and above which it re-arms. One pair for all eight |
 | `Grabon` | 0..1 | 0.30 | `openness` below which `e_grab` fires |
 | `Graboff` | 0..1 | 0.55 | above which `e_release` fires |
 | `Swipespeed` | /s | 1.50 | palm speed above which a swipe is considered |
