@@ -240,12 +240,27 @@ regular — see the jitter note at the end.
 |---|---|
 | `h{i}_vel_x`, `h{i}_vel_y` | d/dt of palm position, units per second, averaged over `Velocityfilter` |
 | `h{i}_speed` | magnitude |
-| `h{i}_dir` | direction angle, meaningful only when speed is above a floor |
+| `h{i}_dir` | heading in degrees, HELD at its last value while speed is below `Speedfloor` rather than spinning on noise |
+| `h{i}_dir_x`, `h{i}_dir_y` | the same heading as a unit vector, held with it. Most consumers want this rather than the angle: an angle has to be unwrapped before it can be interpolated, and this pair cannot wrap |
+| `h{i}_moving` | 1 when speed is above `Speedfloor`. What tells a consumer whether the held heading is current |
 | `h{i}_accel` | d/dt of speed |
 | `h{i}_steadiness` | 1 − normalised variance of palm position over `Steadywindow`. "Hold still to confirm" |
 | `h{i}_dwell` | seconds the palm has stayed within `Dwellradius` of where it settled |
 
-14 channels.
+20 channels.
+
+**All three heading channels are held together**, which is not a detail. Holding
+only the angle left the unit vector following the live velocity, so a stationary
+hand reported `dir` = 180 while `dir_x` read +1 — one saying left, the other
+right, with no way for a consumer to know which to believe. Two channels
+disagreeing is worse than either alone.
+
+`dir` comes from `atan2`, which **no CHOP provides** — the Math CHOP's unary menu
+covers negate, absolute value, square, root and reciprocal and stops there. So it
+is the second pure-Python operator in the COMP, `visionhands/motion.py`, wrapped
+the same way `derive()` is. The *holding* is native, because holding is memory:
+the module publishes `moving` and lets the network decide what to remember, which
+is the same division of labour as the latches.
 
 ## Group: Two hands
 
@@ -442,7 +457,7 @@ expect to retune these first.
 | parameter | type | default | what it does |
 |---|---|---|---|
 | `Velocityfilter` | s | 0.15 | the window a velocity is AVERAGED over. Not merely smoothing: positions update at the camera rate and are differentiated at the cook rate, so the per-cook derivative alternates between double-size and zero, and the mean over a window is what makes the number true. 0.15 s spans four or five camera frames — see `DESIGN.md` 2.11 |
-| `Speedfloor` | /s | 0.05 | below this, `dir` holds its last value instead of spinning on noise |
+| `Speedfloor` | /s | 0.05 | below this, `dir` and its unit vector hold their last value instead of spinning on noise, and `h{i}_moving` reads 0. GUESSED — a floor below the actual noise floor achieves nothing, so the jitter measurement is what should set it |
 | `Steadywindow` | s | 0.50 | window for `steadiness` |
 | `Steadytolerance` | units | 0.02 | movement inside this counts as still |
 | `Dwellradius` | units | 0.05 | radius for `dwell` |
