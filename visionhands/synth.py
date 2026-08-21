@@ -57,6 +57,20 @@ _MCP_HEIGHT = 0.85
 # The thumb's base is lower and further out than the other fingers.
 _THUMB_CMC_HEIGHT = 0.28
 
+# Degrees of bend per joint at curl 1.0.
+#
+# Chosen so that a fully curled finger's tip-to-base distance is about 0.30 of
+# its bone length, which is what `derive.Params.curlmin` treats as fully curled -
+# so a hand generated with curl 1.0 reports curl 1.0, and the two conventions can
+# be asserted against each other. At the original 75 degrees the ratio was 0.506
+# and a generated fist reported curl 0.74, which made every gesture threshold
+# untestable.
+#
+# The thumb gets more, because it has one fewer segment (MP-IP-TIP against
+# MCP-PIP-DIP-TIP) and two bends cannot fold as tightly as three.
+_FULL_CURL_DEGREES = 108.0
+_FULL_CURL_DEGREES_THUMB = 150.0
+
 
 @dataclass
 class HandPose:
@@ -105,9 +119,8 @@ def _finger_chain(finger: str, pose: HandPose) -> list[tuple[float, float]]:
     base_y = _THUMB_CMC_HEIGHT if finger == "thumb" else _MCP_HEIGHT
     segment = length / 3.0
     curl = pose.curl_of(finger)
-    # 75 degrees per joint at full curl brings the tip back towards the palm
-    # without folding it through itself.
-    bend = 75.0 * curl
+    per_joint = _FULL_CURL_DEGREES_THUMB if finger == "thumb" else _FULL_CURL_DEGREES
+    bend = per_joint * curl
 
     points = [(base_x, base_y)]
     x, y = base_x, base_y
@@ -215,7 +228,11 @@ def pointing(**kwargs: float) -> HandPose:
 
 
 def peace(**kwargs: float) -> HandPose:
+    """A V sign. Spread on purpose: a real peace sign separates the two fingers,
+    and `g_peace` tests for that separation to distinguish it from two fingers
+    held together."""
     curl = {"thumb": 0.8, "index": 0.0, "middle": 0.0, "ring": 1.0, "little": 1.0}
+    kwargs.setdefault("spread", 1.9)
     return HandPose(curl=curl, **kwargs)                            # type: ignore[arg-type]
 
 
