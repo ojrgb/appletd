@@ -15,6 +15,42 @@ Conventions used throughout:
 - Angles are degrees, counter-clockwise, 0 = +x.
 - A *state* is 0 or 1 and holds. A *pulse* is 1 for exactly one frame.
 
+## One pattern for every proximity gesture
+
+Pinch, snap and clap are the same thing measured between different pairs of
+points, and they all use one mechanism:
+
+    a distance d, and two thresholds, on < off
+
+        d < on   ->  state becomes true
+        d > off  ->  state becomes false
+        between  ->  state holds whatever it was
+
+    start pulse = rising edge of state       end pulse = falling edge
+
+That is a Schmitt trigger, and the gap between `on` and `off` does two jobs at
+once. It stops the state chattering when a distance sits near the threshold, and
+it **is** the re-arm rule: the start pulse cannot fire again until the points have
+separated past `off`, which is how we know the gesture ended rather than jittered.
+No timer is involved, and nothing has to be tuned against frame rate.
+
+This replaces the refractory windows an earlier draft specified for these
+gestures. Refractory timers are still used for the motion gestures - swipe, wave -
+because a swipe has no "released" state to wait for.
+
+**A note on what changed and why.** An earlier version of this document argued
+that snap and clap were unreliable at 30 fps, on Nyquist grounds: a snap's
+audible event lasts about 60 ms, which is two frames. That reasoning was sound
+and answered the wrong question. Detecting the *instant of contact* needs that
+resolution; detecting *that contact happened* does not, because the fingers stay
+together for many frames afterwards. Defined as a proximity crossing, both
+gestures are as reliable as pinch, which is to say completely.
+
+What remains true, and is the only residual caveat: the pulse lands on the frame
+where the crossing is first observed, so its timing is accurate to +/- one frame
+(33 ms). That is irrelevant for triggering an event and would matter for
+sample-accurate audio, which is not what this is for.
+
 ## Why every distance is normalised by hand size
 
 A raw distance in normalised screen coordinates shrinks as the hand moves away
@@ -54,18 +90,21 @@ published.
 
 10 channels.
 
-## Group: Pinch
+## Group: Contacts
+
+Finger-to-thumb and hand-to-hand proximity. Named Contacts rather than Pinch
+because pinch, snap and the two-hand "together" state are one family.
 
 | channel | definition |
 |---|---|
 | `h{i}_pinch_index` | distance(index_tip, thumb_tip) / size |
 | `h{i}_pinch_middle/_ring/_little` | same for the other fingertips |
-| `h{i}_pinch_angle` | angle of the thumb_tip→index_tip vector |
-| `h{i}_pinch_x`, `h{i}_pinch_y` | midpoint of thumb_tip and index_tip — the grab point, more stable than either tip |
-| `h{i}_pinching` | state, with **hysteresis**: on below `Pinchon`, off above `Pinchoff`. A single threshold chatters at the boundary |
-| `h{i}_pinch_start`, `h{i}_pinch_end` | pulses on the edges |
+| `h{i}_pinch_angle` | angle of the thumb_tip->index_tip vector |
+| `h{i}_pinch_x`, `h{i}_pinch_y` | midpoint of thumb_tip and index_tip - the grab point, more stable than either tip |
+| `h{i}_pinching` | state on `pinch_index`, thresholds `Pinchon` / `Pinchoff` |
+| `h{i}_snapping` | state on `pinch_middle`, thresholds `Snapon` / `Snapoff`. Middle finger and thumb together |
 
-20 channels.
+18 channels. The edge pulses for these live in the Events group.
 
 ## Group: Pose
 
@@ -102,6 +141,7 @@ Symmetric attributes only — see the slot-assignment caveat at the end.
 
 | channel | definition |
 |---|---|
+| `hands_together` | state on `hands_distance`, thresholds `Togetheron` / `Togetheroff`. The thing "clap" is the momentary version of |
 | `hands_distance` | distance(h0_palm, h1_palm) / mean size |
 | `hands_scale` | same, but expressed relative to its own value when both hands became active. A depth-invariant zoom control that starts at 1.0 |
 | `hands_center_x`, `hands_center_y` | midpoint of the two palms |
@@ -113,7 +153,7 @@ Symmetric attributes only — see the slot-assignment caveat at the end.
 | `hands_overlap` | bounding-box intersection area / smaller box area |
 | `hands_symmetry` | 1 − abs(h0_openness − h1_openness) |
 
-13 channels.
+14 channels.
 
 ## Group: Gestures — held states
 
@@ -132,56 +172,55 @@ Combinations of the curls, each debounced by `Gestureframes`.
 
 18 channels.
 
-## Group: Gestures — momentary pulses
+## Group: Events — momentary pulses
 
-Each fires for one frame and then cannot fire again for `Refractory` seconds.
-Without a refractory window a single physical gesture fires on several
-consecutive frames.
+Every pulse is 1 for exactly one frame. Proximity events re-arm by hysteresis;
+motion events re-arm by a `Refractory` timer, because they have no released state.
 
-**One hand**
+**Proximity — one hand**
 
-| channel | trigger | reliability |
+| channel | fires when |
+|---|---|
+| `h{i}_e_pinch_start`, `h{i}_e_pinch_end` | `pinching` rises / falls |
+| `h{i}_e_pinch_click` | a start and end inside `Clickms` - a click rather than a drag |
+| `h{i}_e_pinch_double` | two clicks inside `Doublems` |
+| `h{i}_e_snap` | `snapping` rises: middle finger and thumb come within `Snapon`. Cannot fire again until they separate past `Snapoff` |
+| `h{i}_e_snap_end` | `snapping` falls |
+
+**Proximity — two hands**
+
+| channel | fires when |
+|---|---|
+| `e_clap` | `hands_together` rises: palms come within `Togetheron`. Cannot fire again until they separate past `Togetheroff` |
+| `e_apart` | `hands_together` falls |
+
+**Motion and pose — one hand**
+
+| channel | fires when | reliability |
 |---|---|---|
-| `h{i}_e_pinch_click` | `pinch_start` then `pinch_end` within `Clickms` | high |
-| `h{i}_e_pinch_double` | two clicks within `Doublems` | high |
-| `h{i}_e_grab`, `h{i}_e_release` | `openness` crossing down/up through thresholds | high |
-| `h{i}_e_swipe_left/_right/_up/_down` | speed above `Swipespeed` with direction inside a 45° sector, then deceleration | high |
-| `h{i}_e_wave` | three or more sign changes in `vel_x` within `Wavewindow`, hand open | medium |
-| `h{i}_e_snap` | `pinch_middle` closed, then d/dt above `Snapspeed` | **low at 30 fps — see below** |
+| `h{i}_e_grab`, `h{i}_e_release` | `openness` crosses `Grabon` / `Graboff` | high |
+| `h{i}_e_swipe_left/_right/_up/_down` | speed above `Swipespeed`, direction inside `Swipesector`, then deceleration | high |
+| `h{i}_e_wave` | `Wavecrossings` sign changes of `vel_x` within `Wavewindow`, hand open | medium |
 
-**Two hands**
+**Motion — two hands**
 
-| channel | trigger | reliability |
+| channel | fires when | reliability |
 |---|---|---|
-| `e_clap` | `hands_approach` strongly negative, then `hands_distance` below `Clapdistance` | medium |
-| `e_cross` | sign change of (h0_palm_x − h1_palm_x) | high |
-| `e_pull_apart`, `e_squeeze` | `hands_approach` beyond ± threshold, sustained two frames | high |
-| `e_twist_cw`, `e_twist_ccw` | `hands_twist` beyond ± threshold | medium |
-| `e_frame` | both hands in `g_gun`-like L shapes, bounding boxes adjacent | medium |
+| `e_cross` | sign change of (h0_palm_x - h1_palm_x) | high |
+| `e_pull_apart`, `e_squeeze` | `hands_approach` beyond +/- `Approachrate`, sustained two frames | high |
+| `e_twist_cw`, `e_twist_ccw` | `hands_twist` beyond +/- `Twistrate` | medium |
+| `e_frame` | both hands in L shapes with adjacent bounding boxes | medium |
 
-27 channels.
+34 channels.
 
-### Snap and clap deserve a warning, and a better answer
+### Where a microphone still helps
 
-A snap lasts roughly 60 ms. At 30 fps that is **two frames** — right at the
-Nyquist limit, so a velocity threshold will miss snaps and occasionally invent
-them. A clap is a little slower but has the same problem: the informative part is
-the impact, and the impact happens between frames.
-
-The camera cannot help: this device advertises 15–30 fps and nothing higher
-(MEASURED, `DESIGN.md` 2.8).
-
-**The right sensor for a snap or a clap is a microphone.** Both are sharp audio
-transients, trivially detectable with an Audio Device In CHOP and an envelope or
-a high-band spectrum, at audio rate rather than frame rate. The strong pattern is
-to combine them: the landmarks say *the hands are together* or *the fingers are
-in snap position*, and the audio transient says *now*. That gives a gesture that
-is both correctly timed and not triggered by an unrelated noise.
-
-The vision-only versions are implemented because they are asked for and because
-they work well enough to prototype with, but they are labelled medium and low
-confidence here on purpose, and the audio route is the one to reach for if either
-gesture matters.
+Defined as proximity crossings, snap and clap need no audio - they are as
+reliable as pinch. Audio remains the better sensor for one thing only: the
+*attack timing* of a percussive gesture. If a snap is driving something musical
+and needs to land inside 10 ms rather than inside 33 ms, gate an audio transient
+with `h0_snapping` and trigger from the audio. For event triggering, which is
+what these channels are for, the vision path is sufficient on its own.
 
 ## Group: Pose descriptor — off by default
 
@@ -202,17 +241,116 @@ signature of the pose, for gesture matching or as features for a model.
 | `Coordspx` — `_px`/`_py` for all 42 joints | 84 | off |
 | `Core` | 20 | on |
 | `Presence` | 10 | on |
-| `Pinch` | 20 | on |
+| `Contacts` | 18 | on |
 | `Pose` | 22 | on |
 | `Motion` | 14 | on |
-| `Twohands` | 13 | on |
+| `Twohands` | 14 | on |
 | `Gestures` — held states | 18 | on |
-| `Events` — momentary pulses | 27 | on |
+| `Events` — momentary pulses | 34 | on |
 | `Descriptor` | 84 | off |
 
 Presets on the `Verbosity` menu: **Minimal** = Landmarks + Coordstx (221),
-**Interaction** = everything except Coordspx and Descriptor (365), **Everything**
-= all of it (533).
+**Interaction** = everything except Coordspx and Descriptor (371), **Everything**
+= all of it (539).
+
+## Parameters
+
+Five pages. The split is by how often you touch them, not by which group they
+belong to - a page you have to scroll is a page nobody tunes.
+
+### Page: Attributes
+
+| parameter | type | default | what it does |
+|---|---|---|---|
+| `Verbosity` | menu | Interaction | Minimal / Interaction / Everything. Sets the toggles below in one click |
+| `Landmarks` | toggle | on | publish the raw 137 from the sidecar |
+| `Coordstx` | toggle | on | `_tx`/`_ty` for all 42 joints |
+| `Coordspx` | toggle | off | `_px`/`_py` for all 42 joints |
+| `Core` | toggle | on | palm, size, bbox |
+| `Presence` | toggle | on | |
+| `Contacts` | toggle | on | |
+| `Pose` | toggle | on | |
+| `Motion` | toggle | on | |
+| `Twohands` | toggle | on | |
+| `Gestures` | toggle | on | held states |
+| `Events` | toggle | on | momentary pulses |
+| `Descriptor` | toggle | off | 84-channel pose signature |
+
+A disabled group has `allowCooking` off, so it costs nothing, and its channels
+are excluded from the output rather than left stale.
+
+### Page: Tuning — the ones you will actually adjust
+
+| parameter | type | default | what it does |
+|---|---|---|---|
+| `Confthreshold` | 0..1 | 0.30 | minimum `conf_median` for a hand to count as active |
+| `Pinchon` | ratio | 0.35 | index-thumb distance, over hand size, below which pinch engages |
+| `Pinchoff` | ratio | 0.50 | and above which it releases. Must exceed `Pinchon` |
+| `Snapon` | ratio | 0.25 | middle-thumb distance below which `snapping` engages and `e_snap` fires |
+| `Snapoff` | ratio | 0.45 | and above which it re-arms |
+| `Togetheron` | ratio | 0.60 | palm distance, over mean hand size, below which `hands_together` engages and `e_clap` fires |
+| `Togetheroff` | ratio | 0.95 | and above which it re-arms |
+| `Grabon` | 0..1 | 0.30 | `openness` below which `e_grab` fires |
+| `Graboff` | 0..1 | 0.55 | above which `e_release` fires |
+| `Swipespeed` | /s | 1.50 | palm speed above which a swipe is considered |
+| `Smoothing` | s | 0.05 | master position filter. 0 disables |
+
+### Page: Advanced — presence and pose
+
+| parameter | type | default | what it does |
+|---|---|---|---|
+| `Activateframes` | int | 3 | consecutive good frames before `active` turns on |
+| `Deactivateframes` | int | 6 | consecutive bad frames before it turns off. Higher than activate on purpose: losing a hand mid-gesture is worse than gaining one late |
+| `Sizejoint` | menu | middle_mcp | what defines `h{i}_size`: middle_mcp distance, or bbox diagonal |
+| `Curlmin` | ratio | 0.35 | tip-to-mcp over finger length that maps to curl 1.0 |
+| `Curlmax` | ratio | 0.95 | and to curl 0.0. Calibrates the curl range to a hand |
+| `Extendedbelow` | 0..1 | 0.30 | curl below this counts as extended for gesture states |
+| `Curledabove` | 0..1 | 0.60 | curl above this counts as curled. The gap debounces the held gestures |
+| `Gestureframes` | int | 3 | frames a held gesture must persist before its state turns on |
+| `Spreadmin`, `Spreadmax` | ratio | 0.4, 1.6 | normalise `spread` to 0..1 |
+
+### Page: Advanced — motion and events
+
+| parameter | type | default | what it does |
+|---|---|---|---|
+| `Velocityfilter` | s | 0.08 | filter on velocity before speed and direction. Raw landmark jitter makes unfiltered velocity useless |
+| `Speedfloor` | /s | 0.05 | below this, `dir` holds its last value instead of spinning on noise |
+| `Steadywindow` | s | 0.50 | window for `steadiness` |
+| `Steadytolerance` | units | 0.02 | movement inside this counts as still |
+| `Dwellradius` | units | 0.05 | radius for `dwell` |
+| `Refractory` | s | 0.25 | re-arm time for MOTION events only. Proximity events use hysteresis instead |
+| `Clickms` | ms | 300 | pinch down-and-up inside this is a click, not a drag |
+| `Doublems` | ms | 400 | two clicks inside this is a double |
+| `Swipesector` | deg | 45 | angular width of each swipe direction |
+| `Wavewindow` | s | 1.00 | window for counting wave reversals |
+| `Wavecrossings` | int | 3 | reversals needed inside that window |
+| `Approachrate` | /s | 1.20 | `hands_approach` magnitude for `e_pull_apart` / `e_squeeze` |
+| `Twistrate` | deg/s | 90 | `hands_twist` magnitude for the twist events |
+| `Overlapthreshold` | 0..1 | 0.15 | bbox intersection fraction that counts as overlapping |
+| `Scalereset` | pulse | - | sets `hands_scale` to 1.0 at the current spread |
+
+### Page: Coords
+
+| parameter | type | default | what it does |
+|---|---|---|---|
+| `Resw`, `Resh` | int | 1280, 720 | SOURCE resolution. Drives `_px`/`_py` only |
+| `Renderw`, `Renderh` | int | from render1 | RENDER resolution. Drives `_ty`. Not the same number as the source - see DESIGN.md 2.9 |
+| `Orthowidth` | float | from cam1 | match your ortho camera's Ortho Width |
+
+### Page: Sidecar
+
+`Startsidecar`, `Stopsidecar`, `Sidecarstatus` pulses and a read-only
+`Sidecarpid`, as built.
+
+### Two rules the defaults follow
+
+**Every `off` threshold is looser than its `on` threshold.** That gap is the
+hysteresis, and it is what makes a gesture end deliberately rather than by
+jitter. A build that sets them equal has no re-arm rule and will chatter.
+
+**Every threshold that is a distance is a RATIO of hand size**, never a raw
+normalised distance. The units column says `ratio` for exactly those. This is
+what makes a pinch tuned at arm's length still work when you lean in.
 
 ## Two caveats that are properties of the system, not of this list
 
