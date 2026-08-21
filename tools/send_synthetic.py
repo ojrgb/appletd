@@ -57,7 +57,7 @@ from visionhands.types import channel_names, channel_values
 DEFAULT_FPS = 30.0
 DEFAULT_PERIOD_S = 2.0
 
-# How the sidecar is recognised. The same shape of check tools/td_build_comp.py
+# How the sidecar is recognised. The same shape of check tools/td_build_vision.py
 # uses for the COMP's Start/Stop buttons: argv[0] must be a python, and `-m` must
 # sit immediately before the module, so a `python -c "...visionhands.sidecar..."`
 # decoy and this process itself are both excluded.

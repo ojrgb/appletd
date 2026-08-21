@@ -51,8 +51,7 @@ ignore = [
 # genuine typo in the package still fails.
 "tools/td_setup_snippet.py" = ["F821"]
 "tools/td_bridge.py" = ["F821"]
-"tools/td_setup_osc.py" = ["F821"]
-"tools/td_build_comp.py" = ["F821", "E402"]
+"tools/td_build_vision.py" = ["F821", "E402"]
 "tools/td_add_derive.py" = ["F821"]
 "tools/td_add_latches.py" = ["F821"]
 "tools/td_verify_latches.py" = ["F821"]
@@ -60,8 +59,6 @@ ignore = [
 "tools/td_add_temporal.py" = ["F821"]
 "tools/td_add_groups.py" = ["F821"]
 "tools/td_add_coords.py" = ["F821"]
-"tools/td_build_pose_comp.py" = ["F821", "E402"]
-"tools/td_build_face_comp.py" = ["F821", "E402"]
 "tools/probe_m1_in_td.py" = [
     "E402",
     # The probe's entire purpose is to survive a failing stage and report which

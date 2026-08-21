@@ -1,6 +1,6 @@
 # Handoff — 2026-08-21
 
-**320 tests**, `ruff check` and `mypy visionhands` clean. Working tree clean apart
+**342 tests**, `ruff check` and `mypy visionhands` clean. Working tree clean apart
 from `tools/vision_landmarks.py` and `tools/vision_landmarks_live.py`, which are
 the user's own untracked files — leave them alone.
 
@@ -32,35 +32,40 @@ keeps nothing. That is the only outstanding piece of the streams work.
 
 ## What is running
 
-One sidecar process, one camera, **one Vision request per enabled stream**, and one
-UDP port each (`DESIGN.md` 6.4):
+One sidecar process, one camera, **one Vision request per enabled stream**, one UDP
+port each, and - since 2026-08-21 - **one COMP around all three** (`DESIGN.md` 6.4
+and 6.5):
 
-    camera → sidecar → OSC 10000 → /project1/visionhands → 499 channels
-                     → OSC 10001 → /project1/visionpose  → 123 channels
-                     → OSC 10002 → /project1/visionface  →  23 channels
+    /project1/vision          every parameter, six pages, the sidecar control
+      hands_osc 10000  ->  hands  ->  out1     499 channels
+      pose_osc  10001  ->  pose   ->  out2     275
+      face_osc  10002  ->  face   ->  out3      39
+      status                                   the sidecar's own sc_* channels
 
-`visionhands` top level is 16 operators: four group COMPs (`filter`, `coords`,
-`temporal`, `latches`), `derive_chop`, `merge_out`, `out1`, the sidecar DATs. 499
-rather than 495 because the base port now also carries four `sc_*` status channels.
-`visionpose` and `visionface` are three operators each — plumbing only, no attribute
-layer, by design.
+**Paths changed in that restructure:** `/project1/visionhands` is now
+`/project1/vision/hands`. Every expression inside reads `op.Vision.par.X` through a
+Global OP Shortcut rather than `parent(2).par.X`.
 
-Build order from scratch — each group wires to the one before, and this chain was
-run end to end and verified at 499 channels on 2026-08-21:
+Each stream has its own `filter` and `coords` group, reading the master's single set
+of controls - so one `Smoothing` toggle and one `Orthowidth` serve all three.
+`hands` adds `derive_chop`, `temporal` and `latches`; pose and face have no
+attribute layer, by design.
 
-    td_build_comp.py → td_add_filter.py → td_add_coords.py → td_add_derive.py
-    → td_add_temporal.py → td_add_latches.py → td_add_groups.py
+Build order from scratch. Run end to end and verified on 2026-08-21:
 
-then `td_build_pose_comp.py` and `td_build_face_comp.py`, which are independent of
-all of it and of each other.
+    td_build_vision.py -> td_add_filter.py -> td_add_coords.py -> td_add_derive.py
+    -> td_add_temporal.py -> td_add_latches.py -> td_add_groups.py
 
 Every builder is idempotent and is run by pasting into a Text DAT, or via the MCP
-with `exec(open(path).read())`.
+with `exec(open(path).read())`. **Four builders were retired** in the restructure -
+`td_build_comp.py`, `td_build_pose_comp.py`, `td_build_face_comp.py` and
+`td_setup_osc.py`; the last would bind port 10000 a second time.
 
-Six parameter pages on the COMP: Visionhands, Sidecar (Start/Stop, `Slotassign`,
-`Streamhands`, `Streampose`, `Streamface`), Tuning (latch thresholds), Filter (`Smoothing`,
-`Mincutoff`, `Beta`), Advanced (debounce frames, `Velocityfilter`, `Speedfloor`),
-Attributes (group toggles, `Verbosity`).
+Six parameter pages, all on the master: Vision (resolutions, `Orthowidth`), Sidecar
+(Start/Stop, `Slotassign`, `Streamhands`, `Streampose`, `Streamface`), Filter
+(`Smoothing`, `Mincutoff`, `Beta`), Advanced (debounce frames, `Velocityfilter`,
+`Speedfloor`), Tuning (latch thresholds), Attributes (group toggles, `Verbosity`).
+
 
 ## How to test anything
 
@@ -113,7 +118,14 @@ All measured here, all in `DESIGN.md` 2.10/2.11, restated because they recur:
 5. **TouchDesigner caches imported modules for the process's life.** Purge
    `visionhands*` from `sys.modules` at the top of any builder, or your edits are
    invisible.
-6. **A channel can disappear between the OSC In CHOP and the COMP output with
+6. **A builder that repoints its CONSUMERS depends on build order, and lost.**
+   `td_add_filter.py` forced a named list onto its output; two of the five names
+   had moved into a group, and `derive_chop` does not exist yet when the filter is
+   built - so it wired itself to the RAW input and stayed there. Every derived
+   attribute was computed on unsmoothed landmarks while the coordinate spaces used
+   smoothed ones. **Each consumer states its own input**, which is the only
+   arrangement that cannot depend on build order.
+7. **A channel can disappear between the OSC In CHOP and the COMP output with
    nothing saying so.** Four separate instances in one afternoon (2026-08-21):
    `merge.inputs` reports a group COMP as its inner `out1`, so a name-keyed dedup
    collapsed two groups into one and dropped 168 channels; the filter group ate
@@ -136,8 +148,10 @@ else about the face stream is built and verified. Run, with a face in frame:
     ~/.venvs/visionhands/bin/python tools/probe_face_regions.py
 
 It prints a `FaceRegionSpec` block, writes no image and keeps nothing. Paste it over
-`FACE_REGIONS` in `visionhands/face_types.py`, re-run `tools/td_build_face_comp.py`,
-and the 76 points appear as channels. The self-check refuses a half-filled table and
+`FACE_REGIONS` in `visionhands/face_types.py`, re-run `tools/td_add_filter.py` -
+which is what classifies the new channels, and anything it does not classify is
+dropped silently - and the 76 points appear as channels. The coordinate builder
+needs no re-run: those points are box-relative, so they are not transformed. The self-check refuses a half-filled table and
 one that does not sum to 76, so a typo fails at import. **Ask before running it** —
 it is the only tool in the repo that opens the camera.
 
@@ -153,6 +167,20 @@ and 499 channels, against 1.040 ms measured flat — so grouping is cost-neutral
 `allowCooking` now saves about 0.5 ms of it. Anything finer needs a Trail on
 `cookTime` across frames, because reads inside one script all return the same
 frame's value.
+
+### Done 2026-08-21: one COMP around the three streams
+
+The restructure asked for after face landed: shared filter, shared coordinate
+spaces, shared sidecar control, all at the master level, transformations on all
+three streams. `docs/BUILD_PLAN.md` step 8 and `DESIGN.md` 6.5 have it. Pose went
+123 channels to **275** and face 23 to **39**, both gaining world and pixel space.
+
+The piece worth knowing before touching either builder: **`visionhands/spaces.py`
+decides which channels get smoothed and transformed, and with what rule** -
+positions are offset by -0.5, extents are not, angles are smoothed but never
+transformed, and face landmark points are `box_relative` (normalised to the
+bounding box, so image-space rules would put every feature in one corner). A
+pattern cannot make those distinctions and has failed at it twice.
 
 ### Done 2026-08-21: `allowCooking` gating
 
@@ -176,7 +204,7 @@ Left here because the reasoning is what generalises to whatever comes next:
 
 - **Toggles are LAUNCH FLAGS**, read once at startup. The sidecar is a separate
   process TouchDesigner starts with `Popen`, and `start()` in
-  `tools/td_build_comp.py` already builds the command line — a stream toggle is a
+  `tools/td_build_vision.py` already builds the command line — a stream toggle is a
   flag appended there, exactly as `--slots` is. Restart to apply. No control
   channel into the sidecar, no live reconfiguration of a running capture session.
 - **The channel contract stays CONSTANT whatever is enabled.** A disabled stream

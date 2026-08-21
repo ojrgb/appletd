@@ -1,30 +1,45 @@
 #!/usr/bin/env python
-"""Group the coordinate branches into a `coords` COMP. Paste, Run Script. Idempotent.
+"""A `coords` COMP in every stream: world and pixel spaces. Paste, Run. Idempotent.
 
-    WHAT IT BUILDS. Every joint position in three more coordinate spaces, from the
-    normalised ones the sidecar sends:
+    WHAT IT BUILDS, in each of `/project1/vision`'s streams, from the normalised
+    values the sidecar sends:
 
         _tx, _ty   world units for an orthographic camera
         _px, _py   pixels in the SOURCE image
 
-    168 channels, twelve operators, inside one node.
+    Hands: 168 channels. Pose: 152. Face: 16 - and the face is the interesting one,
+    because a bounding box is not four positions.
 
-Moved out of tools/td_build_comp.py, which built these as twelve loose operators
-at the top level. Two reasons: the top-level network reads better as a handful of
-named nodes, and td_build_comp destroys every child of the COMP when it runs -
-which made it impossible to rebuild the coordinate branches without also flattening
-`filter`, `latches` and `temporal`. Each concern owning its own builder is what
-makes any one of them re-runnable.
+EVERY STREAM, ONE SET OF PARAMETERS. This used to be hands-only, inside the hands
+COMP, because hands came first. A body's joints and a face's box want exactly the
+same conversion, and one Ortho Width has to serve all three or they disagree about
+where the world is - which is why the parameters live on the master COMP and every
+stream's branches read them through `op.Vision`.
+
+WHICH CHANNELS, AND WITH WHAT RULE, comes from `visionhands/spaces.py` rather than
+from a pattern here. Three distinctions it makes that a pattern cannot:
+
+  * a POSITION gets the -0.5 offset, because world space is centred on the camera;
+  * an EXTENT does not. A box is 0.2 wide wherever it sits, and subtracting 0.5
+    from a width produces a negative size that draws as nothing;
+  * an ANGLE is not transformed at all. There is no yaw in pixels.
+
+And the one that would be a silent disaster: face LANDMARK points are normalised to
+the FACE's bounding box, not to the image, so they are not positions in this sense
+at all. Transforming them with the image rules would put every facial feature in
+one corner of the frame. `spaces.py` marks them `box_relative` and they are left
+alone here.
 
 THE ARITHMETIC, which is the part that has been wrong twice. Each branch is
 Select -> Math -> Rename: pick the channels, do the sum, give the result its own
 suffix. The Math CHOP applies pre-offset then gain, so `(v - 0.5) * aspect` is
 exactly `preoff = -0.5, gain = aspect` with no expression gymnastics.
 
-    _tx = (x - 0.5) * Orthowidth
+    _tx = (x - 0.5) * Orthowidth              _tw = w * Orthowidth
     _ty = (y - 0.5) * Orthowidth * Renderh / Renderw
-    _px =  x * Resw
-    _py =  y * Resh
+    _px =  x * Resw                           _pw = w * Resw
+    _py =  y * Resh                           _th = h * Orthowidth * Renderh / Renderw
+                                              _ph = h * Resh
 
 **`_ty` uses the RENDER's aspect, not the source image's.** Ortho Width describes
 the visible WIDTH, and the vertical extent follows from the resolution of whatever
@@ -38,23 +53,30 @@ Ref: DESIGN.md 7 (the coordinate contract), docs/BUILD_PLAN.md step 7.3.
 import sys
 
 REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
-COMP_PATH = "/project1/visionhands"
+MASTER_PATH = "/project1/vision"
 GROUP = "coords"
 
-# Parameters stay on the TOP-LEVEL COMP so all tuning is in one place, which means
-# an expression inside the group reaches them through the grandparent. `parent(2)`
-# rather than a path, so it survives the COMP being renamed or moved.
-PARENT_PAR = "parent(2).par.%s"
+# Every user parameter lives on the master COMP, reached through its Global OP
+# Shortcut. NOT `parent(2)`: a group is two levels below the parameters now, so a
+# relative reference would have to be counted per operator and would break the next
+# time anything moved. `op.Vision` is depth-independent and survives a rename.
+MASTER_PAR = "op.Vision.par.%s"
 
-# label, which channels, output suffix, pre-offset, gain expression
-BRANCHES = (
-    ("tx", "*_x", "tx", -0.5, PARENT_PAR % "Orthowidth"),
-    ("ty", "*_y", "ty", -0.5,
-     "%s * %s / %s" % (PARENT_PAR % "Orthowidth", PARENT_PAR % "Renderh",
-                       PARENT_PAR % "Renderw")),
-    ("px", "*_x", "px", 0.0, PARENT_PAR % "Resw"),
-    ("py", "*_y", "py", 0.0, PARENT_PAR % "Resh"),
-)
+# The GAIN each output space applies, by suffix. The pre-offset and the channel list
+# come from visionhands/spaces.py; only the expressions are here, because only this
+# script knows how to write a TouchDesigner expression.
+GAINS = {
+    "_tx": MASTER_PAR % "Orthowidth",
+    "_tw": MASTER_PAR % "Orthowidth",
+    "_ty": "%s * %s / %s" % (MASTER_PAR % "Orthowidth", MASTER_PAR % "Renderh",
+                             MASTER_PAR % "Renderw"),
+    "_th": "%s * %s / %s" % (MASTER_PAR % "Orthowidth", MASTER_PAR % "Renderh",
+                             MASTER_PAR % "Renderw"),
+    "_px": MASTER_PAR % "Resw",
+    "_pw": MASTER_PAR % "Resw",
+    "_py": MASTER_PAR % "Resh",
+    "_ph": MASTER_PAR % "Resh",
+}
 
 # What feeds this. The FILTERED stream, so the derived coordinates inherit the
 # smoothing like everything else - a project reading `_tx` and a project reading
@@ -118,27 +140,76 @@ def main():
 
     if REPO_ROOT not in sys.path:
         sys.path.append(REPO_ROOT)
+    # TouchDesigner caches our modules for the life of the process. DESIGN.md 2.11.
+    for stale in [n for n in list(sys.modules)
+                  if n == "visionhands" or n.startswith("visionhands.")]:
+        del sys.modules[stale]
+    from visionhands.spaces import source_suffix, transform_branches
+    from visionhands.streams import STREAM_NAMES
 
-    comp = op(COMP_PATH)
-    if comp is None:
-        print("FAIL no COMP at %s - run tools/td_build_comp.py first" % COMP_PATH)
+    master = op(MASTER_PATH)
+    if master is None:
+        print("FAIL no COMP at %s - run tools/td_build_vision.py first" % MASTER_PATH)
         return
-    source = comp.op(SOURCE)
+
+    failures = []
+    built = []
+    for stream in STREAM_NAMES:
+        child = master.op(stream)
+        if child is None:
+            print("   (no `%s` stream in %s - skipped)" % (stream, MASTER_PATH))
+            continue
+        built.append(_build_one(td, child, stream, transform_branches(stream),
+                               source_suffix, failures))
+
+    print()
+    for stream, operators, channels in built:
+        print("   %-5s %2d operators, %3d channels" % (stream, operators, channels))
+    print()
+    print("   Orthowidth=%.3f, render %dx%d, source %dx%d - one set of controls on"
+          % (master.par.Orthowidth.eval(), master.par.Renderw.eval(),
+             master.par.Renderh.eval(), master.par.Resw.eval(),
+             master.par.Resh.eval()))
+    print("   %s, read by every stream's branches." % master.path)
+
+    if failures:
+        print("\nFAILURES (%d):" % len(failures))
+        for failure in failures:
+            print("   " + failure)
+    else:
+        print()
+        print("   verified. `_ty` uses the RENDER's aspect, not the source image's:")
+        print("   with Orthowidth %.3f and a %dx%d render, a point at the top of"
+              % (master.par.Orthowidth.eval(), master.par.Renderw.eval(),
+                 master.par.Renderh.eval()))
+        print("   frame reads %+.3f."
+              % (0.5 * master.par.Orthowidth.eval() * master.par.Renderh.eval()
+                 / master.par.Renderw.eval()))
+
+
+def _build_one(td, child, stream, branches, source_suffix, failures):
+    """Build one stream's coords group. Returns (stream, operators, channels)."""
+    source = child.op(SOURCE) or child.op("in1")
     if source is None:
-        print("FAIL no `%s` group - run tools/td_add_filter.py first" % SOURCE)
-        return
+        failures.append("%s has neither `%s` nor `in1`" % (child.path, SOURCE))
+        return (stream, 0, 0)
+    if source.name != SOURCE:
+        # Not fatal - the coordinates are still correct - but it means the spaces
+        # are computed on UNSMOOTHED values while anything reading the filter is
+        # smoothed, and the two would disagree about where the hand is.
+        failures.append("%s: no `%s` group, so these branches read the RAW input. "
+                        "Run tools/td_add_filter.py first." % (stream, SOURCE))
 
     # REUSE the group and clear its CHILDREN. Destroying the group orphans
-    # everything wired to its output, and a dangling input cannot be told apart
-    # from one that was never connected - measured elsewhere in this repo as a
-    # COMP output falling from 495 channels to 57 while the builder reported
-    # success. DESIGN.md 2.11.
-    group = comp.op(GROUP)
+    # everything wired to its output, and a dangling input cannot be told apart from
+    # one that was never connected - measured as a COMP output falling from 495
+    # channels to 57 while the builder reported success (DESIGN.md 2.11).
+    group = child.op(GROUP)
     if group is None:
-        group = comp.create(td.baseCOMP, GROUP)
+        group = child.create(td.baseCOMP, GROUP)
     else:
-        for child in list(group.children):
-            child.destroy()
+        for existing in list(group.children):
+            existing.destroy()
     group.nodeX, group.nodeY = -1100, -300
     group.color = (0.45, 0.4, 0.3)
 
@@ -150,88 +221,91 @@ def main():
     group_in = make(td.inCHOP, "in1", -600, 0)
     # `outputConnectors[0]`, not the COMP: connect() accepts an operator only where
     # it has one unambiguous output, and a base COMP does not (DESIGN.md 2.11).
-    group.inputConnectors[0].connect(source.outputConnectors[0])
+    group.inputConnectors[0].connect(
+        source.outputConnectors[0] if source.isCOMP else source)
+
+    if not branches:
+        # A stream with nothing to transform is legitimate - it just gets an empty
+        # group rather than a missing one, so a later run has something to fill.
+        group_out = make(td.outCHOP, "out1", 400, 0)
+        group_out.inputConnectors[0].connect(group_in)
+        print("   (`%s` has no channels to transform)" % stream)
+        return (stream, len(group.children), group_out.numChans)
 
     outputs = []
-    for index, (label, pattern, suffix, pre_offset, gain) in enumerate(BRANCHES):
+    for index, (label, suffix, names, pre_offset) in enumerate(branches):
         y = -150 * index
         select = make(td.selectCHOP, "sel_%s" % label, -400, y)
         select.inputConnectors[0].connect(group_in)
-        select.par.channames = pattern
+        # The channel NAMES, not a pattern: `spaces.py` decided which ones, and a
+        # pattern here would silently reclassify the moment a contract gained a
+        # channel whose name happened to end the same way (DESIGN.md 2.11).
+        select.par.channames = " ".join(names)
 
         math = make(td.mathCHOP, "math_%s" % label, -200, y)
         math.inputConnectors[0].connect(select)
         math.par.preoff = pre_offset
-        math.par.gain.expr = gain
+        math.par.gain.expr = GAINS[suffix]
 
         rename = make(td.renameCHOP, "ren_%s" % label, 0, y)
         rename.inputConnectors[0].connect(math)
-        rename.par.renamefrom = pattern
-        rename.par.renameto = pattern.replace("_x", "_%s" % suffix).replace(
-            "_y", "_%s" % suffix)
+        # Pairwise BY NAME rather than by wildcard: a literal space-separated
+        # From/To list is applied name to name, and a source that is absent keeps
+        # its own name while the rest still map correctly - so a missing channel
+        # costs one channel instead of shifting every later one onto the wrong data
+        # (DESIGN.md 2.11). The wildcard form is what turned 126 channels into
+        # `h0_wrist_x`, `h0_wrist_x1`, `h0_wrist_x2`.
+        old_suffix = source_suffix(_role_for_suffix(suffix))
+        rename.par.renamefrom = " ".join(names)
+        rename.par.renameto = " ".join(
+            name[:-len(old_suffix)] + suffix for name in names)
         outputs.append(rename)
 
-    # One output rather than four. The parent used to take all four branches into
-    # merge_out separately; a single 168-channel output means the top-level Merge
-    # has one input for coordinates instead of four, which is the readability this
-    # whole exercise is for.
+    # One output rather than one per branch: the stream's Merge takes a single
+    # input for coordinates, which is the readability this whole exercise is for.
     merged = make(td.mergeCHOP, "out", 200, 0)
     for index, node in enumerate(outputs):
         merged.inputConnectors[index].connect(node)
     group_out = make(td.outCHOP, "out1", 400, 0)
     group_out.inputConnectors[0].connect(merged)
+    group_out.cook(force=True)
 
-    print("1. `%s`: %d operators, %d channels"
-          % (GROUP, len(group.children), group_out.numChans))
+    expected = sum(len(names) for _label, _suffix, names, _off in branches)
+    if group_out.numChans != expected:
+        failures.append("%s: `%s` produced %d channels, expected %d"
+                        % (stream, GROUP, group_out.numChans, expected))
 
-    # -- into the COMP's output, replacing the four loose branches ----------
-    failures = []
-    merge = comp.op("merge_out")
+    merge = child.op("merge_out")
     if merge is not None:
-        # The four loose branches this group replaces, by name prefix.
         stale = tuple(name for name in
                       (o.name for conn in merge.inputConnectors
                        for x in conn.connections for o in [x.owner])
                       if name.startswith(("ren_", "sel_", "math_")))
-        dropped = _attach_once(merge, group, drop_names=stale)
+        _attach_once(merge, group, drop_names=stale)
         owners = [x.owner for conn in merge.inputConnectors
                   for x in conn.connections]
         if owners.count(group) != 1:
-            failures.append("`%s` feeds merge_out %d times, not once"
-                            % (GROUP, owners.count(group)))
-        print("2. merge_out: dropped %s, `%s` attached once"
-              % (", ".join(sorted(set(dropped))) or "nothing", GROUP))
+            failures.append("%s: `%s` feeds merge_out %d times, not once"
+                            % (stream, GROUP, owners.count(group)))
+    return (stream, len(group.children), group_out.numChans)
 
-    # The loose operators this replaces, now that nothing reads them.
-    removed = 0
-    for child in list(comp.children):
-        if child.name.startswith(("sel_", "math_", "ren_")):
-            child.destroy()
-            removed += 1
-    print("3. removed %d loose coordinate operators from the top level" % removed)
 
-    out_chop = comp.op("out1")
-    out_chop.cook(force=True)
-    print("4. COMP output: %d channels" % out_chop.numChans)
-    for probe in ("h0_wrist_tx", "h0_wrist_ty", "h0_wrist_px", "h0_wrist_py"):
-        channel = out_chop.chan(probe)
-        print("   %-14s %s" % (probe, "MISSING" if channel is None
-                               else round(channel[0], 4)))
-        if channel is None:
-            failures.append("%s is missing from the COMP output" % probe)
+def _role_for_suffix(suffix):
+    """Which role a target suffix came from, so the Rename knows what to strip.
 
-    if failures:
-        print("\nFAILURES (%d):" % len(failures))
-        for failure in failures:
-            print("   " + failure)
-    else:
-        print("\nverified. `_ty` uses the RENDER aspect, so check it against your")
-        print("camera: with Orthowidth %.3f and a %dx%d render, a wrist at the top"
-              % (comp.par.Orthowidth.eval(), comp.par.Renderw.eval(),
-                 comp.par.Renderh.eval()))
-        print("of frame should read %+.3f."
-              % (0.5 * comp.par.Orthowidth.eval() * comp.par.Renderh.eval()
-                 / comp.par.Renderw.eval()))
+    `_tx` and `_px` both come from an `_x`; `_tw` and `_pw` from a `_w`. Derived
+    rather than tabled, because the two tables would be one edit away from
+    disagreeing.
+    """
+    from visionhands.spaces import (
+        ROLE_EXTENT_X,
+        ROLE_EXTENT_Y,
+        ROLE_POSITION_X,
+        ROLE_POSITION_Y,
+    )
+
+    return {"x": ROLE_POSITION_X, "y": ROLE_POSITION_Y,
+            "w": ROLE_EXTENT_X, "h": ROLE_EXTENT_Y}[suffix[-1]]
 
 
 main()

@@ -2033,3 +2033,93 @@ and the engine grew one more `_publish_*` method that cannot return out of the
 callback. `IMPLEMENTED_STREAMS` went away entirely - with all three built it was
 equal to `STREAM_NAMES`, and a distinction that is always true is dead code, so the
 test that pinned it now pins the rule for the next stream instead.
+
+## One COMP around the three streams, and two bugs that were waiting in it
+
+The user's read, after face landed: the coordinate transforms and the filter live
+inside the hands COMP and neither is hand-specific, so wrap the three streams in one
+COMP, put the controls at the master level, and transform all three. Correct on
+every count. Built it.
+
+```
+/project1/vision          every parameter, six pages, the sidecar control
+  hands_osc 10000  ->  hands  ->  out1     499 channels
+  pose_osc  10001  ->  pose   ->  out2     275   (was 123)
+  face_osc  10002  ->  face   ->  out3      39   (was  23)
+  status                                   the sidecar's own sc_* channels
+```
+
+**Checked the blast radius first**, and it was small: two Select CHOPs wired to the
+old hands COMP and **zero** expression or DAT references to any of the three paths
+outside them. That is what made a same-day restructure reasonable rather than
+reckless - and the master builder rewires those two and inherits the old COMP's
+tuned parameters, so Mincutoff 3.170 and Beta 10.000 came through untouched.
+
+**`op.Vision.par.X` replaces `parent(2).par.X` everywhere.** A group now sits two
+levels below the parameters instead of one, so every relative reference would have
+had to be re-counted - and re-counted again the next time anything moved. Verified
+the Global OP Shortcut resolves from a nested network BEFORE building on it: a
+Constant CHOP two levels down read `op.VisionProbe.par.Testval` as 0.375. Depth
+independent, survives a rename, and the only cost is that the shortcut name is
+global to the project.
+
+**The new module is `visionhands/spaces.py`, and it is the interesting part.** Both
+builders used to pattern-match channel names; patterns have failed at this twice
+already (`h?_*_x` matches two different groups, `^` does not exclude in a Select
+CHOP). So the package now answers "what KIND of number is this channel" for every
+stream, and the builders ask:
+
+  * POSITION - offset by -0.5 into world space, because world space is centred;
+  * EXTENT - NOT offset. A box is 0.22 wide wherever it sits, and subtracting 0.5
+    from a width gives a negative size that draws as nothing;
+  * ANGLE - smoothed like any continuous value, never transformed. There is no yaw
+    in pixels;
+  * SCALAR - confidences, counters, flags. Neither smoothed nor transformed: a
+    smoothed confidence makes every gate reading it lag behind the thing it gates;
+  * BOX_RELATIVE - and this is the one worth having written down before it bites.
+    Face landmark points are normalised to the FACE'S BOUNDING BOX, not to the
+    image. They look exactly like positions. Transformed with the image rules they
+    would put every facial feature in one corner of the frame. They are not
+    published yet, which is precisely when the rule needs to already be right.
+
+Verified live, with synthetic senders and no camera: `f0_bbox_x` 0.39 -> tx -0.11,
+px 499.2; `f0_bbox_w` 0.22 -> **tw 0.22**, pw 281.6; `f0_bbox_h` 0.30 -> th 0.1688
+(the render aspect), ph 216.0. The third one is the whole point of the role
+distinction.
+
+### Two pre-existing bugs the restructure surfaced
+
+**`derive_chop` was reading the RAW input.** Every derived attribute - every pinch
+distance, every openness, every latch input - was computed on UNSMOOTHED landmarks
+while the coordinate spaces used smoothed ones. Two consumers of the same positions
+disagreeing about where the hand was, which is exactly what `td_add_coords.py`'s own
+comment says must not happen.
+
+The cause is a design mistake rather than a typo: `td_add_filter.py` asserted its
+consumers, forcing a named list of five operators onto its output. Two of those
+names had moved inside the `coords` group and matched nothing; and `derive_chop`
+DOES NOT EXIST when the filter is built in the documented order, so it wired itself
+to `in1` afterwards and stayed there. The list was written to be robust - "a list of
+names cannot go stale" - and it went stale in both available ways at once. Each
+consumer states its own input now, which is the only arrangement that cannot depend
+on build order.
+
+**`tools/td_verify_latches.py` never evaluated the h1 invariant.** Its state list
+was hand-maintained and omitted `h1_pinching` and `h1_snapping`, so the loop over
+END_COUNTERS raised KeyError on the second hand rather than checking it. The h1 rows
+had been structurally present and behaviourally untested since the day they were
+added - the same failure mode the release counters were added to fix, one level up.
+The list is derived from END_COUNTERS now, so the two cannot drift. After the fix:
+ramp +4 on `h0_pinch_count`, and fires - releases == engaged on all five rows.
+
+### Four builders retired
+
+`td_build_comp.py`, `td_build_pose_comp.py`, `td_build_face_comp.py` and
+`td_setup_osc.py`. The first three are superseded by `td_build_vision.py`; the last
+would have bound port 10000 a SECOND time, which is a stream arriving in a CHOP
+nobody reads. Dead builders that still run are worse than missing ones, and one of
+these would have quietly broken the thing it was written to set up.
+
+342 tests, and the new ones are mostly about `spaces.py`: that the filter split
+partitions every stream exactly, that an extent is never offset, and that nothing
+box-relative or angular reaches a coordinate branch.

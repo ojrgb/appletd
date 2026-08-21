@@ -595,6 +595,23 @@ Against the running instance (099), not read anywhere:
   COMP output went from 392 channels to 224 while the builder printed success.
   Dedup by the OWNER OBJECT (`inputConnectors[i].connections[0].owner`), which is
   the COMP itself. This is the third distinct way `.inputs` has lied.
+- **A Global OP Shortcut resolves from a nested network**, VERIFIED: a COMP with
+  `par.opshortcut = 'VisionProbe'` and a custom parameter was read by a Constant
+  CHOP two levels down through `op.VisionProbe.par.Testval`, returning 0.375 with no
+  error. That is what makes shared parameters possible without `parent(N)`, which
+  has to be counted per operator and breaks the next time anything moves. The
+  shortcut namespace is global to the project.
+- **A builder that repoints its CONSUMERS depends on build order, and lost.**
+  `td_add_filter.py` forced a named list of operators onto its output -
+  `derive_chop`, `sel_tx`, `sel_ty`, `sel_px`, `sel_py`. Two of those failed at once:
+  the four `sel_*` had moved inside a group and matched nothing, and `derive_chop`
+  does not EXIST when the filter is built in the documented order, so it wired
+  itself to the raw input afterwards and stayed there. Measured on the live network:
+  `derive_chop` read `in1`, so every derived attribute - every pinch distance, every
+  latch input - was computed on UNSMOOTHED landmarks while the coordinate spaces used
+  smoothed ones. Two consumers of the same positions disagreeing about where the
+  hand was. Each consumer states its own input now, which is the only arrangement
+  that cannot depend on build order.
 - **A pass-through group silently eats channels that are in neither of its
   Selects.** The filter group splits its input into positions and everything else,
   both from named lists; when the sidecar started sending four `sc_*` status
@@ -829,6 +846,7 @@ visionhands/
   pose_types.py   # Body, PoseFrame, the 19-joint table, the 123-channel contract
   face_types.py   # Face, FaceFrame, the 12 regions, the 23-channel contract
   streams.py      # which streams exist, which port each uses, the sc_* status
+  spaces.py       # what KIND each channel is: position, extent, angle, scalar
   coords.py       # every coordinate conversion, and the single legal y-flip
   engine.py       # TD-free: AVFoundation + Vision -> LandmarkFrame, and the camera
   pose.py         # TD-free: the body-pose request, a plug-in on top of engine.py
@@ -845,15 +863,15 @@ visionhands/
   td/
     bootstrap.py  # sys.path wiring and engine lifecycle (in-process path, legacy)
     hands_chop.py # Script CHOP callbacks for the in-process path (legacy)
-  tests/          # 320 tests, none of which need a camera or TouchDesigner
+  tests/          # 342 tests, none of which need a camera or TouchDesigner
 
 tools/            # scripts pasted into a TD Text DAT, plus dev utilities
-  td_build_comp.py     # the COMP: coordinate spaces, Sidecar page, Start/Stop
-  td_add_derive.py     # the derived-attributes Script CHOP
-  td_add_latches.py    # the proximity latch bank
+  td_build_vision.py   # the MASTER COMP: every parameter, the three streams
+  td_add_filter.py     # the one-euro filter, in EVERY stream
+  td_add_coords.py     # the world and pixel spaces, in EVERY stream
+  td_add_derive.py     # the derived-attributes Script CHOP  (hands)
+  td_add_latches.py    # the proximity latch bank            (hands)
   td_verify_latches.py # judges the latches by counter deltas over a sweep
-  td_build_pose_comp.py # the `visionpose` COMP and its OSC In CHOP
-  td_build_face_comp.py # the `visionface` COMP and its OSC In CHOP
   send_synthetic.py    # drives sequences.py into TD over OSC, no camera
   send_synthetic_pose.py # the same for a synthetic body, on the pose port
   send_synthetic_face.py # and for a face: head pose sweeps, on the face port
@@ -1127,6 +1145,50 @@ The trigger for doing it is a second thing needing to control the process — a
 
 ---
 
+### 6.5 The TouchDesigner side — one COMP, three streams
+
+Restructured 2026-08-21, after the third stream landed and made the shape obvious.
+
+```
+/project1/vision                    every user parameter; Global OP Shortcut "Vision"
+  hands_osc  10000  ->  hands  ->  out1        499 channels
+  pose_osc   10001  ->  pose   ->  out2        275
+  face_osc   10002  ->  face   ->  out3         39
+  status                                       the sidecar's own sc_* channels
+  sidecar_control / _callbacks / _exit         Start, Stop, Print Status
+```
+
+**Why the wrap.** The filter and the coordinate spaces were built inside the hands
+COMP because hands came first, and neither is remotely hand-specific: a body's
+joints and a face's bounding box want the same smoothing and the same conversion
+into world and pixel space. Three Filter pages, three Ortho Widths to keep in step
+and three Start buttons for one process would all have been wrong. So every
+parameter lives on the master, once, and every stream reads it.
+
+**`op.Vision.par.X`, not `parent(2).par.X`.** A group is now two levels below the
+parameters instead of one, so a relative reference would have to be counted per
+operator and would break the next time anything moved. A Global OP Shortcut is
+depth-independent and survives a rename; VERIFIED to resolve from a nested network
+before the restructure was built on it. The shortcut name is global to the project,
+which is the one cost.
+
+**Each stream is exposed on its own output connector**, because a TouchDesigner
+connection joins siblings and an operator outside the master cannot wire to a
+nested one. Expressions can still reach inside:
+`op('/project1/vision/hands')['h0_index_tip_tx']`.
+
+**One filter group per stream, not one shared operator.** Each stream arrives on its
+own port with its own time-slicing; merging them would make every stream cook when
+any one arrived, and reintroduce exactly the cross-stream name coupling that
+separate ports were chosen to avoid.
+
+**WHICH channels get filtered and transformed is `visionhands/spaces.py`**, not a
+pattern in a builder. Patterns have failed at this twice (§2.11): `h?_*_x` matches
+two different groups, `^` does not exclude in a Select CHOP, and anything a pattern
+misses vanishes from the COMP output with no error. `spaces.py` classifies every
+channel of every stream as a position, an extent, an angle, a box-relative point or
+a scalar, and both builders ask it.
+
 ---
 
 ## 7. Coordinate contract
@@ -1149,6 +1211,28 @@ fingertips then sit at opposite ends of the y range.
 There is **no letterbox remap** here — Vision consumes the full frame at its
 native aspect. If you are porting constants from a letterboxed detector
 pipeline, discard them.
+
+**A POSITION and an EXTENT do not transform the same way**, and this is the second
+coordinate rule the system needs now that a face publishes a bounding box:
+
+```
+position:  _tx = (x - 0.5) * Orthowidth              centred, so it is offset
+extent:    _tw =  w        * Orthowidth              a width is a width wherever
+                                                     it sits, so it is NOT
+_ty and _th both carry the RENDER's aspect: * Renderh / Renderw
+```
+
+Subtracting 0.5 from a width gives a negative size, which draws as nothing — a
+silent failure that looks like a missing operator rather than wrong arithmetic.
+`visionhands/spaces.py` is what keeps the two apart, and it is the only place that
+decides.
+
+**Face landmark points are normalised to the FACE'S BOUNDING BOX, not to the
+image** (`normalizedPoints`, §2.12). They look exactly like positions and they are
+in a different space, so transforming them with the image rules would put every
+facial feature in one corner of the frame. They are classified `box_relative`:
+smoothed, never transformed, and composing them through the box is a job for
+whoever publishes them.
 
 ---
 

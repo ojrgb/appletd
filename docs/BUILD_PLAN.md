@@ -166,7 +166,8 @@ request and the conversion), `visionhands/streams.py` (the stream registry, the
 ports and the `sc_*` status channels), the engine carrying both requests on one
 buffer, the sidecar sending one bundle per stream, `visionhands/synth_body.py` plus
 `tools/send_synthetic_pose.py` for testing without anybody in frame, and
-`tools/td_build_pose_comp.py` for the TouchDesigner side. 61 new tests.
+the TouchDesigner side (folded into `tools/td_build_vision.py` when the streams
+were wrapped - step 8). 61 new tests.
 
 **Measured in TouchDesigner:** 123 pose channels arriving on port 10001 with the
 right names and moving values, and the hands port now carrying 141 (137 + four
@@ -573,3 +574,79 @@ person in frame, adjusting numbers on the Tuning page - not a rebuild.
 Also outstanding from earlier milestones: slot assignment (M5, needs a two-hand
 fixture), tests for `Sidecar.run()` (five mutations survive a green suite), and
 per-joint jitter is still unmeasured, which is what should set `Velocityfilter`.
+
+## Step 8 — one COMP around the three streams — DONE 2026-08-21
+
+Asked for after the face stream landed: *"visionhands also contains transformation
+logic to transform coords to TouchDesigner screenspace. These, the filter, etc,
+should be applicable for pose and face as well. Suggestion: wrap visionhands,
+visionpose, visionface in one comp, have the filter + sidecar + etc controls at the
+master comp level, and perform space transformations on all three."*
+
+Built exactly that. `DESIGN.md` 6.5 has the structure and the reasoning; the short
+version:
+
+```
+/project1/vision            every user parameter, six pages, the sidecar control
+  hands_osc 10000 -> hands -> out1     499 channels
+  pose_osc  10001 -> pose  -> out2     275   (was 123: +152 coordinate channels)
+  face_osc  10002 -> face  -> out3      39   (was  23: + 16)
+  status                               the sidecar's own sc_* channels
+```
+
+**What each stream gained.** A `filter` group of its own, reading the master's one
+`Smoothing`/`Mincutoff`/`Beta`; and a `coords` group of its own, reading the
+master's one `Orthowidth`/`Renderw`/`Renderh`/`Resw`/`Resh`. Verified live with
+synthetic senders and no camera:
+
+| | normalised | `_tx` world | `_px` pixels |
+|---|---|---|---|
+| `p0_root_x` | 0.5366 | 0.0366 | 686.83 |
+| `p0_nose_y` | 0.8500 | 0.1969 | 612.00 |
+| `f0_bbox_x` | 0.3900 | −0.1100 | 499.20 |
+| `f0_bbox_w` | 0.2200 | **0.2200** | 281.60 |
+| `f0_bbox_h` | 0.3000 | 0.1688 | 216.00 |
+
+The fourth row is the point: **a width is not offset**. `_tw` = w × Orthowidth with
+no −0.5, because a box is 0.2 wide wherever it sits and subtracting 0.5 gives a
+negative size that draws as nothing. `visionhands/spaces.py` is what keeps positions
+and extents apart, and it also marks face landmark points `box_relative` - they are
+normalised to the bounding box rather than the image, so they are deliberately not
+transformed (DESIGN.md 7).
+
+**Every expression is `op.Vision.par.X` now**, via a Global OP Shortcut, replacing
+`parent(2).par.X`. A group sits two levels below the parameters instead of one, so a
+relative reference would have to be counted per operator; the shortcut is
+depth-independent and VERIFIED to resolve from a nested network before anything was
+built on it.
+
+**Two bugs surfaced by doing it**, both pre-existing and both silent:
+
+- **`derive_chop` was reading the RAW input**, so every derived attribute was
+  computed on unsmoothed landmarks while the coordinate spaces used smoothed ones.
+  Cause: the filter builder forced a named list of consumers onto its output, and
+  in the documented build order `derive_chop` does not exist yet. Each consumer
+  states its own input now. DESIGN.md 2.11.
+- **`tools/td_verify_latches.py` never evaluated the h1 invariant.** Its state list
+  was hand-maintained and omitted `h1_pinching`/`h1_snapping`, so the second hand's
+  rows raised KeyError rather than being checked. The list is derived from
+  `END_COUNTERS` now. After the fix: ramp +4 on `h0_pinch_count`, and
+  fires − releases == engaged on all five rows.
+
+**BUILD ORDER, and it is shorter than it was** - four builders retired
+(`td_build_comp.py`, `td_build_pose_comp.py`, `td_build_face_comp.py`,
+`td_setup_osc.py`; the last would have bound port 10000 a second time):
+
+    td_build_vision.py  the master: parameters, OSC In CHOPs, three stream shells
+    td_add_filter.py    `filter` in EVERY stream
+    td_add_coords.py    `coords` in EVERY stream
+    td_add_derive.py    the stateless hand attributes
+    td_add_temporal.py  presence, liveness, velocity   (hands)
+    td_add_latches.py   the proximity latches          (hands)
+    td_add_groups.py    the Attributes page and the cook gating
+
+**PATHS CHANGED.** `/project1/visionhands` is now `/project1/vision/hands`, and the
+same for pose and face. The master builder rewires anything that was wired to the
+old COMPs and inherits their tuned parameter values, so a rebuild does not reset
+somebody's Ortho Width - verified: Mincutoff 3.170 and Beta 10.000 survived, both
+tuned away from their defaults.

@@ -3,9 +3,9 @@
 The vocabulary shared by the sidecar, the TouchDesigner builders and the tests.
 It is here rather than in `sidecar.py` because the port numbers have to be the
 same on both sides of a UDP socket, and the two sides are written in different
-files by different tools: `tools/td_build_comp.py` and `tools/td_build_pose_comp.py`
-import this module for the port, so a stream cannot be listening on one number
-while the sender uses another.
+files by different tools: `tools/td_build_vision.py` imports this module for
+every stream's port, so a stream cannot be listening on one number while the
+sender uses another.
 
 Pure stdlib, no pyobjc, no TouchDesigner - the same rule `types.py` follows and
 for the same reason (DESIGN.md 5).

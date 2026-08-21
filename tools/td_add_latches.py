@@ -66,7 +66,10 @@ counter), docs/BUILD_PLAN.md step 1, visionhands/sequences.py (how it is tested)
 import sys
 
 REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
-COMP_PATH = "/project1/visionhands"
+# The master COMP holds every parameter; the hands STREAM holds this
+# network. Both are named, because this script writes to both.
+MASTER_PATH = "/project1/vision"
+COMP_PATH = MASTER_PATH + "/hands"
 # The group this builds. Everything it owns lives inside, so the top-level network
 # shows one node - and since nothing outside reads these channels except through
 # merge_out, `allowCooking` on this group gates its whole cost honestly, unlike the
@@ -95,8 +98,11 @@ ROWS = %(rows)r
 
 
 def _write(comp):
+    """`comp` is the MASTER: the parameters are its own, the operators are inside a
+    stream. `%(stream)s/%(group)s/...` rather than `%(group)s/...`, which is what
+    this read before the streams were wrapped."""
     for node_name, column in (("lat_on", 0), ("lat_off", 1)):
-        node = comp.op('%(group)s/' + node_name)
+        node = comp.op('%(stream)s/%(group)s/' + node_name)
         if node is None:
             continue
         for index, pair in enumerate(ROWS):
@@ -212,7 +218,7 @@ def _threshold_page(comp, page_name="Tuning"):
            name, so the existing one is looked up first. And `appendFloat`
            replaces a parameter's attributes wholesale, so `.default` is set every
            time while `.val` is set only on creation - the same mistake in
-           tools/td_build_comp.py once snapped a tuned Orthowidth back to 1.0.
+           tools/td_build_vision.py once snapped a tuned Orthowidth back to 1.0.
     """
     page = None
     for existing in comp.customPages:
@@ -228,7 +234,7 @@ def _threshold_page(comp, page_name="Tuning"):
     # second run of this script left every threshold at 0.000, which disabled
     # every latch while the network still looked correct and reported no error.
     #
-    # The note in tools/td_build_comp.py - ".default always, .val only when
+    # The note in tools/td_build_vision.py - ".default always, .val only when
     # creating" - is necessary but NOT sufficient. It stops a rebuild overwriting
     # a tuned value with a default; it does nothing about the append itself
     # clearing it. Only saving and restoring works.
@@ -458,21 +464,26 @@ def _rewire_merge(merge, nodes):
     return [node.name for node in desired]
 
 
-def _refresh_thresholds(comp):
+def _refresh_thresholds(comp, master=None):
     """Write the current Tuning values into lat_on and lat_off. Returns how many.
 
     Called once at build and once per parameter change, never per frame. The single
     place the threshold values are copied, so a retune and a rebuild cannot produce
     different networks.
+
+    `comp` holds the OPERATORS (the hands stream) and `master` holds the
+    PARAMETERS. They are two different COMPs since the streams were wrapped;
+    `master` defaults to `comp` so the older call shape still means something.
     """
+    master = comp if master is None else master
     written = 0
     for node_name, column in (("lat_on", 3), ("lat_off", 4)):
-        # Inside the group now, so the path is relative to the top-level COMP.
+        # Inside the group, so the path is relative to the stream COMP.
         node = comp.op("%s/%s" % (GROUP, node_name))
         if node is None:
             continue
         for index, row in enumerate(LATCHES):
-            parameter = getattr(comp.par, row[column], None)
+            parameter = getattr(master.par, row[column], None)
             if parameter is None:
                 continue
             node.par["value%d" % index] = float(parameter.eval())
@@ -519,9 +530,11 @@ def main():
     from visionhands.tuning import THRESHOLD_DEFAULTS as DEFAULTS
     THRESHOLD_DEFAULTS = DEFAULTS
 
+    master = op(MASTER_PATH)
     comp = op(COMP_PATH)
-    if comp is None:
-        print("FAIL no COMP at %s - run tools/td_build_comp.py first" % COMP_PATH)
+    if master is None or comp is None:
+        print("FAIL no COMP at %s - run tools/td_build_vision.py first"
+              % (MASTER_PATH if master is None else COMP_PATH))
         return
     source = comp.op("derive_chop")
     if source is None:
@@ -548,9 +561,11 @@ def main():
     print("1. `%s` group%s" % (GROUP, ", cleared %d loose %s* operators"
                                % (removed, PREFIX) if removed else ""))
 
-    _threshold_page(comp)
-    print("2. Tuning page: " + ", ".join(
-        "%s=%.2f" % (n, float(getattr(comp.par, n).eval()))
+    # The page goes on the MASTER, beside every other control; the latch bank goes
+    # in the stream.
+    _threshold_page(master)
+    print("2. Tuning page on %s: " % master.path + ", ".join(
+        "%s=%.2f" % (n, float(getattr(master.par, n).eval()))
         for n in sorted(THRESHOLD_DEFAULTS)))
 
     column = [0]
@@ -648,7 +663,7 @@ def main():
 
     on = thresholds("on", 3, ROW_Y - 300)
     off = thresholds("off", 4, ROW_Y - 450)
-    _refresh_thresholds(comp)
+    _refresh_thresholds(comp, master)
 
     # The latch's INITIAL state: released. Also the Feedback CHOP's channel
     # template - see trap 2 in the module docstring. Zeros rather than the
@@ -855,12 +870,16 @@ def main():
     # with a stale `prev`. The clock has to live outside any gated group.
 
     # The DAT that keeps lat_on/lat_off current without costing a frame.
-    threshold_dat = comp.op("lat_threshold_callbacks") or comp.create(
+    # On the MASTER, because that is where the parameters it watches live - a
+    # Parameter Execute DAT fires for the COMP named in `par.op`, and naming the
+    # stream would mean watching parameters that are not there.
+    threshold_dat = master.op("lat_threshold_callbacks") or master.create(
         td.parameterexecuteDAT, "lat_threshold_callbacks")
-    threshold_dat.nodeX, threshold_dat.nodeY = 200, ROW_Y - 300
+    threshold_dat.nodeX, threshold_dat.nodeY = -650, 700
     threshold_dat.text = THRESHOLD_CALLBACK % {
-        "rows": [(row[3], row[4]) for row in LATCHES], "group": GROUP}
-    threshold_dat.par.op = comp.path
+        "rows": [(row[3], row[4]) for row in LATCHES], "group": GROUP,
+        "stream": comp.name}
+    threshold_dat.par.op = master.path
     threshold_dat.par.pars = " ".join(sorted(THRESHOLD_DEFAULTS))
     threshold_dat.par.valuechange = True
 
@@ -911,7 +930,7 @@ def main():
         if node.errors():
             failures.append("%s: %s" % (node.name, node.errors()))
 
-    for problem in _verify_hysteresis(comp):
+    for problem in _verify_hysteresis(master):
         failures.append(problem)
 
     # -- into the COMP's output -------------------------------------------

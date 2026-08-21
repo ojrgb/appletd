@@ -506,6 +506,27 @@ geometry validates arithmetic and says nothing about how a hand sits.
 | `Renderw`, `Renderh` | int | from render1 | RENDER resolution. Drives `_ty`. Not the same number as the source - see DESIGN.md 7 |
 | `Orthowidth` | float | from cam1 | match your ortho camera's Ortho Width |
 
+## Where the parameters live: one COMP, three streams
+
+Restructured 2026-08-21. **Every parameter on this page and the ones below belongs
+to `/project1/vision`**, the master COMP, and every stream reads it:
+
+```
+/project1/vision          Vision, Sidecar, Filter, Advanced, Tuning, Attributes
+  hands_osc 10000  ->  hands  ->  out1
+  pose_osc  10001  ->  pose   ->  out2
+  face_osc  10002  ->  face   ->  out3
+  status                          the sidecar's sc_* channels
+```
+
+One `Smoothing` toggle drives all three filters; one `Orthowidth` drives all three
+sets of coordinate spaces. Reference a channel as
+`op('/project1/vision/hands')['h0_index_tip_tx']`, or wire from the master's output
+connectors - out1 hands, out2 pose, out3 face - since an operator outside the COMP
+cannot wire to a nested one.
+
+**Paths changed:** `/project1/visionhands` is now `/project1/vision/hands`.
+
 ### Page: Sidecar
 
 `Startsidecar`, `Stopsidecar`, `Sidecarstatus` pulses and a read-only
@@ -532,7 +553,7 @@ looks exactly like a working sidecar with nobody in frame.
 
 Built 2026-08-21. `visionpose` is plumbing only: **123 channels, no derived
 attributes, no filtering, no temporal channels.** Build it with
-`tools/td_build_pose_comp.py`; drive it with the Body Pose Stream toggle, or with
+`tools/td_build_vision.py`; drive it with the Body Pose Stream toggle, or with
 `tools/send_synthetic_pose.py` and no camera at all.
 
 ```
@@ -540,6 +561,11 @@ pose_n_bodies, pose_seq, pose_age_ms
 p<i>_found, p<i>_score, p<i>_conf_median                       for i in 0..1
 p<i>_<joint>_x, p<i>_<joint>_y, p<i>_<joint>_conf              19 joints
 ```
+
+**Every joint also arrives in world and pixel space**, exactly as a hand landmark
+does: `p0_root_tx`, `p0_root_px`, `p0_root_ty`, `p0_root_py`. 275 channels in total -
+123 from the wire plus 152 transformed - built by `tools/td_add_coords.py` from the
+master's one `Orthowidth` and render resolution.
 
 The 19 joints, in channel order: `nose` `left_eye` `right_eye` `left_ear`
 `right_ear` `neck` `left_shoulder` `right_shoulder` `left_elbow` `right_elbow`
@@ -566,7 +592,7 @@ distance between two pose joints is measuring how far away the person is standin
 ## The face stream — head pose and a box, on a third port
 
 Built 2026-08-21. `visionface` is plumbing only: **23 channels**, no derived
-attributes. Build it with `tools/td_build_face_comp.py`; drive it with the Face
+attributes. Build it with `tools/td_build_vision.py`; drive it with the Face
 Stream toggle, or with `tools/send_synthetic_face.py` and no camera.
 
 ```
@@ -575,6 +601,21 @@ f<i>_found, f<i>_score, f<i>_quality                          for i in 0..1
 f<i>_roll, f<i>_yaw, f<i>_pitch                               DEGREES
 f<i>_bbox_x, f<i>_bbox_y, f<i>_bbox_w, f<i>_bbox_h            normalised
 ```
+
+**The bounding box arrives in world and pixel space too**, and the extents follow a
+different rule from the positions:
+
+```
+f0_bbox_tx = (bbox_x - 0.5) * Orthowidth        a position: centred, so offset
+f0_bbox_tw =  bbox_w        * Orthowidth        an EXTENT: not offset
+f0_bbox_th =  bbox_h        * Orthowidth * Renderh / Renderw
+f0_bbox_pw =  bbox_w        * Resw              pixels
+```
+
+A width is 0.22 wide wherever the box sits, so subtracting 0.5 from it would give a
+negative size that draws as nothing. 39 channels in total: 23 from the wire plus 16
+transformed. **`roll`/`yaw`/`pitch` are not transformed** - there is no yaw in
+pixels - and they are smoothed like any other continuous value.
 
 **`roll`, `yaw` and `pitch` are DEGREES.** Vision reports radians; the conversion
 happens once, in `visionhands/face.py`. If you see values under 2 for a head that

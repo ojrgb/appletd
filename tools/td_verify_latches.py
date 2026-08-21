@@ -62,7 +62,9 @@ Ref: docs/ATTRIBUTES.md, tools/td_add_latches.py (the network under test),
 visionhands/sequences.py (the sweeps).
 """
 
-COMP_PATH = "/project1/visionhands"
+# The hands STREAM, inside the master COMP - the latch channels live on its
+# output, not on the master's (which exposes each stream on its own connector).
+COMP_PATH = "/project1/vision/hands"
 
 # Where the baseline is kept between runs. A Text DAT inside the COMP rather than
 # a module global, because each run of this script is a fresh execution with no
@@ -142,14 +144,28 @@ def _counts(comp):
     return values
 
 
+# Read for context in the printed summary. The channels the INVARIANT needs are
+# not listed here: they are derived from END_COUNTERS below, because a
+# hand-maintained list of them drifted and the tool raised KeyError on
+# `h1_pinching` instead of checking the second hand's invariant at all - so the
+# h1 rows had been structurally present and never once evaluated.
+CONTEXT_CHANNELS = ("h0_valid", "h1_valid", "both_valid", "both_pinching",
+                    "h0_pinch_index", "h0_pinch_middle", "hands_distance")
+
+
 def _states(comp):
-    """The latch states and validity right now - context for the counts."""
+    """The latch states and validity right now - context for the counts.
+
+    Covers CONTEXT_CHANNELS plus every state channel the standing invariant
+    checks, so the two cannot come apart again.
+    """
     out = comp.op("out1")
     result = {}
-    for name in ("h0_pinching", "h0_snapping", "hands_together", "both_pinching",
-                 "h0_valid", "h1_valid", "both_valid", "h0_pinch_index",
-                 "h0_pinch_middle", "hands_distance"):
+    wanted = list(CONTEXT_CHANNELS) + [s for _f, _e, s in END_COUNTERS]
+    for name in wanted:
         channel = out.chan(name)
+        # `is not None`, never truthiness: a Channel's truth value is its VALUE, so
+        # a state sitting at 0 would read as missing.
         result[name] = None if channel is None else channel[0]
     return result
 
@@ -201,8 +217,9 @@ def main():
                                    state["h0_pinch_index"], state["h0_pinch_middle"],
                                    state["hands_distance"]))
     print("     h0_pinching=%.0f h0_snapping=%.0f hands_together=%.0f "
-          "both_pinching=%.0f" % (state["h0_pinching"], state["h0_snapping"],
-                                  state["hands_together"], state["both_pinching"]))
+          "both_pinching=%.0f | h1_pinching=%.0f h1_snapping=%.0f"
+          % (state["h0_pinching"], state["h0_snapping"], state["hands_together"],
+             state["both_pinching"], state["h1_pinching"], state["h1_snapping"]))
     print("     lat_live=%s (0 = nothing has sent recently, so every latch is "
           "forced released)" % ("?" if live is None else int(live)))
     starts, ends = health.get("lat_start"), health.get("lat_end")

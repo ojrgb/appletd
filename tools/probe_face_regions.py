@@ -23,9 +23,16 @@ until somebody wonders why the eyebrows never move. So the numbers get measured 
 the machine that will run them, or the channels do not ship.
 
 WHAT TO DO WITH THE OUTPUT. Paste each count into the matching `FaceRegionSpec` in
-`visionhands/face_types.py`, then re-run `tools/td_build_face_comp.py`. The
-import-time self-check refuses a partial table and refuses one whose counts do not
-sum to 76, so a typo fails at import rather than in a channel list.
+`visionhands/face_types.py`, then re-run **`tools/td_add_filter.py`**. That is the
+script that matters: it splits each stream into smoothed and passthrough halves from
+`visionhands/spaces.py`, and a channel in neither half is dropped inside the filter
+group with no error anywhere. The coordinate builder needs no re-run for these -
+face landmarks are normalised to the BOUNDING BOX rather than to the image, so they
+are deliberately not transformed into world or pixel space (`spaces.py` marks them
+`box_relative`).
+
+The import-time self-check refuses a partial table, and refuses one whose counts do
+not sum to 76 - so a typo fails at import rather than in a channel list.
 
 THE CAMERA. This is the only tool in the repo that needs it, and it needs it for a
 few seconds. If the camera has another owner - a call, a recording - this will fail
@@ -129,8 +136,10 @@ def main(argv: list[str] | None = None) -> int:
               % unnamed)
     print()
     print("Paste the block above over FACE_REGIONS in visionhands/face_types.py,")
-    print("then re-run tools/td_build_face_comp.py. The landmark channels appear")
-    print("with no other change.")
+    print("then re-run tools/td_add_filter.py - that is what classifies the new")
+    print("channels, and anything it does not classify is dropped silently.")
+    print("The coordinate builder needs no re-run: face landmarks are normalised")
+    print("to the BOUNDING BOX, not the image, so they are not transformed.")
     return 0
 
 

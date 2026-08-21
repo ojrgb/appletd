@@ -52,7 +52,10 @@ Ref: docs/ATTRIBUTES.md (the group table and the budget), docs/BUILD_PLAN.md ste
 import sys
 
 REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
-COMP_PATH = "/project1/visionhands"
+# The master COMP holds every parameter; the hands STREAM holds this
+# network. Both are named, because this script writes to both.
+MASTER_PATH = "/project1/vision"
+COMP_PATH = MASTER_PATH + "/hands"
 
 # The groups, their defaults, and whether this page can actually gate their cost.
 #
@@ -92,9 +95,12 @@ GROUPS = (
 # `filter` is deliberately absent: it is in the DATA PATH, so disabling its cooking
 # would freeze every position rather than bypass the filter. Its `Smoothing` toggle
 # already gates its cost through the bypass flag (docs/BUILD_PLAN.md 7.2).
+# Keyed by the path from the MASTER COMP, because the groups live inside a stream
+# now: `hands/temporal`, not `temporal`. Written out rather than assembled, so the
+# one place that has to change when a stream grows a gated group is this table.
 COOK_GATED = {
-    "temporal": ("Presence", "Motion"),
-    "latches": ("Triggers", "Gestures", "Events"),
+    "hands/temporal": ("Presence", "Motion"),
+    "hands/latches": ("Triggers", "Gestures", "Events"),
 }
 
 # `latches` READS `temporal`'s second output - the liveness/presence gate that
@@ -103,7 +109,7 @@ COOK_GATED = {
 # liveness, frozen at 0 they never fire again, and neither says anything. The
 # dependency is a wire in the network (docs/BUILD_PLAN.md 7.3) and this is the same
 # dependency expressed in the gating.
-COOK_REQUIRES = {"latches": ("temporal",)}
+COOK_REQUIRES = {"hands/latches": ("hands/temporal",)}
 
 # The presets from docs/ATTRIBUTES.md. Verbosity sets the toggles in one click; it
 # is not a fourth state, and moving a toggle afterwards does not fight it.
@@ -216,7 +222,7 @@ def _apply_gating(comp, verbose=False):
         group.allowCooking = enabled
         report.append("%s: %s" % (group_name, "cooking" if enabled else "FROZEN"))
         if verbose:
-            print("   %-9s %-7s from %s" % (group_name,
+            print("   %-15s %-7s from %s" % (group_name,
                                             "on" if enabled else "off",
                                             ", ".join(COOK_GATED[group_name])))
     return report
@@ -273,33 +279,37 @@ def main():
         del sys.modules[stale]
     from visionhands.derive import ALL_GROUPS
 
+    master = op(MASTER_PATH)
     comp = op(COMP_PATH)
-    if comp is None:
-        print("FAIL no COMP at %s - run tools/td_build_comp.py first" % COMP_PATH)
+    if master is None or comp is None:
+        print("FAIL no COMP at %s - run tools/td_build_vision.py first"
+              % (MASTER_PATH if master is None else COMP_PATH))
         return
 
-    _page(comp)
-    print("1. Attributes page:")
+    # The page and the gating both belong to the MASTER: the toggles are controls,
+    # and `allowCooking` is written on groups that live inside a stream.
+    _page(master)
+    print("1. Attributes page on %s:" % master.path)
     for group, _default, gated in GROUPS:
-        print("   %-12s %-3s  %s" % (group,
-                                     "on" if getattr(comp.par, group).eval() else "off",
-                                     "gates derive()" if gated == "derive"
-                                     else "channels only, gates no cost yet"))
-    print("   Verbosity = %s" % comp.par.Verbosity.eval())
+        print("   %-12s %-3s  %s"
+              % (group, "on" if getattr(master.par, group).eval() else "off",
+                 "gates derive()" if gated == "derive"
+                 else "channels only, gates no cost yet"))
+    print("   Verbosity = %s" % master.par.Verbosity.eval())
 
     # The preset callback. A Parameter Execute DAT rather than an expression on
     # each toggle: an expression would make the toggles read-only, and the point of
     # a preset is to SET them and then get out of the way.
-    callbacks = comp.op("groups_callbacks") or comp.create(td.parameterexecuteDAT,
-                                                           "groups_callbacks")
-    callbacks.nodeX, callbacks.nodeY = 200, -2100
+    callbacks = master.op("groups_callbacks") or master.create(
+        td.parameterexecuteDAT, "groups_callbacks")
+    callbacks.nodeX, callbacks.nodeY = -400, 700
     callbacks.text = CALLBACK_SOURCE % {
         "presets": {k: list(v) for k, v in PRESETS.items()},
         "all_groups": [n for n, _d, _g in GROUPS],
         "cook_gated": {k: list(v) for k, v in COOK_GATED.items()},
         "cook_requires": {k: list(v) for k, v in COOK_REQUIRES.items()},
     }
-    callbacks.par.op = comp.path
+    callbacks.par.op = master.path
     # Verbosity AND every toggle that gates a group's cooking: `allowCooking` is an
     # attribute, so it cannot be bound to a parameter and has to be rewritten on
     # change.
@@ -310,7 +320,7 @@ def main():
           % (callbacks.name, callbacks.par.pars.eval()))
 
     print("3. cook gating:")
-    _apply_gating(comp, verbose=True)
+    _apply_gating(master, verbose=True)
 
     # -- does the toggle actually reach derive()? --------------------------
     # ALL_GROUPS is derive.py's own list, so this catches a toggle whose name does
@@ -326,11 +336,11 @@ def main():
     chop = comp.op("derive_chop")
     if chop is not None:
         before = chop.numChans
-        was_descriptor = comp.par.Descriptor.eval()
-        comp.par.Descriptor = not was_descriptor
+        was_descriptor = master.par.Descriptor.eval()
+        master.par.Descriptor = not was_descriptor
         chop.cook(force=True)
         after = chop.numChans
-        comp.par.Descriptor = was_descriptor
+        master.par.Descriptor = was_descriptor
         chop.cook(force=True)
         print("4. proof the toggles bite: Descriptor flipped changed derive_chop "
               "from %d channels to %d" % (before, after))
@@ -351,7 +361,8 @@ def main():
         print("5. COMP output: %d channels" % out.numChans)
         present = {c.name for c in out.chans()}
         for group_name in sorted(COOK_GATED):
-            group = comp.op(group_name)
+            # Relative to the MASTER: `hands/temporal` is not a child of the stream.
+            group = master.op(group_name)
             group_out = None if group is None else group.op("out1")
             if group is None or group_out is None:
                 continue
@@ -363,7 +374,7 @@ def main():
                                 % (group_name,
                                    "cooking" if group.allowCooking else "frozen",
                                    len(lost), lost[:5]))
-            print("   %-9s %-7s %d channels, all on the output: %s"
+            print("   %-15s %-7s %d channels, all on the output: %s"
                   % (group_name, "cooking" if group.allowCooking else "FROZEN",
                      len(mine), not lost))
 

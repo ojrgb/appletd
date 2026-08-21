@@ -166,7 +166,7 @@ def test_pure_core_imports_neither_pyobjc_nor_td() -> None:
     the request that fills it.
     """
     for name in ("types.py", "coords.py", "pose_types.py", "face_types.py",
-                 "streams.py", "synth_body.py", "synth_face.py"):
+                 "streams.py", "spaces.py", "synth_body.py", "synth_face.py"):
         path = PACKAGE_ROOT / name
         assert path.is_file(), name
         imports = _module_scope_imports(path)

@@ -49,7 +49,10 @@ DESIGN.md 2.10 (the clock), 2.11 (the operator behaviours).
 import sys
 
 REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
-COMP_PATH = "/project1/visionhands"
+# The master COMP holds every parameter; the hands STREAM holds this
+# network. Both are named, because this script writes to both.
+MASTER_PATH = "/project1/vision"
+COMP_PATH = MASTER_PATH + "/hands"
 # The group this builds. Everything it owns lives inside, so the top-level network
 # shows one node - and because nothing outside reads these channels except through
 # merge_out, `allowCooking` on this group genuinely gates its whole cost, which is
@@ -59,7 +62,12 @@ PREFIX = "tmp_"
 
 # Parameters stay on the TOP-LEVEL COMP so all tuning is in one place, so an
 # expression inside the group reaches them through the grandparent.
-PARENT_PAR = "parent(2).par.%s"
+# Every user parameter lives on the MASTER COMP now, and a nested operator reaches
+# it through the Global OP Shortcut - `op.Vision.par.X`. NOT `parent(2)`: the
+# streams are wrapped in a master COMP, so a group sits two levels below the
+# parameters instead of one, and a relative reference would have to be counted per
+# operator and would break the next time anything moved.
+PARENT_PAR = "op.Vision.par.%s"
 
 # Advanced-page defaults, from docs/ATTRIBUTES.md.
 #
@@ -116,7 +124,9 @@ def onCook(scriptOp):
         return
     values = {chan.name: chan[0] for chan in scriptOp.inputs[0].chans()}
 
-    comp = scriptOp.parent()
+    # The master COMP, via its shortcut: the parameters are one level above this
+    # Script CHOP's own parent now.
+    comp = op.Vision or scriptOp.parent()
     floor = getattr(comp.par, "Speedfloor", None)
     params = MotionParams(speedfloor=%(floor)r if floor is None
                           else float(floor.eval()))
@@ -228,9 +238,11 @@ def main():
                   if n == "visionhands" or n.startswith("visionhands.")]:
         del sys.modules[stale]
 
+    master = op(MASTER_PATH)
     comp = op(COMP_PATH)
-    if comp is None:
-        print("FAIL no COMP at %s - run tools/td_build_comp.py first" % COMP_PATH)
+    if master is None or comp is None:
+        print("FAIL no COMP at %s - run tools/td_build_vision.py first"
+              % (MASTER_PATH if master is None else COMP_PATH))
         return
     source = comp.op("derive_chop")
     if source is None:
@@ -256,10 +268,13 @@ def main():
     print("1. `%s` group%s" % (GROUP, ", cleared %d loose %s* operators"
                                % (removed, PREFIX) if removed else ""))
 
-    _page(comp)
-    print("2. Advanced page: %s, Velocityfilter=%.3f s" % (
-        ", ".join("%s=%d" % (n, int(getattr(comp.par, n).eval()))
-                  for n in sorted(DEFAULTS)), float(comp.par.Velocityfilter.eval())))
+    # The page goes on the MASTER, beside every other control, while the network
+    # goes in the stream. That split is the whole point of the restructure.
+    _page(master)
+    print("2. Advanced page on %s: %s, Velocityfilter=%.3f s" % (
+        master.path,
+        ", ".join("%s=%d" % (n, int(getattr(master.par, n).eval()))
+                  for n in sorted(DEFAULTS)), float(master.par.Velocityfilter.eval())))
 
     column = [0]
 
