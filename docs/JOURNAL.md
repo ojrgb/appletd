@@ -1545,3 +1545,85 @@ before the group COMPs are built, because a disabled group would freeze its
 latches and resume with a stale `prev`.
 
 502 channels, 168 tests, ruff and mypy clean.
+
+---
+
+## Presence, velocity, and two operators that were doing nothing
+2026-08-20
+
+**Built.** `tools/td_add_temporal.py`: `h{i}_active` with a real debounce,
+`h{i}_entering`, `h{i}_exiting`, `h{i}_held`, `both_active`, `n_active`,
+`h{i}_vel_x/_y`, `h{i}_speed`, `h{i}_accel`, `hands_approach`. The latch bank now
+gates on the debounced `active`, closing the shortfall the review flagged. COMP
+output 542 -> 561.
+
+**The debounce is the same Schmitt trigger as the latches**, which was worth
+noticing because it looks like a different problem:
+
+    active = all_valid_over_last_A  OR  ( prev AND any_valid_over_last_D )
+
+`min(valid)` over a Trail of `Activateframes` is the turn-on condition;
+`max(valid)` over `Deactivateframes` is the term that holds. The asymmetry
+`docs/ATTRIBUTES.md` asks for - slower to drop a hand than to acquire one - is
+just two window lengths on one shape, and it inherits the same self-correcting
+property. Several of the channels still to build are that shape too.
+
+**THE FINDING, and it cost two operators: anything that consumes a sample axis is
+inert here.** Every CHOP in this network carries one sample per frame - a
+snapshot, not a time-sliced signal.
+
+- The **Slope CHOP** differentiates along the sample axis, so it has no neighbour
+  to difference against. It reported palm velocities of **12.5 and 32.5 units per
+  second on coordinates that cannot leave 0..1**, and an acceleration of 1950.
+  Absurd enough to catch immediately, which is the good kind of wrong.
+- The **Filter CHOP** smooths along the same axis, and is a silent passthrough.
+  **All nine of its filter types returned the identical value**, unchanged by
+  width. That is the bad kind of wrong: a plausible number, a parameter that does
+  nothing, and no error anywhere. Caught only by sweeping the type menu and
+  noticing every answer was the same.
+
+Operators that CREATE a sample axis from successive frames - the Trail CHOP - work,
+which is why the debounce does. Promoted to `DESIGN.md` 2.11 as the rule to read
+before building anything else temporal: differentiate with `(x - x_prev) * rate`,
+smooth with Trail + Analyze or with Feedback + Math.
+
+**And a derivative has to be AVERAGED, not smoothed, to be correct at all.**
+Positions only change when a frame arrives - 30 fps into a 60 fps cook - so the
+per-cook derivative alternates between a double-size step and zero. Measured
+directly: a palm step of 0.0592 in one cook where a cook's worth of motion was
+0.0292. Against a swipe of known speed 1.75 units/s the raw derivative peaked at
+**4.43**; averaged over 0.15 s it reads **1.66, within 5%**, and the residual is
+the window spanning part of the direction reversal. So `Velocityfilter` is a
+window width rather than a smoothing constant, and its default moved 0.08 -> 0.15
+because 0.08 spans only two camera frames and leaves the alternation in the output.
+
+**A first-frame spike, fixed by seeding rather than by clamping.** The derivative's
+Feedback initialised from zeros, so frame one reported `x * rate` - a palm at 0.208
+gave 12.5 units/s, which propagated into acceleration as 1950 and took the average
+window to shed. Seeded from the input instead, frame one reports 0, which is the
+only defensible answer when there is no previous frame.
+
+**The liveness bug had a second instance, in the group built to avoid it.**
+`h{i}_valid` is computed from the last frame TouchDesigner received, and a dead
+sidecar leaves that frozen - so `h0_active` read 1 and `h0_held` climbed to **54
+seconds** with nothing sending. The latch gate was already immune because it ANDs
+liveness separately; a project reading `h0_active` would not have been. Liveness is
+now ANDed in before the debounce, so presence decays through the normal
+`Deactivateframes` path rather than snapping. Recorded as a smell: liveness is a
+property of the STREAM and is currently owned by the latch builder, which both
+other builders now reach into. It should move somewhere shared.
+
+**Two measurement traps worth more than the numbers.** `totalCooks` is a lifetime
+counter, so comparing it across operators of different ages measures nothing -
+that is what made 2.10 wrong twice. And forcing a cook does not advance the frame,
+so every read inside one script sees one frame: a loop that samples twenty values
+and reports a peak and a mean reports the same number twice, which is exactly what
+happened before I noticed.
+
+**Still to build**, with what each needs, in `docs/BUILD_PLAN.md` step 2: `dir`
+(needs atan2, which no native operator has), `steadiness`, `dwell`, `hands_scale`,
+`hands_twist` (needs sin/cos from `derive()` to survive the +/-180 wrap), grab and
+release (two more latch rows, not new machinery), and the swipe/wave/cross/twist
+events.
+
+181 tests, ruff and mypy clean.

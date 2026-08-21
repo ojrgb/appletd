@@ -55,22 +55,43 @@ CHOP's action menus that look like toggles, Merge connectors that insert rather
 than fill, `appendFloat` zeroing an existing value, and the MCP bridge running a
 script twice. Do not rediscover them.
 
-## Step 2 — the rest of the temporal channels
+## Step 2 — the temporal channels — PARTLY DONE 2026-08-20
 
-| channels | operators |
+`tools/td_add_temporal.py` builds them. **Done:** `h{i}_active` (a real debounce),
+`h{i}_entering`, `h{i}_exiting`, `h{i}_held`, `both_active`, `n_active`,
+`h{i}_vel_x/_y`, `h{i}_speed`, `h{i}_accel`, `hands_approach`. The latch bank now
+gates on the debounced `active` as `docs/ATTRIBUTES.md` always specified.
+
+The debounce turned out to be the same Schmitt trigger as the latches, with two
+window statistics in place of two thresholds - `min(valid)` over `Activateframes`
+to turn on, `max(valid)` over `Deactivateframes` to hold. Worth knowing before
+building the rest, because several of the remaining channels are also that shape.
+
+**READ `DESIGN.md` 2.11 BEFORE BUILDING ANY MORE OF THIS.** Two operators that
+look exactly right are inert here: every CHOP in this network carries one sample
+per frame, so the **Slope CHOP** (velocities of 12.5 on a 0..1 coordinate) and the
+**Filter CHOP** (all nine types returning the identical value) do nothing.
+Differentiate with `(x - x_prev) * rate`; smooth with Trail + Analyze. And a
+derivative must be *averaged* rather than smoothed to be correct at all, because
+positions update at the camera rate and are differentiated at the cook rate.
+
+### Still to build, and what each needs
+
+| channel | what it needs |
 |---|---|
-| `vel_x/y`, `speed`, `dir`, `accel` | Slope on the palm channels, then Filter (`Velocityfilter`); `dir` gated by `Speedfloor` via a Logic + Hold |
-| smoothing | Lag or Filter on positions, before derivation |
-| `active` (debounced `valid`) | Count with limits, or Trail + Analyze, then Logic |
-| `held` seconds | Count on `active`, scaled by the frame rate |
-| `dwell` | Count gated by a radius test against a Hold of the settled position |
-| `steadiness` | Trail (`Steadywindow`) into Analyze (deviation), inverted |
-| `hands_scale`, `hands_twist`, `hands_approach` | Slope on the matching stateless channels; `hands_scale` needs a Hold latched by `Scalereset` |
-| motion events | Logic on the thresholds, then a Count-based refractory of `Refractory` |
+| `h{i}_dir` | atan2 of the velocity pair. No native operator does atan2, so either an Expression CHOP per hand or a small stateless Script CHOP - and then a Hold gated on `Speedfloor`, so it stops spinning on noise |
+| `h{i}_steadiness` | Trail over `Steadywindow` into Analyze, inverted. The Trail+Analyze pattern the debounce already uses |
+| `h{i}_dwell` | a Hold of the settled position, a radius test against it, and an accumulator gated on the result - the `held` accumulator is the model |
+| `hands_scale` | a Hold latched by the `Scalereset` pulse, as the reference distance |
+| `hands_twist` | the derivative of an ANGLE, which wraps at +/-180 and spikes if differentiated naively. Publish `sin`/`cos` of `hands_angle` from `derive()` - a stateless addition - and use `cos*d(sin) - sin*d(cos)`, which is wrap-free |
+| `h{i}_e_grab`, `h{i}_e_release` | these are LATCHES on `openness` with `Grabon`/`Graboff`. Two more rows in `tools/td_add_latches.py`, not new machinery |
+| swipe / wave / cross / twist events | thresholds plus a Count-based refractory. The sequences to test them with: `swipe` exists; wave and cross need writing |
 
-Angles: unwrap before differentiating or filtering, or filter sin/cos and
-recombine. A hand crossing +/-180 otherwise produces a spike that reads as a
-violent twist.
+Add a sequence per group as you go. `sequences.py`'s `swipe` was written for the
+velocity work and immediately earned it: the pinch ramps oscillate a fingertip,
+and a smoothed signed velocity of an oscillation averages toward zero - 0.037
+units/s against 1.43 for a traverse - so the motion thresholds would have had
+nothing to fire on.
 
 ## Step 3 — groups and parameters
 

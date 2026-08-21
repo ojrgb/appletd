@@ -432,15 +432,35 @@ def main():
         live5.par["name%d" % index] = row[0]
         live5.par["value%d" % index].expr = "op('lat_live')['seq']"
 
-    # TODO(M-presence): docs/ATTRIBUTES.md gates on `h{i}_active` - `valid`
-    # DEBOUNCED over Activateframes/Deactivateframes - and this gates on raw
-    # per-frame validity. One low-confidence frame mid-pinch therefore drops the
-    # state, fires a spurious end pulse, and re-engages with a spurious start and
-    # a bumped count. The debounce is the Presence group's job in step 2 of
-    # docs/BUILD_PLAN.md; when it lands it is ANDed in here, in this one place,
-    # exactly as liveness is.
+    # -- the debounced gate, if the temporal group has been built -----------
+    # docs/ATTRIBUTES.md gates the latches on `h{i}_active` - `valid` DEBOUNCED
+    # over Activateframes/Deactivateframes - not on raw per-frame validity. Without
+    # it, one low-confidence frame mid-pinch drops the state, fires a spurious end
+    # pulse, and re-engages with a spurious start and a bumped counter.
+    #
+    # An OPTIONAL dependency rather than a hard one: tools/td_add_temporal.py
+    # publishes `h{i}_active`, and either builder can be run first. If the channels
+    # are not there yet the bank gates on raw validity as before, and says so,
+    # rather than erroring per channel per cook - which is what a missing parameter
+    # reference does (measured, when the Trigger thresholds were added).
+    gates = [valid_raw, live5]
+    active_source = comp.op("tmp_out_active")
+    if active_source is not None:
+        # Broadcast per-hand `active` onto the bank's thirteen working names, the
+        # same way the thresholds and liveness are broadcast: a Constant CHOP of
+        # expressions. `both_valid` maps to `both_active`, which is the debounced
+        # form of exactly the same condition.
+        active13 = make(td.constantCHOP, "active13", ROW_Y - 150)
+        active13.seq.const.numBlocks = len(LATCHES)
+        for index, row in enumerate(LATCHES):
+            active13.par["name%d" % index] = row[0]
+            active13.par["value%d" % index].expr = (
+                "op('tmp_out_active')['%s']" % row[2].replace("_valid", "_active")
+                if row[2] != "both_valid" else "op('tmp_both_active')['both_active']")
+        gates.append(active13)
+
     valid = make(td.logicCHOP, "valid", ROW_Y - 150)
-    wire(valid, valid_raw, live5)
+    wire(valid, *gates)
     valid.par.chopop = "and"
     valid.par.match = "name"
 
@@ -735,6 +755,9 @@ def main():
     print("6. cooks: lat_state=%d, merge_out=%d (both climb from here; "
           "tools/td_verify_latches.py checks that lat_state really does)"
           % (state.totalCooks, comp.op("merge_out").totalCooks))
+    print("   gate: raw validity AND liveness%s"
+          % (" AND the debounced h{i}_active" if active_source is not None
+             else " (NO debounce - run tools/td_add_temporal.py, then this again)"))
     print("   liveness: lat_live=%.0f - 0 means nothing has sent for %.1f s, and "
           "every latch is then forced released" % (live.chan("seq")[0],
                                                    LIVENESS_WINDOW_S))

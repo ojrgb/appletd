@@ -486,8 +486,42 @@ Against the running instance (099), not read anywhere:
 - **Select CHOP `channames` order determines output order**, and its built-in
   `renamefrom = *` / `renameto = <list>` maps the list positionally onto that
   order — so one operator can pick, reorder and rename in a single step.
+- **Operators that CONSUME a sample axis are inert on a one-sample CHOP.** This
+  is the single most useful rule for building anything temporal here, and it cost
+  two operators to learn. Every CHOP in this network carries **one sample per
+  frame** - a snapshot, not a time-sliced signal - so:
+    * the **Slope CHOP** differentiates along the sample axis and has no neighbour
+      to difference against. Measured: it reported palm velocities of 12.5 and
+      32.5 units/second on coordinates that cannot leave 0..1, and an acceleration
+      of 1950.
+    * the **Filter CHOP** smooths along the sample axis and is a silent
+      passthrough. Measured: all nine of its filter types returned the identical
+      value, unchanged by width.
+  Operators that CREATE a sample axis from successive frames - the **Trail CHOP** -
+  work, which is why Trail + Analyze is the tool for both averaging and windowed
+  statistics. And a recurrence written as Feedback + Math works, because it is
+  frame-based by construction. Differentiate with `(x - x_prev) * rate`; smooth
+  with Trail + Analyze, or with Feedback + Math.
+- **A frame-to-frame derivative must be AVERAGED to be correct, not merely
+  smoothed.** Positions only change when a frame arrives - 30 fps into a 60 fps
+  cook rate is every other frame - so the per-cook derivative alternates between a
+  double-size step and zero. Measured: a palm step of 0.0592 in one cook where a
+  cook's worth of motion was 0.0292, giving a peak velocity 2.5x the truth. The
+  mean over a window is `(x_now - x_then) / elapsed`, which is exact regardless of
+  how updates land: with a 0.15 s window a swipe of known speed 1.75 units/s
+  measured **1.66, within 5%**, against 4.43 unaveraged.
+- **`totalCooks` is a LIFETIME counter**, so comparing it between operators of
+  different ages measures nothing - see 2.10 for what that cost. And forcing a
+  cook does not advance the frame: every read inside one script sees one frame, so
+  a "distribution" sampled in a loop there is one value repeated.
 - **The MCP bridge has been observed executing a script TWICE per call.** Every
   builder must be idempotent by construction rather than by convention.
+- **TouchDesigner caches imported modules for the life of the process.** A builder
+  that imports from the repo gets whatever was imported hours ago, so editing a
+  module does nothing until the process restarts. Purge `sys.modules` of the
+  package first. Measured: adding parameters to a shared defaults table and
+  re-running a builder produced a network referencing parameters the page did not
+  have, because the page was built from the stale table.
 - **`appendCustomPage` with an existing name creates a SECOND page of that name.**
   Look the page up first.
 - **A literal space-separated Rename From/To list IS pairwise by name**, and a

@@ -145,7 +145,7 @@ published.
 
 | channel | definition |
 |---|---|
-| `h{i}_active` | `found AND conf_median > Confthreshold`, held for `Debounceframes` before flipping. Debounced because a single low-confidence frame should not drop an interaction |
+| `h{i}_active` | `found AND conf_median > Confthreshold AND the stream is live`, held for `Activateframes` before turning on and `Deactivateframes` before turning off. Debounced because a single low-confidence frame should not drop an interaction; gated on liveness because a dead sidecar leaves the channels frozen rather than zeroed, and without it `active` stays true for ever — measured, `h0_held` reached 54 s with nothing sending |
 | `h{i}_entering`, `h{i}_exiting` | pulses on the edges of `_active` |
 | `h{i}_held` | seconds `_active` has been continuously true |
 | `both_active`, `n_active` | `h0_active AND h1_active`; sum |
@@ -238,7 +238,7 @@ regular — see the jitter note at the end.
 
 | channel | definition |
 |---|---|
-| `h{i}_vel_x`, `h{i}_vel_y` | d/dt of palm position, units per second |
+| `h{i}_vel_x`, `h{i}_vel_y` | d/dt of palm position, units per second, averaged over `Velocityfilter` |
 | `h{i}_speed` | magnitude |
 | `h{i}_dir` | direction angle, meaningful only when speed is above a floor |
 | `h{i}_accel` | d/dt of speed |
@@ -432,7 +432,7 @@ are excluded from the output rather than left stale.
 
 | parameter | type | default | what it does |
 |---|---|---|---|
-| `Velocityfilter` | s | 0.08 | filter on velocity before speed and direction. Raw landmark jitter makes unfiltered velocity useless |
+| `Velocityfilter` | s | 0.15 | the window a velocity is AVERAGED over. Not merely smoothing: positions update at the camera rate and are differentiated at the cook rate, so the per-cook derivative alternates between double-size and zero, and the mean over a window is what makes the number true. 0.15 s spans four or five camera frames — see `DESIGN.md` 2.11 |
 | `Speedfloor` | /s | 0.05 | below this, `dir` holds its last value instead of spinning on noise |
 | `Steadywindow` | s | 0.50 | window for `steadiness` |
 | `Steadytolerance` | units | 0.02 | movement inside this counts as still |
