@@ -227,6 +227,24 @@ def _crossing(phase: float) -> list[HandPose | None]:
     ]
 
 
+def _curl(phase: float) -> list[HandPose | None]:
+    """One hand opening and closing. The grab latch's own input.
+
+    `openness` is the mean of the four long-finger curls, inverted, so curling all
+    four from 0 to 1 sweeps openness 1 -> 0 -> 1 and crosses `Grabon` 0.30 and
+    `Graboff` 0.55 with room either side.
+
+    The thumb is left extended on purpose: `openness` ignores it (docs/ATTRIBUTES.md
+    explains why - the thumb has one fewer segment and cannot fold as tightly), so
+    including it would change nothing here while making the pose less like the fist
+    a person actually makes.
+    """
+    amount = triangle(phase)
+    curl = {finger: amount for finger in ("index", "middle", "ring", "little")}
+    return [HandPose(palm_x=_CENTRE_X, palm_y=_CENTRE_Y, size=_SIZE, curl=curl),
+            None]
+
+
 def _static_open(_phase: float) -> list[HandPose | None]:
     """Two open hands, held still and far apart. The resting baseline.
 
@@ -261,6 +279,7 @@ SEQUENCES: Final[dict[str, SequenceFn]] = {
     "clap": _ramp_clap,
     "swipe": _swipe,
     "crossing": _crossing,
+    "curl": _curl,
     "deadband": _deadband,
     "both": _ramp_both,
     "open": _static_open,

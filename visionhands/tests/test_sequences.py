@@ -407,6 +407,23 @@ def test_the_swipe_traverses_the_frame_with_sustained_velocity() -> None:
     assert max(palm) == pytest.approx(0.85, abs=0.01)
 
 
+def test_the_curl_sweep_crosses_both_grab_thresholds() -> None:
+    """The grab latch watches `openness`, which is not a distance.
+
+    Same requirement as every other sweep: it has to clear both thresholds by a
+    margin on several frames, or a +1 downstream proves nothing.
+    """
+    on, off = LATCH_THRESHOLDS["Grab"]
+    values = [_channels(f)["h0_openness"]
+              for f in frames(SEQUENCES["curl"], FPS, PERIOD_S, 2.0)]
+    margin = (off - on) * 0.1
+    assert sum(1 for v in values if v < on - margin) >= 4, min(values)
+    assert sum(1 for v in values if v > off + margin) >= 4, max(values)
+    # And a correct latch closes once per sweep.
+    _states, engages, releases = schmitt(values, on, off)
+    assert (engages, releases) == (2, 2)
+
+
 # ---------------------------------------------------------------------------
 # The static baseline
 # ---------------------------------------------------------------------------

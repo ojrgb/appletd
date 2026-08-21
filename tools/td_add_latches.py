@@ -7,12 +7,15 @@
         hands_together            e_clap               e_apart
         h{i}_{finger}_trigger     h{i}_e_{finger}_trigger
                                   h{i}_e_{finger}_release
+        h{i}_grabbing             h{i}_e_grab          h{i}_e_release
         ...plus a fire count and a release count for every one of them,
         and both_pinching.
 
-    Pinch, snap, clap, and a uniform thumb-contact trigger for all four long
-    fingers on both hands. Thirteen latches, 66 channels, no Python in the cook
-    path.
+    Pinch, snap, clap, grab, and a uniform thumb-contact trigger for all four long
+    fingers on both hands. Fifteen latches, 76 channels, no Python in the cook
+    path - and grab needed no new operators, only two more rows in the table
+    below, because a fist is a hand whose `openness` has crossed a threshold and
+    that is the same shape of problem as a pinch.
 
 Idempotent: every operator it owns is prefixed `lat_` and destroyed before the
 rebuild, so running it twice leaves one network rather than two. Custom
@@ -102,6 +105,19 @@ NAMED_LATCHES = (
     ("together", "hands_distance",   "both_valid", "Togetheron", "Togetheroff",
      "hands_together", "e_clap", "e_apart",
      "clap_count", "apart_count"),
+    # GRAB, which is the same recurrence over `openness` rather than a distance.
+    # Worth seeing that it needed no new machinery at all: a fist is a hand whose
+    # openness has fallen below a threshold, so "closed" is `below_on` exactly as
+    # "touching" is for a pinch, and the hysteresis stops a hand hovering near
+    # half-closed from chattering.
+    #
+    # `openness` is 0..1 rather than a ratio of hand size - see visionhands/tuning.py.
+    ("grab0",    "h0_openness",      "h0_valid",   "Grabon",     "Graboff",
+     "h0_grabbing", "h0_e_grab", "h0_e_release",
+     "h0_grab_count", "h0_release_count"),
+    ("grab1",    "h1_openness",      "h1_valid",   "Grabon",     "Graboff",
+     "h1_grabbing", "h1_e_grab", "h1_e_release",
+     "h1_grab_count", "h1_release_count"),
 )
 
 FINGER_LATCHES = tuple(

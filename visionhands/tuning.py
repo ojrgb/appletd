@@ -31,8 +31,9 @@ from typing import Final
 # re-arm rule - a pair set equal has neither and will chatter - so the invariant
 # is asserted at import rather than left to a reader's care.
 #
-# Ratios of hand size, never raw normalised distances: that is what makes a pinch
-# tuned at arm's length still work when the hand comes closer (docs/ATTRIBUTES.md).
+# Distances here are ratios of hand size, never raw normalised distances: that is
+# what makes a pinch tuned at arm's length still work when the hand comes closer
+# (docs/ATTRIBUTES.md). `Grab` is the exception and says so at its own entry.
 LATCH_THRESHOLDS: Final[dict[str, tuple[float, float]]] = {
     # name       (on,   off)
     "Pinch": (0.35, 0.50),
@@ -49,6 +50,12 @@ LATCH_THRESHOLDS: Final[dict[str, tuple[float, float]]] = {
     # tuned on the index tends to make them feel dead. GUESSED - this is one of
     # the numbers the threshold-feel session exists to settle.
     "Trigger": (0.40, 0.55),
+    # Grab is the ONE pair here that is not a ratio of hand size: `openness` is
+    # already a 0..1 quantity - the mean of the four long-finger curls, inverted -
+    # so these are absolute positions on that scale. Below `on` is a closed hand.
+    # Called out because every other pair in this table is a ratio, and reading
+    # 0.30 as "a third of a hand-size" would be wrong here.
+    "Grab": (0.30, 0.55),
 }
 
 # Flattened to the parameter names TouchDesigner carries, since that is the shape

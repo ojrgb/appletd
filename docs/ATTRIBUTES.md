@@ -310,7 +310,7 @@ motion events re-arm by a `Refractory` timer, because they have no released stat
 
 | channel | fires when | reliability |
 |---|---|---|
-| `h{i}_e_grab`, `h{i}_e_release` | `openness` crosses `Grabon` / `Graboff` | high |
+| `h{i}_e_grab`, `h{i}_e_release` | `openness` crosses `Grabon` / `Graboff`. Built as two more rows in the latch bank — a fist is a hand whose openness has crossed a threshold, which is the same shape of problem as a pinch, so it needed no new operators. Also publishes `h{i}_grabbing` and the two counters | high |
 | `h{i}_e_swipe_left/_right/_up/_down` | speed above `Swipespeed`, direction inside `Swipesector`, then deceleration | high |
 | `h{i}_e_wave` | `Wavecrossings` sign changes of `vel_x` within `Wavewindow`, hand open | medium |
 
@@ -405,7 +405,16 @@ are excluded from the output rather than left stale.
 | `Togetheroff` | ratio | 0.95 | and above which it re-arms |
 | `Triggeron` | ratio | 0.40 | thumb-to-fingertip distance below which any finger trigger engages |
 | `Triggeroff` | ratio | 0.55 | and above which it re-arms. One pair for all eight |
-| `Grabon` | 0..1 | 0.30 | `openness` below which `e_grab` fires |
+
+**These two defaults are wrong, and by a lot.** Tuned against a real hand in the
+first live session they came out at **0.13 / 0.17** — about a third of the guess.
+The guess came from synthetic geometry, where a "contact" pose puts the fingertips
+exactly coincident; a real fingertip and thumb in contact still measure a
+noticeable fraction of a hand-size apart, but far less than 0.40, which fires while
+the fingers are still visibly open. Left as-is here pending confirmation that 0.13
+was a settled value rather than a point on the way, but any fresh build should
+expect to retune these first.
+| `Grabon` | 0..1 | 0.30 | `openness` below which `e_grab` fires. The one threshold here that is NOT a ratio of hand size — `openness` is already 0..1 |
 | `Graboff` | 0..1 | 0.55 | above which `e_release` fires |
 | `Swipespeed` | /s | 1.50 | palm speed above which a swipe is considered |
 | `Smoothing` | toggle | on | the one-euro position filter. Off is a bit-exact passthrough, not a filter set to zero |
