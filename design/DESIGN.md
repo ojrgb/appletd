@@ -521,6 +521,32 @@ Against the running instance (099), not read anywhere:
   mean over a window is `(x_now - x_then) / elapsed`, which is exact regardless of
   how updates land: with a 0.15 s window a swipe of known speed 1.75 units/s
   measured **1.66, within 5%**, against 4.43 unaveraged.
+- **`op.inputs` and `op.outputs` go STALE; the connectors are the truth.** This
+  has cost time three separate times, so it is a rule rather than an anecdote:
+    * a Merge CHOP's `.inputs` reported the same operator repeatedly right after a
+      destroy, which sent a "dedupe" pass at connections that were fine;
+    * `in1.outputs` did not list consumers that had been wired to a group COMP
+      which was then destroyed, so a repoint pass found nothing to repoint and a
+      filter was silently bypassed while its builder reported success;
+    * and inside the same script that rewired it, `merge_out.inputs` reported an
+      input list containing the COMP's own `out1` - which would have been a loop -
+      while `inputConnectors[i].connections` showed the correct thirteen.
+  Read `inputConnectors[i].connections` and `outputConnectors[i].connections`, and
+  where the end state is knowable, ASSERT it by name rather than discovering what
+  to change - discovery is what goes stale.
+- **Destroying a group COMP orphans everything wired to its output**, and a
+  dangling input is indistinguishable from one that was never connected, so a
+  builder cannot tell it needs to reconnect them. Measured: the COMP output fell
+  from 495 channels to 57 and the builder reported success. Reuse the group and
+  destroy its CHILDREN; the external wiring then survives untouched.
+- **`inputConnector.connect(op)` accepts an operator only where that operator has
+  one unambiguous output.** A base COMP does not: pass
+  `group.outputConnectors[0]`, or it raises "Invalid number or type of arguments".
+- **`bypass` is an attribute, not a parameter**, so nothing can bind an expression
+  to it - a Parameter Execute DAT has to set it. Worth the trouble where it
+  replaces a Switch: bypass is a bit-exact passthrough that also stops the operator
+  computing, measured 0.0110 ms down to 0.0010 ms, where a Switch pulls both its
+  inputs and gates only the output.
 - **`totalCooks` is a LIFETIME counter**, so comparing it between operators of
   different ages measures nothing - see 2.10 for what that cost. And forcing a
   cook does not advance the frame: every read inside one script sees one frame, so
