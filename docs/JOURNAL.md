@@ -1202,3 +1202,59 @@ regex, so the `.` in `visionhands.sidecar` matches a slash and would hit
 committed earlier - argv[0] must be a python and `-m` must be adjacent to the
 module name - which rejects an editor. Two people finding the same hazard from
 different directions is a good sign about the check that now guards it.
+
+---
+
+## Attributes, part one: synthetic hands and the stateless maths
+2026-08-20
+
+**Built.** `visionhands/synth.py` (parameterised synthetic hands),
+`visionhands/derive.py` (the pure stateless half of docs/ATTRIBUTES.md),
+`tests/test_derive.py` (36 tests), `tools/td_add_derive.py`. 141 tests total,
+ruff and mypy clean.
+
+**Verified live in TouchDesigner**, driven by injected synthetic hands with the
+camera sidecar stopped: two open hands 0.30 apart at size 0.10 gave
+`h0_size` 0.1, `h0_palm_x` 0.35, `h0_openness` 1.0, `h0_g_open` 1.0,
+`hands_distance` 3.0, `hands_center_x` 0.5, `hands_symmetry` 1.0 - every value
+exactly what the geometry says. 171 derived channels, COMP output 476.
+
+**The open performance question is answered: 0.210 ms median** for the whole
+Script CHOP (p95 0.327, max 0.335), which is 1.3% of a 60 fps frame. The
+stateless-maths-in-Python decision holds, and main-thread Python was never the
+problem - the 28x starvation in `DESIGN.md` 2.8 was a background thread.
+
+**Four calibrations that came from measuring rather than assuming.** The
+generator's "full curl" bent 75 degrees per joint, which left a generated fist
+reporting curl 0.74 - so the generator and the derived channel disagreed and no
+gesture threshold could be asserted. 108 degrees puts it at 1.0. The thumb needs
+150, because it has one fewer segment and two bends cannot fold as tightly as
+three; that same fact is why `g_fist` now tests only the four long fingers, since
+requiring the thumb would have made the most basic gesture the least reliable.
+`g_peace` needed a test that the V is actually open, or two extended fingers held
+together reads as a peace sign. And three earlier corrections to the generator
+itself - normalising by joint index 10 instead of 9, an x offset on the middle
+finger tilting the rotation axis by 1.35 degrees, and a guessed palm centroid
+landing 0.021 short - all found by asserting exactness rather than plausibility.
+
+**The absent-hand trap is the first test in the file** and it would have shipped:
+all joints at (0,0) means every distance reads 0, below every engage threshold,
+and size reads 0 so every normalised distance is 0/0. Losing a hand would have
+fired pinch, snap and clap simultaneously while pushing NaN into TouchDesigner,
+where it spreads silently. Found by talking through the Schmitt trigger, not by
+running anything.
+
+**Recorded as a test rather than fixed:** gestures are not mutually exclusive. A
+pointing hand with the thumb up genuinely is also a gun shape, and which reading
+wins belongs to the project rather than to this layer.
+
+**Still to build**, in order: the native temporal network (Slope for velocity,
+Lag/Filter for smoothing, Feedback+Logic for the Schmitt latches and their edge
+pulses, Count/Timer for debounce, refractory and dwell), the group COMPs with
+`allowCooking` gating and the five parameter pages, and `tools/send_synthetic.py`
+to drive gesture sequences into TD without a camera.
+
+**Needs the user, once, at the end:** the threshold *feel*. `Snapon`,
+`Togetheron`, `Swipespeed` and the peace-sign spread are calibrated against
+synthetic geometry, which validates the arithmetic and says nothing about how a
+real hand sits. That is one session, not a rebuild.
