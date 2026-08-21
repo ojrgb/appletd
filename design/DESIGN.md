@@ -601,6 +601,13 @@ Against the running instance (099), not read anywhere:
   error. That is what makes shared parameters possible without `parent(N)`, which
   has to be counted per operator and breaks the next time anything moves. The
   shortcut namespace is global to the project.
+- **`scope` replaces a Select + operator + Merge chain**, and it is available on
+  Math, Filter, Logic, Rename and Trail CHOPs (VERIFIED live). It restricts which
+  channels the operator processes and passes the rest through untouched, so the
+  three-operator pattern used throughout `tools/td_add_coords.py` and
+  `tools/td_add_filter.py` collapses to one. Worth more than the operator count
+  suggests: a Select whose pattern misses a channel DROPS it silently, and with
+  `scope` there is no Select to get wrong.
 - **A group's In/Out CHOPs ARE its connectors, and destroying the Out CHOP breaks a
   CHOP consumer's wire while leaving a COMP consumer's intact.** Reproduced
   deterministically: re-running the filter builder left `coords` (a base COMP)

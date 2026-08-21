@@ -669,3 +669,70 @@ same for pose and face. The master builder rewires anything that was wired to th
 old COMPs and inherits their tuned parameter values, so a rebuild does not reset
 somebody's Ortho Width - verified: Mincutoff 3.170 and Beta 10.000 survived, both
 tuned away from their defaults.
+
+## Step 9 — segmentation: the transport, researched and PARKED 2026-08-21
+
+Researched at the user's request, then parked with a decision made: **the next phase
+uses a plain file-backed `mmap`, not TouchDesigner's shared-memory protocol.**
+
+### What was proven about TD's shared memory
+
+Measured on this machine, from the shipped headers in
+`/Applications/TouchDesigner.app/Contents/Resources/tfs/Samples/SharedMem` rather
+than from the documentation, which does not carry the detail:
+
+- **The Shared Mem In TOP works on macOS** and reads a foreign segment: pointed at
+  TD's own Shared Mem Out TOP it returned 64x32 with the right pixels and no
+  warnings. `memtype` must be `local`.
+- **Layouts, compiled from the headers.** `TOP_SharedMemHeader` is 56 bytes: magic
+  `0xd95ef835` @0, version @4, width @8, height @12, aspectx/y @16/@20, pixelFormat
+  @24, `dataSize` (int64) @32, `dataOffset` @40, gamutPrimaries @44, transfer @48.
+  `UT_SharedMemInfo` is 44 bytes: magic `0x56ed34ba` @0, version @4, supported @8,
+  `namePostFix[32]` @9, detach @41.
+- **THREE segments per name**, found by probing what TD's own writer creates:
+
+      TouchSHM<name>                    the data
+      TouchSHM<name>Mutex               the data's lock
+      TouchSHMTouchSHM<name>4jhd783h    the info - DOUBLY decorated, because the
+                                        info segment is itself a UT_SharedMem whose
+                                        short name is the already-decorated one
+
+- **The blocker.** `UT_SharedMem::open` names its lock `myName + "Mutex"`, which for
+  the INFO segment is **36 characters** against macOS's 31-character `shm_open`
+  limit - so it must be registered in TD's own shared-memory directory
+  (`TD1zzSharedNameDirectory`), and `ShmNameForName(name, create)` only registers
+  when `create` is true, i.e. **only for the segment's owner**. A foreign owner must
+  therefore implement that directory protocol AND initialise process-shared
+  `pthread_mutex_t` + `pthread_cond_t` in shared memory. The receiver calls
+  `tryLock(5000)`: a mistake stalls TouchDesigner for five seconds per frame rather
+  than failing cleanly. Byte-identical data and info segments were still reported
+  "not found" for exactly this reason.
+
+### Two incidental findings, both measured
+
+- **The shared-mem name must be 7 characters or fewer** to keep every segment inside
+  the 31-character limit (the info name is 24 + len(name)).
+- **`shm_open` is variadic**, and on Apple Silicon ctypes must be given only the two
+  FIXED argtypes - with the mode in `argtypes` it arrives as 0, creating a segment
+  that nobody can open and that `shm_unlink` cannot remove either, poisoning the
+  name until reboot. Two names were burned this way.
+
+### The decision: file-backed mmap
+
+- `VNGeneratePersonSegmentationRequest` outputs **`L008` - one 8-bit component**
+  (revision 1 only; quality levels Fast/Balanced/Accurate). A 256x144 mask is 37 KB.
+- So: a plain file in `/tmp`, `mmap` on both sides, `numpy.memmap` and
+  `copyNumpyArray` in a Script TOP, and a **seqlock** for coherence - write seq,
+  write pixels, write seq again; the reader takes seq, pixels, seq and retries if
+  the two seqs differ. No TD protocol, no pthreads in shared memory, no ABI
+  coupling, and testable with no TouchDesigner running.
+- Cost: one Script TOP cook on TD's main thread. `copyNumpyArray` outside `onCook`
+  needs the operator locked (docs/BUILD_PLAN "TouchDesigner facts").
+
+### Still unmeasured, and it needs a camera
+
+The per-frame cost of segmentation at each quality level. The user's datum - an
+existing C++ plugin pinning the frame rate at 50 fps - was presumably `Accurate`.
+If `Fast` is cheap the whole question gets easier; if `Accurate` is what looks
+right, 10 fps may be the honest answer whatever the transport. Measure before
+building.

@@ -152,7 +152,137 @@ And: `cook(force=True)` right after building anything makes every downstream
 `cookTime` meaningless — one profile read 2.946 ms and looked like a regression
 when the real number was 1.030.
 
-## Next
+## Next — the phase the user asked for on 2026-08-21, in their order
+
+Six items, and the first four are one theme: **the COMP got wide before it got
+tidy.** 200 operators, 1.66 ms, and networks that read as spaghetti inside every
+group. Nothing below is speculative - each one names what to change and why.
+
+### 1. Cook time: 1.66 ms measured, and where it goes
+
+MEASURED with data flowing (a synthetic 30 fps hand stream, all three streams
+enabled), summed over **200 operators**:
+
+| item | ms |
+|---|---|
+| `hands/temporal` | 0.49 |
+| `hands/derive_chop` | 0.47 |
+| `hands/latches` | 0.36 |
+| `hands/filter` | 0.22 |
+| `hands/coords` | 0.11 |
+| `face/filter`, `pose/filter`, the two other `coords` | ~0.10 each |
+| **whole COMP** | **1.66** |
+
+Read it twice, on separate frames, with `seq` provably rising - and never right
+after a `cook(force=True)`. `cookTime` is a LAST-VALUE gauge (DESIGN.md 2.11): it
+reports the previous cook forever, so a dead sender and a frozen group both look
+busy.
+
+### 2. `scope` instead of Select + Merge — VERIFIED available
+
+The user's suspicion, and it is correct. **`scope` exists on Math, Filter, Logic,
+Rename and Trail CHOPs** (checked live). It restricts which channels an operator
+processes and passes the rest through untouched - so the standard three-operator
+pattern in this repo:
+
+    Select (pick channels) -> Math -> Merge (put them back)
+
+collapses to ONE operator with `scope` set to the channel pattern. Every `coords`
+group is four of those chains (eight for face), and the `filter` groups are the
+same shape. That is the single biggest structural saving available, and it removes
+the class of bug that has cost the most time here: a Select whose pattern misses a
+channel DROPS it silently, and there is no Select to get wrong.
+
+Do it with the channel LISTS from `visionhands/spaces.py`, not with wildcards -
+`scope` takes patterns, and DESIGN.md 2.11 records twice that wildcards cannot
+partition these channels.
+
+**Re-verify the partition after each change**: every group in the data path must
+still put out every channel it takes in. `td_add_filter.py` already asserts that;
+`td_add_coords.py` asserts a channel count. Keep both.
+
+### 3. Gate the heavy work behind a toggle
+
+`allowCooking` gating already exists for `hands/temporal` and `hands/latches`
+(BUILD_PLAN 7.2, proven by counter delta). What is NOT gated:
+
+- **`derive_chop` at 0.47 ms** is the single most expensive operator. Its group
+  toggles reduce its channel count but it still cooks - it is a Script CHOP in the
+  data path. It is a candidate for `allowCooking` in its own right, or for being
+  wrapped in a group so it can be.
+- **the `filter` groups (0.22 + 0.10 + 0.10)**. `Smoothing` gates the Filter CHOP
+  via its bypass flag, but the Selects and Merge around it still cook every frame -
+  which is exactly what item 2 removes.
+- **`pose` and `face` cook even when their streams are DISABLED**, because the
+  sidecar keeps sending zeros (deliberately - DESIGN.md 6.4) and the network keeps
+  processing them. A `Streamposeactive`-style gate on those two child COMPs is
+  free: nothing outside reads them except through their own output.
+
+Whatever gets gated, prove it with a **cook-count delta**, never a duration - a
+frozen group still reports its old `cookTime`.
+
+### 4. Face: `_tx`/`_ty` for the LANDMARKS, not just the box
+
+Right now only the four `f<i>_bbox_*` channels get world and pixel companions, and
+the 348 landmark channels get none. That was deliberate and it is now the wrong
+default: face landmark points are normalised to the FACE'S BOUNDING BOX
+(`normalizedPoints`, DESIGN.md 2.12), so they need a TWO-STEP transform rather than
+none:
+
+    image_x = bbox_x + point_x * bbox_w        then the usual centre-and-scale
+    image_y = bbox_y + point_y * bbox_h
+
+`visionhands/spaces.py` marks them `ROLE_BOX_RELATIVE` for exactly this reason.
+Give that role its own branch: compose to image space first, then reuse the
+position rule. It is per-face arithmetic (each point needs ITS face's box), so the
+straightforward build is one chain per face rather than one for all channels.
+
+### 5. A global "screen-space only" toggle
+
+Wanted: one toggle that removes every non-boolean channel that is NOT
+screen-space-adjusted, leaving only the TD-adjusted coordinates. So `h0_wrist_tx`
+and `h0_wrist_px` survive and the raw normalised `h0_wrist_x` does not.
+
+`visionhands/spaces.py` already knows which channels are which - the raw ones are
+the `position_*`/`extent_*` roles and the adjusted ones are what
+`transform_branches` produces. **Booleans and scalars must survive** whatever the
+toggle says: `found`, `pinching`, every edge pulse, `seq`, `age_ms`, `sc_*`.
+Implement it as a Select on each stream's output driven by the same registry, and
+be careful that this is the one place where making channels VANISH is the intended
+behaviour rather than the bug DESIGN.md 6.2 warns about - so it belongs at the very
+end of the chain, after `merge_out`, where nothing internal depends on it.
+
+### 6. Explain and tidy the networks
+
+Both asked for, both about the same problem - the insides are unreadable:
+
+- **A Text DAT in every group** explaining what that network does and why, sitting
+  beside the operators it describes. The builders generate the networks, so they
+  generate the DATs too: the text lives in the builder next to the code that builds
+  the thing, which is the only arrangement that cannot go stale independently.
+- **Deliberate `nodeX`/`nodeY` for every operator.** Several builders place nodes
+  by a running counter, so a group with 73 operators is a single column overlapping
+  itself. Lay each group out in explicit rows and columns - one row per concern, one
+  column per stage - and put the row/column constants at the top of the builder so
+  the layout is data rather than arithmetic scattered through the file.
+
+### 7. Segmentation — PARKED, and the decision recorded
+
+Researched 2026-08-21 and parked by the user. **The chosen route for the next phase
+is the plain file-backed `mmap`**, not TouchDesigner's shared-memory protocol.
+`docs/BUILD_PLAN.md` step 9 has the full findings; the short version:
+
+- TD's Shared Mem In TOP works on macOS and reads a foreign segment - proven.
+- But a foreign OWNER must also register a 36-character mutex name in TD's own
+  shared-memory directory and initialise process-shared `pthread_mutex_t` /
+  `pthread_cond_t` in shared memory. The receiver calls `tryLock(5000)`, so getting
+  it wrong stalls TouchDesigner for five seconds a frame.
+- The mask is small - `VNGeneratePersonSegmentationRequest` outputs `L008`, ONE
+  8-bit component - so a file-backed `mmap` plus a Script TOP with `numpy.memmap`
+  and `copyNumpyArray`, synchronised by a seqlock, needs no TD protocol at all and
+  is testable without TouchDesigner.
+
+## Previously next
 
 **1. A plausible synthetic face**, so the landmark channels can be exercised without
 a camera. The counts are measured and all 76 points are published, but
