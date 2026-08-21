@@ -42,17 +42,15 @@ STREAM_HANDS: Final = "hands"
 STREAM_POSE: Final = "pose"
 STREAM_FACE: Final = "face"
 
-# Every stream the CONTRACT knows about, in a fixed order. Face is here while
-# being unimplemented on purpose: the status channel list below is built from
-# this tuple, and a channel list that grows when a feature lands is a channel
-# list that appears from nowhere in an existing project (DESIGN.md 6.2). Better
-# to publish `sc_face` reading 0 from the first day than to add it later.
+# Every stream, in a fixed order. The order is the status channel order below, and
+# the offset order for the ports, so it is not cosmetic.
+#
+# All three are built now. When a fourth is DECLARED before it is BUILT - which is
+# how face spent a day, so that `sc_face` existed from the start rather than
+# appearing from nowhere later (DESIGN.md 6.2) - split this into two tuples again
+# and have `parse_streams` refuse the unbuilt one by name. The distinction is worth
+# reintroducing at that point and worth nothing while it is empty.
 STREAM_NAMES: Final[tuple[str, ...]] = (STREAM_HANDS, STREAM_POSE, STREAM_FACE)
-
-# What can actually be asked for today. `parse_streams` refuses anything else,
-# so asking for face fails on the command line with a clear message rather than
-# starting a sidecar that quietly sends zeros forever.
-IMPLEMENTED_STREAMS: Final[tuple[str, ...]] = (STREAM_HANDS, STREAM_POSE)
 
 # What runs when nobody says otherwise: exactly what ran before there was a
 # choice. A default that turned pose on would make every existing project pay
@@ -114,18 +112,11 @@ def parse_streams(text: str) -> tuple[str, ...]:
     wanted = [part.strip().lower() for part in text.split(",") if part.strip()]
     if not wanted:
         raise ValueError("no streams selected; ask for at least one of: %s"
-                         % ", ".join(IMPLEMENTED_STREAMS))
-    unknown = [name for name in wanted if name not in IMPLEMENTED_STREAMS]
+                         % ", ".join(STREAM_NAMES))
+    unknown = sorted({name for name in wanted if name not in STREAM_NAMES})
     if unknown:
-        # Distinguish "not a stream" from "a stream that is not built yet": the
-        # second is a roadmap question and the first is a typo, and conflating
-        # them sends someone looking in the wrong place.
-        not_built = [name for name in unknown if name in STREAM_NAMES]
-        detail = "unknown stream(s): %s" % ", ".join(sorted(set(unknown) - set(not_built)))
-        if not_built:
-            detail = ("%s is in the channel contract but not implemented yet "
-                      "(DESIGN.md 6.4)" % ", ".join(sorted(set(not_built))))
-        raise ValueError("%s. Available: %s" % (detail, ", ".join(IMPLEMENTED_STREAMS)))
+        raise ValueError("unknown stream(s): %s. Available: %s"
+                         % (", ".join(unknown), ", ".join(STREAM_NAMES)))
     return tuple(name for name in STREAM_NAMES if name in wanted)
 
 
@@ -187,7 +178,7 @@ def _self_check() -> None:
     if PORT_OFFSETS[STREAM_HANDS] != 0:
         raise RuntimeError("hands must stay on the base port: an existing project "
                            "and every note in this repo says 10000")
-    for name in IMPLEMENTED_STREAMS + DEFAULT_STREAMS:
+    for name in DEFAULT_STREAMS:
         if name not in STREAM_NAMES:
             raise RuntimeError("%r is not in STREAM_NAMES" % (name,))
     names: Sequence[str] = status_channel_names()

@@ -109,16 +109,23 @@ def _package_files(subdir: str = "") -> list[Path]:
     return sorted(p for p in root.rglob("*.py") if "tests" not in p.parts)
 
 
-def test_the_pose_module_does_not_import_touchdesigner() -> None:
-    """`pose.py` is the second module that touches Vision (DESIGN.md 6.4), so it
-    inherits the engine's rule: a Vision-side module must be drivable with no TD
-    in the process at all. Enforced separately rather than folded into the engine
-    test, because the list of Vision-side modules is now something that grows.
+# Every module that touches Vision. The list grew from one to three when pose and
+# face landed (DESIGN.md 6.4), which is why the rule below is a loop rather than a
+# copy of the engine test.
+VISION_SIDE_MODULES = ("engine.py", "pose.py", "face.py")
+
+
+def test_no_vision_side_module_imports_touchdesigner() -> None:
+    """A module that touches Vision must be drivable with no TD in the process at
+    all - that is what lets the same code be driven by a Script CHOP, a test, or the
+    sidecar (DESIGN.md 5). `engine.py` was the only one for a long time; there are
+    three now, and a fourth stream would add a fourth.
     """
-    pose = PACKAGE_ROOT / "pose.py"
-    assert pose.is_file()
-    offenders = _module_scope_imports(pose) & TD_MODULES
-    assert not offenders, "pose.py imports TouchDesigner: %s" % sorted(offenders)
+    for name in VISION_SIDE_MODULES:
+        path = PACKAGE_ROOT / name
+        assert path.is_file(), name
+        offenders = _module_scope_imports(path) & TD_MODULES
+        assert not offenders, "%s imports TouchDesigner: %s" % (name, sorted(offenders))
 
 
 def test_engine_does_not_import_touchdesigner() -> None:
@@ -151,13 +158,15 @@ def test_td_layer_does_not_import_pyobjc() -> None:
 
 
 def test_pure_core_imports_neither_pyobjc_nor_td() -> None:
-    """types.py and coords.py are the contract both sides share.
+    """The contract modules, and the synthesisers that build values for them.
 
-    They are imported by the engine (which has pyobjc) AND by td/ (which does
-    not), so they may depend on neither. This is the rule that makes the other
-    two possible.
+    They are imported by the Vision side (which has pyobjc) AND by td/ (which does
+    not), so they may depend on neither. This is the rule that makes the other two
+    possible - and it is why every stream's contract is a separate pure module from
+    the request that fills it.
     """
-    for name in ("types.py", "coords.py", "pose_types.py", "streams.py"):
+    for name in ("types.py", "coords.py", "pose_types.py", "face_types.py",
+                 "streams.py", "synth_body.py", "synth_face.py"):
         path = PACKAGE_ROOT / name
         assert path.is_file(), name
         imports = _module_scope_imports(path)

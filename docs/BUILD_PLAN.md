@@ -158,7 +158,7 @@ crossing frame at a known speed, a dwell needs a hand held still. The pattern is
 established; the instrument is the cheap part and it is what makes each channel
 assertable rather than plausible.
 
-## Step 5 — visionpose — DONE 2026-08-21. visionface next; segmentation deferred
+## Step 5 — visionpose and visionface — DONE 2026-08-21. Segmentation deferred
 
 **Built and verified end to end with no camera:** `visionhands/pose_types.py` (the
 19-joint table and the 123-channel contract), `visionhands/pose.py` (the Vision
@@ -173,9 +173,24 @@ right names and moving values, and the hands port now carrying 141 (137 + four
 `sc_*`) with the COMP output at 499. DESIGN.md 6.4 has the design and 2.12 the API
 surface; the journal has the four things that went wrong.
 
-**What is NOT done:** the face stream, and any attribute layer for pose - there are
-no derived pose channels, no filtering and no temporal channels, by design. The
-brief was plumbing plus basic testing.
+**visionface followed the same afternoon**, and one number short of complete:
+`visionhands/face_types.py`, `visionhands/face.py`, `visionhands/synth_face.py`,
+`tools/send_synthetic_face.py`, `tools/td_build_face_comp.py`. **Verified in
+TouchDesigner: 23 channels on port 10002**, head pose sweeping, with no camera.
+
+**The missing number, and why it is missing rather than guessed.** A face is not a
+joint table: `VNFaceObservation.landmarks()` gives **12 named REGIONS**, each with
+its own `pointCount`, and nothing in the framework publishes those counts before a
+face has been observed. The constellation pins the TOTAL at 76 and says nothing
+about the split. A guessed split lays a nose's points into an eyebrow's channels and
+looks entirely plausible, so the table carries `point_count = None`, no landmark
+channels are published, and `tools/probe_face_regions.py` settles it from one
+camera frame - printing integers, writing no image. Paste the counts in, re-run
+`tools/td_build_face_comp.py`, and the points appear with no other change.
+
+**What is NOT done:** the face landmark points (above), and any attribute layer for
+either new stream - no derived channels, no filtering, no temporal channels, by
+design. The brief was plumbing plus basic testing.
 
 **The original request, for the record.**
 
@@ -238,16 +253,17 @@ DESIGN.md 6.4 with the reasoning:
   tidiness; the trigger for doing it is a second thing needing to control the
   process, not the current asymmetry.
 
-**Still open, for face**, and it is a real difference rather than more of the same.
-VERIFIED against the live framework 2026-08-21 (DESIGN.md 2.12):
-`VNFaceObservation.landmarks()` returns a `VNFaceLandmarks2D` of **12 named
-REGIONS** - `faceContour`, `medianLine`, `nose`, `noseCrest`, `leftEye`,
+**The face API surface**, VERIFIED against the live framework 2026-08-21
+(DESIGN.md 2.12): `VNFaceObservation.landmarks()` returns a `VNFaceLandmarks2D` of
+**12 named REGIONS** - `faceContour`, `medianLine`, `nose`, `noseCrest`, `leftEye`,
 `rightEye`, `leftPupil`, `rightPupil`, `leftEyebrow`, `rightEyebrow`, `innerLips`,
 `outerLips` - each a `VNFaceLandmarkRegion2D` with its own `pointCount` and
 `normalizedPoints`, plus an `allPoints`. The constellation is selectable, 65 or 76
-points, and the request's default is 76. So `pose_types.py`'s flat table needs an
-extra level - region -> point count -> names - and the point count per region has
-to be READ from the framework rather than assumed, or the channel list is a guess. Everything else - the port,
+points, and the request's default is 76. The observation also carries
+`boundingBox`, `confidence`, `faceCaptureQuality` and `roll`/`yaw`/`pitch` - the
+last three in RADIANS and each NSNumber-or-nil. Everything except the per-region
+point counts is publishable without a face in front of the camera, and that is
+exactly what shipped. Everything else - the port,
 the flag, the status channel, the box, the send path - is already built and
 generic; `sc_face` is published, reading 0, and `parse_streams` refuses `face` with
 "in the channel contract but not implemented yet" rather than silently starting

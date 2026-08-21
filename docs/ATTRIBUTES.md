@@ -517,6 +517,7 @@ the process starts, so each says "restart to apply":
 | `Slotassign` | on | h0 is the right hand, h1 the left (DESIGN.md 6.3) |
 | `Streamhands` | on | run `VNDetectHumanHandPoseRequest` |
 | `Streampose` | **off** | run `VNDetectHumanBodyPoseRequest` |
+| `Streamface` | **off** | run `VNDetectFaceLandmarksRequest` |
 
 **What a stream toggle saves is INFERENCE, not channels.** A disabled stream keeps
 every one of its channels, reading zero: TouchDesigner's OSC In CHOP creates
@@ -562,6 +563,47 @@ for exactly that reason; no pose channel does, so a consumer measuring a raw
 distance between two pose joints is measuring how far away the person is standing.
 `tools/send_synthetic_pose.py depth` is the sweep that shows it.
 
+## The face stream — head pose and a box, on a third port
+
+Built 2026-08-21. `visionface` is plumbing only: **23 channels**, no derived
+attributes. Build it with `tools/td_build_face_comp.py`; drive it with the Face
+Stream toggle, or with `tools/send_synthetic_face.py` and no camera.
+
+```
+face_n, face_seq, face_age_ms
+f<i>_found, f<i>_score, f<i>_quality                          for i in 0..1
+f<i>_roll, f<i>_yaw, f<i>_pitch                               DEGREES
+f<i>_bbox_x, f<i>_bbox_y, f<i>_bbox_w, f<i>_bbox_h            normalised
+```
+
+**`roll`, `yaw` and `pitch` are DEGREES.** Vision reports radians; the conversion
+happens once, in `visionhands/face.py`. If you see values under 2 for a head that
+is clearly turned, something has bypassed that conversion.
+
+**`bbox_y` is the BOTTOM edge of the box**, because the box is a CGRect with a
+bottom-left origin, like every other coordinate here (DESIGN.md 7). The top edge is
+`bbox_y + bbox_h`.
+
+**Gate on `f<i>_quality`, not `f<i>_score`.** Both are UNMEASURED for faces
+(DESIGN.md 2.12); `quality` is `faceCaptureQuality`, which Apple documents as a
+comparison metric for the same subject, and `score` is the observation confidence
+that its hand equivalent turned out to be a constant 1.0.
+
+**`f0` is the LEFTMOST face**, by bounding-box CENTRE - not the left edge, because a
+near face has a wide box and would sort left of a face that is genuinely further
+left. Two faces that cross over exchange slots; `send_synthetic_face.py two` does
+exactly that so the limit is visible rather than surprising.
+
+**THE 76 LANDMARK POINTS ARE NOT HERE YET**, and the reason is worth reading before
+adding them yourself. A face does not come back as a joint table - it comes back as
+12 named regions, each with its own point count, and nothing in Vision publishes
+those counts until a face has been seen. A guessed count lays one region's points
+into another's channels and looks completely plausible. So: run
+`tools/probe_face_regions.py` once, with your own face in front of the camera - it
+prints integers, writes no image, keeps nothing - paste the counts into
+`visionhands/face_types.py`, and the landmark channels appear. That will grow this
+channel list once, which is safe precisely because the stream ships off.
+
 ### The sidecar's own status channels
 
 Four channels on the HANDS port, so they arrive whatever else is enabled:
@@ -570,7 +612,8 @@ Four channels on the HANDS port, so they arrive whatever else is enabled:
 |---|---|
 | `sc_uptime_s` | seconds since the sidecar started sending. **FROZEN means the process is gone** |
 | `sc_hands` | 1 when the sidecar really started that stream |
-| `sc_pose` | as above. `sc_face` is published too, and reads 0 until face is built |
+| `sc_pose` | as above |
+| `sc_face` | as above. It existed and read 0 before the face stream was built, so the channel list did not have to grow when it landed |
 
 `sc_uptime_s` is the channel that tells "sidecar dead" apart from "stream switched
 off", because a disabled stream's own `seq` is frozen as well. And `sc_*` reports

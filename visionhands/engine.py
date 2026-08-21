@@ -76,6 +76,8 @@ if TYPE_CHECKING:
     # the camera and knows nothing about which extra requests it is carrying
     # beyond the two attributes below - `source.py` constructs the detector and
     # passes it in (DESIGN.md 6.4).
+    from visionhands.face import FaceDetector
+    from visionhands.face_types import FaceFrame
     from visionhands.pose import PoseDetector
     from visionhands.pose_types import PoseFrame
 
@@ -700,7 +702,9 @@ class HandEngine:
                  slot_mode: str = SLOT_MODE_CHIRALITY,
                  hands: bool = True,
                  pose_detector: PoseDetector | None = None,
-                 on_pose: Callable[[PoseFrame], None] | None = None) -> None:
+                 on_pose: Callable[[PoseFrame], None] | None = None,
+                 face_detector: FaceDetector | None = None,
+                 on_face: Callable[[FaceFrame], None] | None = None) -> None:
         """seq_start continues an existing frame sequence rather than restarting it.
 
         Why it exists: this engine keeps `_seq` monotonic across its OWN
@@ -720,6 +724,8 @@ class HandEngine:
         # throw the result away.
         self._pose_detector = pose_detector if on_pose is not None else None
         self._on_pose = on_pose if pose_detector is not None else None
+        self._face_detector = face_detector if on_face is not None else None
+        self._on_face = on_face if face_detector is not None else None
         self._camera_name = camera_name
         self._requested_px = (width_px, height_px)
         self._max_hands = max_hands
@@ -737,7 +743,8 @@ class HandEngine:
         # not be paying. The channels do not disappear - the sidecar keeps sending
         # the blank frame's zeros (DESIGN.md 6.4).
         self._detector = HandDetector(max_hands=max_hands) if hands else None
-        if self._detector is None and self._pose_detector is None:
+        if (self._detector is None and self._pose_detector is None
+                and self._face_detector is None):
             # A camera with no requests: it would open the device, hold it, warm
             # up, deliver frames and do nothing with any of them - while every
             # channel read zero and nothing said why. Refused on the caller's
@@ -775,6 +782,8 @@ class HandEngine:
         self.n_dropped = 0          # buffers with no image, or failed inference
         self.n_pose_published = 0   # pose frames that reached on_pose
         self.n_pose_dropped = 0     # buffers where the pose request failed
+        self.n_face_published = 0   # face frames that reached on_face
+        self.n_face_dropped = 0     # buffers where the face request failed
         self.delivered_px: tuple[int, int] | None = None
         self.errors: list[str] = []
         # Set on the first delivered frame. Lets a caller confirm liveness by
@@ -853,6 +862,7 @@ class HandEngine:
         # has to cover BOTH inferences or AVFoundation starts dropping buffers,
         # which shows up as n_delivered falling rather than as anything failing.
         self._publish_pose(sample_buffer, captured_at)
+        self._publish_face(sample_buffer, captured_at)
 
     def _publish_hands(self, sample_buffer: ObjCObject, captured_at: float) -> None:
         """Run the hand request and publish the result. Never raises.
@@ -942,6 +952,32 @@ class HandEngine:
         self._mark_first_frame()
         publish(pose_frame)
 
+    def _publish_face(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+        """Run the face request on the buffer the other streams have already seen.
+
+        Thread: capture queue only, from `_on_sample_buffer`.
+        Contract: shares `_seq` and `captured_at` with the other streams' frames
+                  from the same buffer, so a consumer can align them.
+        Never raises: a face fault costs the face stream and nothing else. Its own
+                  try/except rather than the delegate's blanket guard, and its own
+                  method rather than more of `_on_sample_buffer`, so it cannot
+                  return out of the callback and take a later stream with it.
+        """
+        detector, publish = self._face_detector, self._on_face
+        if detector is None or publish is None:
+            return
+        width_px, height_px = self.delivered_px or self._requested_px
+        try:
+            face_frame = detector.detect_sample_buffer(
+                sample_buffer, self._seq, captured_at, width_px, height_px)
+        except EngineError as exc:
+            self.n_face_dropped += 1
+            self._record_error("face: %s" % exc)
+            return
+        self.n_face_published += 1
+        self._mark_first_frame()
+        publish(face_frame)
+
     # -- calling-thread side ------------------------------------------------
     @property
     def running(self) -> bool:
@@ -953,6 +989,12 @@ class HandEngine:
         DESIGN.md 3 forbids quoting live-camera timings, because the cost tracks
         what is in shot. Benchmark by replaying the fixture."""
         detector = self._detector
+        return detector.last_inference_ms if detector is not None else 0.0
+
+    @property
+    def face_inference_ms(self) -> float:
+        """Cost of the most recent FACE inference, or 0.0 with face off. A gauge."""
+        detector = self._face_detector
         return detector.last_inference_ms if detector is not None else 0.0
 
     @property

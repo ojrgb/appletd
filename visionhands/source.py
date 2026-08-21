@@ -38,9 +38,15 @@ from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, runtime_checkable
 # visionhands.slots depends only on visionhands.types - no pyobjc - so importing
 # it at module scope does not compromise this module's promise to be importable,
 # and testable, with no frameworks present. test_boundaries.py enforces that.
+from visionhands.face_types import FaceFrame, blank_face_frame
 from visionhands.pose_types import PoseFrame, blank_pose_frame
 from visionhands.slots import SLOT_MODE_CHIRALITY
-from visionhands.streams import DEFAULT_STREAMS, STREAM_HANDS, STREAM_POSE
+from visionhands.streams import (
+    DEFAULT_STREAMS,
+    STREAM_FACE,
+    STREAM_HANDS,
+    STREAM_POSE,
+)
 from visionhands.types import LandmarkFrame, blank_frame
 
 if TYPE_CHECKING:
@@ -263,6 +269,13 @@ class HandSource(Protocol):
     def errors(self) -> list[str]: ...
 
 
+class LatestFaceBox(LatestBox[FaceFrame]):
+    """The face box (DESIGN.md 6.4). Same argument as LatestPoseBox."""
+
+    def __init__(self) -> None:
+        super().__init__(blank_face_frame())
+
+
 @runtime_checkable
 class PoseSource(Protocol):
     """The body-pose half of a source, kept separate from `HandSource`.
@@ -283,6 +296,16 @@ class PoseSource(Protocol):
     def pose_age_ms(self) -> float: ...
     @property
     def streams_started(self) -> tuple[str, ...]: ...
+
+
+@runtime_checkable
+class FaceSource(Protocol):
+    """The face half of a source. Separate from `PoseSource` for the same reason
+    that one is separate from `HandSource`: a source can implement one stream and
+    not another, and the sidecar asks before it reads (DESIGN.md 6.4)."""
+
+    def latest_face(self) -> FaceFrame: ...
+    def face_age_ms(self) -> float: ...
 
 
 class InProcessSource:
@@ -315,6 +338,7 @@ class InProcessSource:
         # zeros rather than nothing (DESIGN.md 6.4), and this is where the zeros
         # come from.
         self.pose_box = LatestPoseBox()
+        self.face_box = LatestFaceBox()
         # Guards start()/stop() against each other. It is NEVER taken by
         # latest() or age_ms() - the read path stays lock-free, which is the
         # whole point of this module. This only stops two callers building two
@@ -362,12 +386,18 @@ class InProcessSource:
             if STREAM_POSE in self._streams:
                 from visionhands.pose import PoseDetector
                 pose_detector = PoseDetector()
+            face_detector = None
+            if STREAM_FACE in self._streams:
+                from visionhands.face import FaceDetector
+                face_detector = FaceDetector()
 
             engine = HandEngine(
                 on_frame=self.box.publish,
                 hands=STREAM_HANDS in self._streams,
                 pose_detector=pose_detector,
                 on_pose=self.pose_box.publish if pose_detector is not None else None,
+                face_detector=face_detector,
+                on_face=self.face_box.publish if face_detector is not None else None,
                 camera_name=self._camera_name or DEFAULT_CAMERA_NAME,
                 width_px=self._width_px or DEFAULT_WIDTH_PX,
                 height_px=self._height_px or DEFAULT_HEIGHT_PX,
@@ -391,6 +421,8 @@ class InProcessSource:
             # expected from a stream nobody asked for.
             if pose_detector is not None:
                 self.pose_box.mark_started()
+            if face_detector is not None:
+                self.face_box.mark_started()
             try:
                 engine.start()
             except Exception as exc:
@@ -442,6 +474,13 @@ class InProcessSource:
 
     def pose_age_ms(self) -> float:
         return self.pose_box.age_ms()
+
+    def latest_face(self) -> FaceFrame:
+        """The most recent face frame, or the blank one with face disabled."""
+        return self.face_box.latest()
+
+    def face_age_ms(self) -> float:
+        return self.face_box.age_ms()
 
     @property
     def streams_started(self) -> tuple[str, ...]:

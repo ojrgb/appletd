@@ -61,6 +61,7 @@ ignore = [
 "tools/td_add_groups.py" = ["F821"]
 "tools/td_add_coords.py" = ["F821"]
 "tools/td_build_pose_comp.py" = ["F821", "E402"]
+"tools/td_build_face_comp.py" = ["F821", "E402"]
 "tools/probe_m1_in_td.py" = [
     "E402",
     # The probe's entire purpose is to survive a failing stage and report which

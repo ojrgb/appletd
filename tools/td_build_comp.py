@@ -187,7 +187,8 @@ def start():
     # A stream that is OFF still has all of its channels in TouchDesigner, as
     # zeros - what the toggle saves is the inference (DESIGN.md 6.4).
     streams = []
-    for name, par_name in (("hands", "Streamhands"), ("pose", "Streampose")):
+    for name, par_name in (("hands", "Streamhands"), ("pose", "Streampose"),
+                           ("face", "Streamface")):
         if comp is None or bool(getattr(comp.par, par_name).eval()):
             streams.append(name)
     if not streams:
@@ -210,8 +211,8 @@ def start():
               ",".join(streams)))
     # The ports each stream lands on, printed because "which port is pose on" is
     # the first question when the pose COMP shows no channels.
-    print("[visionhands]   hands -> port %%d   pose -> port %%d  (base + 1)"
-          %% (PORT, PORT + 1))
+    print("[visionhands]   hands -> %%d   pose -> %%d   face -> %%d  (base + 0/1/2)"
+          %% (PORT, PORT + 1, PORT + 2))
     return process.pid
 
 
@@ -323,7 +324,7 @@ def main():
         # Remember what the user tuned, so a rebuild restores it rather than
         # resetting it.
         for name in ("Resw", "Resh", "Orthowidth", "Renderw", "Renderh",
-                     "Slotassign", "Streamhands", "Streampose"):
+                     "Slotassign", "Streamhands", "Streampose", "Streamface"):
             if hasattr(comp.par, name):
                 previous[name] = getattr(comp.par, name).eval()
     if comp is None:
@@ -385,11 +386,18 @@ def main():
         "Streamhands", label="Hands Stream (restart to apply)")[0]
     par_pose = lifecycle.appendToggle(
         "Streampose", label="Body Pose Stream (restart to apply)")[0]
+    par_face = lifecycle.appendToggle(
+        "Streamface", label="Face Stream (restart to apply)")[0]
     par_hands.default = True
     # OFF by default: an existing project reads no pose channels, and turning it
     # on by default would make every one of them pay for an inference nothing
     # looks at.
     par_pose.default = False
+    # Off for the same reason, and with one extra: the face stream publishes head
+    # pose and the bounding box but NOT the 76 landmark points, because their split
+    # across the 12 regions is unmeasured (visionhands/face_types.py). Turning it on
+    # by default would advertise a contract that is about to grow.
+    par_face.default = False
     # TRAP, MEASURED on this rebuild: a NEWLY APPENDED toggle takes val = 0,
     # whatever `.default` says. `Streamhands` came back with default True and val
     # False, so `start()` refused to launch anything - loudly, which is the only
@@ -401,7 +409,8 @@ def main():
     # whether the COMP is new - and it was the COMP the first version asked about.
     # `previous` is the record of which parameters existed before this run.
     for name, parameter in (("Slotassign", par_slots),
-                            ("Streamhands", par_hands), ("Streampose", par_pose)):
+                            ("Streamhands", par_hands), ("Streampose", par_pose),
+                            ("Streamface", par_face)):
         if name not in previous:
             parameter.val = parameter.default
 
@@ -523,11 +532,14 @@ def main():
     print()
     print("   Sidecar page on %s:" % comp.path)
     print("     Start Sidecar / Stop Sidecar / Print Status")
-    print("     Hands Stream: %s | Body Pose Stream: %s  (both restart-to-apply)"
+    print("     Streams (all restart-to-apply): hands %s | pose %s | face %s"
           % ("on" if comp.par.Streamhands.eval() else "off",
-             "on" if comp.par.Streampose.eval() else "off"))
+             "on" if comp.par.Streampose.eval() else "off",
+             "on" if comp.par.Streamface.eval() else "off"))
     print("     Body pose arrives on port %d - run tools/td_build_pose_comp.py"
           % (OSC_PORT + 1))
+    print("     Face arrives on port %d - run tools/td_build_face_comp.py"
+          % (OSC_PORT + 2))
     print("   Stop finds ANY running sidecar, including one started from a")
     print("   terminal, and the project's exit stops it too.")
     print("=" * 70)

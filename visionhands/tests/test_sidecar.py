@@ -23,7 +23,7 @@ import pytest
 
 from visionhands.sidecar import SEQ_MODULUS, Sidecar
 from visionhands.source import FakeSource
-from visionhands.streams import status_channel_names
+from visionhands.streams import STREAM_NAMES, status_channel_names
 from visionhands.types import (
     MAX_HANDS,
     N_JOINTS,
@@ -172,10 +172,11 @@ def test_sending_keeps_working_when_the_socket_fails(receiver: socket.socket) ->
     sidecar, _ = _sidecar_for(receiver, lambda seq: _frame(seq))
     sidecar.socket.close()
     sidecar.send_once()                          # must not raise
-    # TWO, not one: one send_once() puts one bundle per stream on the wire, and
-    # both fail on a closed socket. Counting sends rather than ticks is what
-    # makes "the socket is broken" visible per bundle (DESIGN.md 6.4).
-    assert sidecar.n_send_errors == 2
+    # One per STREAM, not one per tick: send_once() puts a bundle on the wire for
+    # each of hands, pose and face, and all three fail on a closed socket.
+    # Counting sends rather than ticks is what makes "the socket is broken"
+    # visible per bundle (DESIGN.md 6.4).
+    assert sidecar.n_send_errors == len(STREAM_NAMES)
     assert sidecar.n_sent == 0
 
 

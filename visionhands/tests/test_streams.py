@@ -15,7 +15,6 @@ import pytest
 from visionhands.streams import (
     BASE_PORT,
     DEFAULT_STREAMS,
-    IMPLEMENTED_STREAMS,
     STREAM_FACE,
     STREAM_HANDS,
     STREAM_NAMES,
@@ -81,21 +80,20 @@ def test_an_empty_selection_is_an_error() -> None:
             parse_streams(text)
 
 
-def test_a_typo_and_an_unbuilt_stream_get_different_messages() -> None:
-    """One sends you to your command line, the other to the roadmap. Conflating
-    them sends somebody looking in the wrong place."""
+def test_an_unknown_stream_names_the_ones_that_exist() -> None:
+    """The error has to be actionable on the command line where it was typed."""
     with pytest.raises(ValueError, match="unknown stream"):
         parse_streams("hands,elbow")
-    with pytest.raises(ValueError, match="not implemented yet"):
-        parse_streams("hands,face")
 
 
-def test_face_is_in_the_contract_but_cannot_be_asked_for() -> None:
-    """Deliberate: `sc_face` exists from day one so the status channel list does
-    not grow when the stream lands (DESIGN.md 6.2 - a channel that appears from
-    nowhere is a channel every project has to be rebuilt for)."""
+def test_every_declared_stream_can_actually_be_asked_for() -> None:
+    """They were not always the same set: `face` sat in STREAM_NAMES for a day
+    before it was built, so that `sc_face` existed from the start rather than
+    appearing from nowhere later (DESIGN.md 6.2). All three are built now, and this
+    is what says so - if a fourth is ever declared early, this test is where the
+    two sets part company again."""
+    assert parse_streams(",".join(STREAM_NAMES)) == STREAM_NAMES
     assert STREAM_FACE in STREAM_NAMES
-    assert STREAM_FACE not in IMPLEMENTED_STREAMS
 
 
 def test_the_default_is_what_ran_before_there_was_a_choice() -> None:
@@ -107,7 +105,8 @@ def test_the_default_is_what_ran_before_there_was_a_choice() -> None:
 def test_format_and_parse_round_trip() -> None:
     """The TouchDesigner side formats, the sidecar parses. If these disagree, the
     process starts with streams nobody asked for."""
-    for streams in ((STREAM_HANDS,), (STREAM_POSE,), (STREAM_HANDS, STREAM_POSE)):
+    for streams in ((STREAM_HANDS,), (STREAM_POSE,), (STREAM_FACE,),
+                    (STREAM_HANDS, STREAM_POSE), STREAM_NAMES):
         assert parse_streams(format_streams(streams)) == streams
 
 

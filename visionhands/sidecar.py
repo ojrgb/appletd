@@ -7,7 +7,7 @@
         ~/.venvs/visionhands/bin/python -m visionhands.sidecar --streams hands,pose
 
     STREAMS are launch flags, one Vision request each, and `--port` is the BASE
-    of a block: hands go to 10000 and body pose to 10001, so no stream's channels
+    of a block: hands 10000, body pose 10001, face 10002, so no stream's channels
     can land in another's OSC In CHOP (DESIGN.md 6.4). A stream that is switched
     off costs no inference but STILL SENDS its channels, as zeros - because TD's
     OSC In CHOP creates channels as they arrive, so omitting them makes them
@@ -40,8 +40,9 @@ work measures 4.38 ms even while TD renders at 60 fps. So the engine, the captur
 thread and the lock-free box all stay exactly as they were - they were never the
 problem - and only their *host* changes.
 
-WHAT CROSSES THE BOUNDARY: 137 hand floats (3480 bytes) plus 4 status channels on
-the base port, and 123 pose floats on the next one, per tick. No pixels. TD can
+WHAT CROSSES THE BOUNDARY, per tick: 137 hand floats (3480 bytes) plus 4 status
+channels on the base port, 123 pose floats on the next, and 23 face floats on the
+one after. No pixels. TD can
 open the same camera itself for display - measured, both processes receive live
 frames simultaneously - so there is no image to transport.
 
@@ -73,21 +74,29 @@ import signal
 import socket
 import sys
 import time
+from collections.abc import Callable
 from types import FrameType
 
+from visionhands.face_types import (
+    blank_face_frame,
+    face_channel_names,
+    face_channel_values,
+)
 from visionhands.osc import encode_channels
 from visionhands.pose_types import blank_pose_frame, pose_channel_names, pose_channel_values
 from visionhands.slots import SLOT_MODE_CHIRALITY, SLOT_MODES
 from visionhands.source import (
     SEQ_NEVER_PUBLISHED,
+    FaceSource,
     HandSource,
     InProcessSource,
     PoseSource,
 )
 from visionhands.streams import (
     DEFAULT_STREAMS,
-    IMPLEMENTED_STREAMS,
+    STREAM_FACE,
     STREAM_HANDS,
+    STREAM_NAMES,
     STREAM_POSE,
     format_streams,
     parse_streams,
@@ -170,6 +179,8 @@ class Sidecar:
         # a blank frame, which is the same zeros a disabled stream sends.
         self.pose_source: PoseSource | None = (
             self.source if isinstance(self.source, PoseSource) else None)
+        self.face_source: FaceSource | None = (
+            self.source if isinstance(self.source, FaceSource) else None)
         # UDP: this is a stream of the most recent state, and a retransmitted
         # stale frame is worth less than the next fresh one. Loss on loopback is
         # not a practical concern, and `seq` makes any loss visible downstream.
@@ -180,6 +191,7 @@ class Sidecar:
         # it is needed (DESIGN.md 6.4).
         self.status_names = status_channel_names()
         self.pose_names = pose_channel_names()
+        self.face_names = face_channel_names()
         # Where `sc_uptime_s` counts from. Construction rather than the top of
         # run(), so the camera warm-up (~1.5 s, DESIGN.md 2.7) is included: the
         # channel exists to say "this process is alive", and it is alive during
@@ -190,7 +202,9 @@ class Sidecar:
         self.n_sent = 0
         self.n_send_errors = 0
         self._last_seq_sent = -1
-        self._last_pose_seq_sent = -1
+        # One per optional stream, keyed by name: "did anything new go out" is
+        # per stream, and with hands disabled the hands seq never moves.
+        self._last_optional_seq: dict[str, int] = {}
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
@@ -267,12 +281,15 @@ class Sidecar:
         rather than making them vanish, and a vanished channel fails silently
         downstream (DESIGN.md 6.2).
         """
-        hands_is_new = self._send_hands()
-        pose_is_new = self._send_pose()
-        # Either stream counts as news. With hands disabled, testing only the
-        # hands seq would report 0 fps in the status line while pose frames were
-        # arriving perfectly well.
-        return hands_is_new or pose_is_new
+        # Every stream, every tick, and `any()` rather than `or` so none of them
+        # is short-circuited away: a stream that stopped being SENT would make its
+        # channels vanish from TouchDesigner, which is the whole point of
+        # DESIGN.md 6.4.
+        fresh = [self._send_hands(), self._send_pose(), self._send_face()]
+        # Any stream counts as news. With hands disabled, testing only the hands
+        # seq would report 0 fps in the status line while pose frames were arriving
+        # perfectly well.
+        return any(fresh)
 
     def _send_hands(self) -> bool:
         """The hands bundle plus the sidecar status, to the base port.
@@ -314,30 +331,61 @@ class Sidecar:
     def _send_pose(self) -> bool:
         """The body-pose bundle, to the pose port. Zeros when the stream is off."""
         source = self.pose_source
-        if source is None:
-            # No pose support in this source at all - a hands-only test double,
-            # or a future source that does not implement it. Send the contract
-            # anyway, as zeros: the channels must exist in TouchDesigner whether
-            # or not anything is filling them.
-            frame = blank_pose_frame()
-            age_ms = 0.0
-        else:
-            frame = source.latest_pose()
-            # Frame first, clock second - see _send_hands.
-            if frame.seq != SEQ_NEVER_PUBLISHED:
-                age_ms = max(0.0, (time.monotonic() - frame.captured_at) * 1e3)
-            else:
-                age_ms = source.pose_age_ms()
+        frame = blank_pose_frame() if source is None else source.latest_pose()
+        age_ms = self._age_of(frame, None if source is None else source.pose_age_ms)
         n_bodies = sum(1 for body in frame.bodies if body.found)
+        return self._send_optional(
+            STREAM_POSE, self.pose_names,
+            pose_channel_values(frame, age_ms, n_bodies), frame.seq)
 
-        values = pose_channel_values(frame, age_ms, n_bodies)
-        # Index 1 is `pose_seq`. Wrapped for the same float32 reason as hands, and
-        # pinned by a test rather than trusted here.
-        values[1] = float(frame.seq % SEQ_MODULUS)
-        self._send(self.pose_names, values, port_for(STREAM_POSE, self.port))
+    def _send_face(self) -> bool:
+        """The face bundle, to the face port. Zeros when the stream is off."""
+        source = self.face_source
+        frame = blank_face_frame() if source is None else source.latest_face()
+        age_ms = self._age_of(frame, None if source is None else source.face_age_ms)
+        n_faces = sum(1 for face in frame.faces if face.found)
+        return self._send_optional(
+            STREAM_FACE, self.face_names,
+            face_channel_values(frame, age_ms, n_faces), frame.seq)
 
-        is_new = frame.seq != self._last_pose_seq_sent
-        self._last_pose_seq_sent = frame.seq
+    def _age_of(self, frame: object,
+                fallback: Callable[[], float] | None) -> float:
+        """How stale a frame is, in ms. Frame first, clock second.
+
+        Sampling the clock first leaves a window in which a newer frame lands with
+        a later `captured_at`, and the age comes out NEGATIVE - measured 55 times in
+        7.5M against a fast synthetic producer (source.py has the detail). Shared by
+        both optional streams so there is one copy of that ordering rather than
+        three.
+
+        `fallback` is the box's own age, for a stream that has never published: the
+        box measures from when its producer started, which is the only meaningful
+        answer. None means there is no producer at all - a source that does not
+        implement this stream - and the honest age is then 0, not a rising number,
+        because nothing was ever expected.
+        """
+        seq = getattr(frame, "seq", SEQ_NEVER_PUBLISHED)
+        captured_at = getattr(frame, "captured_at", 0.0)
+        if seq != SEQ_NEVER_PUBLISHED:
+            return max(0.0, (time.monotonic() - float(captured_at)) * 1e3)
+        return 0.0 if fallback is None else fallback()
+
+    def _send_optional(self, stream: str, names: tuple[str, ...],
+                       values: list[float], seq: int) -> bool:
+        """One optional stream's bundle, to its own port. Returns True if new.
+
+        Every stream is sent every tick whether or not it is enabled: a disabled
+        one carries the blank frame's zeros. TouchDesigner's OSC In CHOP creates
+        channels as they arrive, so a stream that stopped sending would make its
+        channels VANISH and break its consumers silently (DESIGN.md 6.2).
+        """
+        # Index 1 is that stream's `seq`, wrapped for float32 exactness as hands'
+        # is (DESIGN.md 2.9). Both contracts put it there and both are pinned by a
+        # test rather than trusted here.
+        values[1] = float(seq % SEQ_MODULUS)
+        self._send(names, values, port_for(stream, self.port))
+        is_new = self._last_optional_seq.get(stream, -1) != seq
+        self._last_optional_seq[stream] = seq
         return is_new
 
     def _send(self, names: tuple[str, ...], values: list[float],
@@ -387,14 +435,18 @@ class Sidecar:
         # One line per stream, with its port and its channel count, because
         # "which port is pose on" is the first question anyone wiring up the TD
         # side asks - and getting it wrong shows up as an OSC In CHOP with no
-        # channels and no error (DESIGN.md 6.4).
-        print("  hands  port %d  %d channels (+%d status)"
-              % (port_for(STREAM_HANDS, self.port), len(self.names),
-                 len(self.status_names)), flush=True)
-        print("  pose   port %d  %d channels%s"
-              % (port_for(STREAM_POSE, self.port), len(self.pose_names),
-                 "" if STREAM_POSE in self.streams else "  (DISABLED - zeros)"),
-              flush=True)
+        # channels and no error (DESIGN.md 6.4). Every stream is listed, including
+        # the disabled ones, because a disabled stream is still SENDING - zeros -
+        # and somebody watching that port needs to know why it is flat.
+        for stream, names in ((STREAM_HANDS, self.names),
+                              (STREAM_POSE, self.pose_names),
+                              (STREAM_FACE, self.face_names)):
+            print("  %-6s port %d  %d channels%s%s"
+                  % (stream, port_for(stream, self.port), len(names),
+                     " (+%d status)" % len(self.status_names)
+                     if stream == STREAM_HANDS else "",
+                     "" if stream in self.streams else "  (DISABLED - zeros)"),
+                  flush=True)
         if self.parent_pid:
             print("watching parent pid %d; will exit when it does" % self.parent_pid,
                   flush=True)
@@ -435,14 +487,19 @@ class Sidecar:
 
                 if now >= next_status:
                     delivered = new_frames - frames_at_last_status
-                    pose = self.pose_source
+                    pose, face = self.pose_source, self.face_source
                     print("camera %5.1f fps | sent %d | age %6.1f ms | hands %d%s%s"
                           % (delivered / STATUS_INTERVAL_S, self.n_sent,
                              self.source.age_ms(),
                              sum(1 for h in self.source.latest().hands if h.found),
-                             "" if pose is None or STREAM_POSE not in self.streams
-                             else " | bodies %d" % sum(
-                                 1 for b in pose.latest_pose().bodies if b.found),
+                             "".join(x for x in (
+                                 "" if pose is None or STREAM_POSE not in self.streams
+                                 else " | bodies %d" % sum(
+                                     1 for b in pose.latest_pose().bodies if b.found),
+                                 "" if face is None or STREAM_FACE not in self.streams
+                                 else " | faces %d" % sum(
+                                     1 for f in face.latest_face().faces if f.found),
+                             )),
                              "" if not self.source.errors
                              else " | ERRORS: %s" % self.source.errors),
                           flush=True)
@@ -499,10 +556,10 @@ def main(argv: list[str] | None = None) -> int:
                              "run: %s. Read once at startup, so a toggle in "
                              "TouchDesigner takes effect on the next Start. Each "
                              "stream is sent to its OWN port (--port is the base: "
-                             "hands +0, pose +1), and a stream that is off still "
+                             "hands +0, pose +1, face +2), and a stream that is off still "
                              "sends its channels as zeros so nothing downstream "
                              "loses a reference. (default: %%(default)s)"
-                             % ", ".join(IMPLEMENTED_STREAMS))
+                             % ", ".join(STREAM_NAMES))
     parser.add_argument("--parent-pid", type=int, default=None,
                         help="exit when this pid does. Pass os.getpid() from a "
                              "TouchDesigner launcher so a TD crash cannot leave "

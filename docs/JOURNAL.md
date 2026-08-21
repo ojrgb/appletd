@@ -1968,3 +1968,68 @@ the brief was plumbing plus basic testing. Face is next and does NOT fit this sh
 are 12 named REGIONS of differing point counts rather than one joint table
 (verified, DESIGN.md 2.12), so the channel list needs a level the pose table does
 not have.
+
+## The face stream, and one number I refused to write down
+
+Built `visionface` the same afternoon as pose, with the same shape: a contract
+module, a request module, a synthesiser, a sender, a COMP builder. **Verified in
+TouchDesigner: 23 channels on port 10002**, head pose sweeping, camera untouched.
+320 tests.
+
+**The interesting part is what is NOT in it.** A hand and a body both arrive as a
+`VNRecognizedPointsObservation` - a flat dict of named joints, fixed count, known
+before you start. A face does not. `VNFaceObservation.landmarks()` gives **12 named
+regions**, each a `VNFaceLandmarkRegion2D` with its own `pointCount`, and nothing in
+the framework will tell you those counts before a face has been observed. The
+constellation pins the TOTAL at 76; the split is invisible until there is a face.
+
+So the channel list needed twelve numbers I could not get. Three ways not to get
+them, in the order I tried:
+
+1. **Draw a face and detect it.** A procedurally shaded ellipse with eyes, brows,
+   nose and mouth, through `VNDetectFaceRectanglesRequest`: **0 faces**. Vision is
+   robust to illustration but not to that.
+2. **Find a face in something already on this machine.** The only fixture here is
+   `hand_clip.mp4`, which was gated to contain no identifiable person - so by
+   construction it has no face to measure.
+3. **Write the numbers down from memory.** This is the one worth naming, because it
+   was tempting and it is exactly the failure the repo's standards are about. A
+   wrong count does not raise: it lays a nose's points into an eyebrow's channels,
+   and everything looks completely plausible until somebody wonders why the eyebrows
+   never move. `docs/STANDARDS.md` says a guessed constant says so; a guessed
+   constant in a CHANNEL LIST cannot say so, because the misalignment is downstream
+   of the guess.
+
+What shipped instead: `FACE_REGIONS` carries the 12 regions with
+`point_count = None`, the landmark channels are not published while any is None, and
+the stream publishes the part that IS knowable without a face - confidence, capture
+quality, roll, yaw, pitch and the bounding box, all straight off the observation.
+`tools/probe_face_regions.py` settles the rest from one camera frame: it prints
+integers, writes no image and keeps nothing. Paste them in, re-run the COMP builder,
+and the points appear with no other change - and `face_types.py`'s self-check
+refuses a half-filled table and refuses one whose counts do not sum to 76, so a typo
+fails at import rather than in a channel list.
+
+There is a test asserting **no region carries a guessed count**, which is an unusual
+thing to test and the right thing to test: it is the invariant that will be broken by
+somebody in a hurry, and it skips itself once the counts are real.
+
+**Two silent units traps on the face path**, both now pinned by tests:
+`roll`/`yaw`/`pitch` are RADIANS and every angle in this system is degrees - a
+missed conversion is a 57x that keeps every value small and plausible - and all
+three are NSNumber-OR-NIL, where `float(None)` raises on the capture thread inside
+an Objective-C callback, which is its own crash.
+
+**One design detail worth keeping.** Faces sort left to right by bounding-box
+CENTRE, not by `bbox_x`. A face close to the camera has a wide box, so sorting on
+the left edge puts it left of a face that is genuinely further left. Same class of
+bug as the body sort's confidence fallback: the obvious key is subtly wrong in the
+case that actually happens.
+
+**What the third stream cost the code.** Almost nothing, which is the point of
+having done pose first: `streams.py` needed one name, the sidecar's third bundle
+became a shared `_send_optional` rather than a third copy of the same twenty lines,
+and the engine grew one more `_publish_*` method that cannot return out of the
+callback. `IMPLEMENTED_STREAMS` went away entirely - with all three built it was
+equal to `STREAM_NAMES`, and a distinction that is always true is dead code, so the
+test that pinned it now pins the rule for the next stream instead.

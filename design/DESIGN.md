@@ -815,33 +815,37 @@ new work goes:
 
 ## 5. Module layout
 
-Actual, as built. **`engine.py` and `pose.py` are the two modules that touch
+Actual, as built. **`engine.py`, `pose.py` and `face.py` are the three modules that touch
 Vision**; neither imports TD, `td/` imports no pyobjc, and nothing in the package
 imports `cv2` or `PIL` at module scope. A test enforces all of it rather than
 trusting discipline (`tests/test_boundaries.py`). The dependency runs one way -
-`pose.py` imports `engine.py`, never the reverse - so the camera, the queue and the
-teardown stay in one place and a second stream is a plug-in rather than a rewrite.
+the request modules import `engine.py`, never the reverse - so the camera, the queue
+and the teardown stay in one place and each new stream is a plug-in rather than a
+rewrite.
 
 ```
 visionhands/
   types.py        # LandmarkFrame, Hand, the joint table, the 137-channel contract
   pose_types.py   # Body, PoseFrame, the 19-joint table, the 123-channel contract
+  face_types.py   # Face, FaceFrame, the 12 regions, the 23-channel contract
   streams.py      # which streams exist, which port each uses, the sc_* status
   coords.py       # every coordinate conversion, and the single legal y-flip
   engine.py       # TD-free: AVFoundation + Vision -> LandmarkFrame, and the camera
   pose.py         # TD-free: the body-pose request, a plug-in on top of engine.py
+  face.py         # TD-free: the face request, the same shape as pose.py
   source.py       # HandSource/PoseSource; LatestBox; InProcessSource; FakeSource
   osc.py          # the OSC encoder, hand-rolled, byte-checked against python-osc
   sidecar.py      # the process: camera + Vision + socket, one bundle per stream
   derive.py       # the stateless half of docs/ATTRIBUTES.md, as one pure function
   synth.py        # parameterised synthetic hands, for testing without a camera
   synth_body.py   # the same for a body, so the pose plumbing needs no person
+  synth_face.py   # and for a face: a box and three angles, no landmarks yet
   sequences.py    # gesture sweeps over time, for testing anything with memory
   tuning.py       # threshold defaults; one table, shared by builders and tests
   td/
     bootstrap.py  # sys.path wiring and engine lifecycle (in-process path, legacy)
     hands_chop.py # Script CHOP callbacks for the in-process path (legacy)
-  tests/          # 284 tests, none of which need a camera or TouchDesigner
+  tests/          # 320 tests, none of which need a camera or TouchDesigner
 
 tools/            # scripts pasted into a TD Text DAT, plus dev utilities
   td_build_comp.py     # the COMP: coordinate spaces, Sidecar page, Start/Stop
@@ -849,8 +853,11 @@ tools/            # scripts pasted into a TD Text DAT, plus dev utilities
   td_add_latches.py    # the proximity latch bank
   td_verify_latches.py # judges the latches by counter deltas over a sweep
   td_build_pose_comp.py # the `visionpose` COMP and its OSC In CHOP
+  td_build_face_comp.py # the `visionface` COMP and its OSC In CHOP
   send_synthetic.py    # drives sequences.py into TD over OSC, no camera
   send_synthetic_pose.py # the same for a synthetic body, on the pose port
+  send_synthetic_face.py # and for a face: head pose sweeps, on the face port
+  probe_face_regions.py # the ONE tool that needs the camera: region point counts
   record_fixture.py    # records a hands-only fixture, gated on people detection
   probe_m1_in_td.py    # the milestone-1 probe, kept
 
@@ -998,7 +1005,7 @@ and one failing stream does not stop the others or the loop.
 
 **One UDP port per stream.** Hands 10000, pose 10001, face 10002 — `BASE_PORT` plus
 a fixed offset, in `visionhands/streams.py`, which both the sidecar and the TD
-builders import so the two cannot drift. One port carrying everything was the
+builders import so the two cannot drift. All three are built. One port carrying everything was the
 obvious alternative and is worse here:
 
   * TouchDesigner's OSC In CHOP puts every channel it receives into one CHOP, and
@@ -1071,6 +1078,37 @@ reference joint**, so `p0` is the leftmost person. That is stable while people d
 not cross over, costs one sort, and holds no state. Real tracking through a
 crossing is the same proximity fallback `slots.py` already has and is phase 2 —
 with one person, which is the case this was built for, the question does not arise.
+
+**Face contract, and the one number it is missing.** 23 channels today, prefix
+`f{i}_`, `MAX_FACES = 2`:
+
+```
+face_n, face_seq, face_age_ms
+f<i>_found, f<i>_score, f<i>_quality
+f<i>_roll, f<i>_yaw, f<i>_pitch                  DEGREES, converted from radians
+f<i>_bbox_x, f<i>_bbox_y, f<i>_bbox_w, f<i>_bbox_h    normalised, y = BOTTOM edge
+```
+
+**The 76 landmark points are not in it, and that is deliberate.** A face does not
+come back as a joint table: `VNFaceObservation.landmarks()` gives 12 named REGIONS,
+each with its own `pointCount`, and **nothing in the framework publishes those
+counts before a face has been observed** (§2.12). The constellation pins the total
+at 76 and says nothing about the split. A guessed split does not fail — it lays a
+nose's points into an eyebrow's channels and looks entirely plausible — so
+`face_types.py` carries the 12 regions with `point_count = None`, publishes no
+landmark channels while any is None, and `tools/probe_face_regions.py` settles it
+from one camera frame without writing an image. Filling the counts in grows the
+channel list once, before anything consumes it, which is why `Streamface` ships off.
+
+**Two units traps on the face path**, both silent, both handled in `face.py`:
+`roll`/`yaw`/`pitch` arrive in RADIANS and every angle in this system is degrees
+(a missed conversion is a 57x that keeps every value plausible), and all three are
+NSNumber-OR-NIL, where `float(None)` raises on the capture thread.
+
+**No chirality for a face either**, so the same spatial rule as bodies: `f0` is the
+leftmost face, by bounding-box CENTRE rather than left edge — a near face has a wide
+box, and sorting on the edge would put it left of a face that is actually further
+left.
 
 **Segmentation is not in this scheme.** It is a mask rather than floats, so it
 breaks the "137 floats and no pixels" property in §4.2 whatever the flags say, and
