@@ -50,7 +50,16 @@ import sys
 
 REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
 COMP_PATH = "/project1/visionhands"
+# The group this builds. Everything it owns lives inside, so the top-level network
+# shows one node - and because nothing outside reads these channels except through
+# merge_out, `allowCooking` on this group genuinely gates its whole cost, which is
+# not true of `filter` (that one is in the data path). docs/BUILD_PLAN.md 7.3.
+GROUP = "temporal"
 PREFIX = "tmp_"
+
+# Parameters stay on the TOP-LEVEL COMP so all tuning is in one place, so an
+# expression inside the group reaches them through the grandparent.
+PARENT_PAR = "parent(2).par.%s"
 
 # Advanced-page defaults, from docs/ATTRIBUTES.md.
 #
@@ -158,6 +167,57 @@ def _page(comp, name="Advanced"):
     return page
 
 
+def _attach_once(merge, node, drop_names=()):
+    """Normalise a Merge CHOP's inputs: `node` exactly once, anything in
+    `drop_names` gone, every other source exactly once. Returns what it removed.
+
+    Traps, all four measured in this repo rather than anticipated (DESIGN.md 2.11):
+      * `.inputs` is STALE inside the same script that rewired anything, so this
+        reads `inputConnectors[i].connections` throughout - that is the truth. It
+        once reported an input list containing the COMP's own `out1`, which would
+        have been a loop, while the connectors showed the correct thirteen.
+      * disconnecting SHIFTS the connector list, so a single pass skips entries.
+        This restarts after every removal. A single-pass version dropped two of
+        four stale branches and left the other two wired to operators it then
+        destroyed.
+      * a Merge CHOP accepts the SAME operator on any number of inputs, silently,
+        and the only symptom is the channel count. `filter` reached three
+        connections and put 274 duplicate channels on the output; `derive_chop`
+        reached two and put 87. So this dedupes EVERY source, not just `node` -
+        which means any builder run repairs the whole merge rather than only its
+        own contribution.
+      * `connect()` accepts an operator only where it has one unambiguous output,
+        which a base COMP does not - hence `outputConnectors[0]`.
+    """
+    removed = []
+    for _attempt in range(256):
+        seen = []
+        cut = False
+        for conn in merge.inputConnectors:
+            owners = [x.owner for x in conn.connections]
+            if not owners:
+                continue
+            owner = owners[0]
+            if owner.name in drop_names or owner in seen:
+                removed.append(owner.name)
+                conn.disconnect()
+                cut = True
+                break                       # the list has shifted; start again
+            seen.append(owner)
+        if not cut:
+            break
+
+    attached = any(x.owner is node for conn in merge.inputConnectors
+                   for x in conn.connections)
+    if not attached:
+        target = node.outputConnectors[0] if node.isCOMP else node
+        for conn in merge.inputConnectors:
+            if not conn.connections:
+                conn.connect(target)
+                break
+    return removed
+
+
 def main():
     import td
 
@@ -177,12 +237,24 @@ def main():
         print("FAIL no derive_chop - run tools/td_add_derive.py first")
         return
 
+    # REUSE the group, clear its CHILDREN. Destroying the group orphans everything
+    # wired to its output, and a dangling input is indistinguishable from one that
+    # was never connected (DESIGN.md 2.11).
+    group = comp.op(GROUP)
+    if group is None:
+        group = comp.create(td.baseCOMP, GROUP)
+    else:
+        for child in list(group.children):
+            child.destroy()
+    group.nodeX, group.nodeY = -1100, -900
+    group.color = (0.3, 0.5, 0.4)
     removed = 0
     for child in list(comp.children):
         if child.name.startswith(PREFIX):
             child.destroy()
             removed += 1
-    print("1. cleared %d existing %s* operators" % (removed, PREFIX))
+    print("1. `%s` group%s" % (GROUP, ", cleared %d loose %s* operators"
+                               % (removed, PREFIX) if removed else ""))
 
     _page(comp)
     print("2. Advanced page: %s, Velocityfilter=%.3f s" % (
@@ -192,10 +264,22 @@ def main():
     column = [0]
 
     def make(kind, name, y=ROW_Y):
-        node = comp.create(kind, PREFIX + name)
+        node = group.create(kind, PREFIX + name)
         node.nodeX, node.nodeY = -1400 + column[0] * 170, y
         column[0] += 1
         return node
+
+    # TWO inputs, and the split is deliberate. Input 0 is the derived attributes -
+    # what presence and velocity are computed FROM. Input 1 is the RAW landmark
+    # stream, used only for `seq`, because liveness must not depend on a filter
+    # chain that could itself be misconfigured. Two In CHOPs make that visible in
+    # the network instead of hidden in a path expression.
+    derived_in = group.create(td.inCHOP, "in1")
+    derived_in.nodeX, derived_in.nodeY = -1600, 0
+    raw_seq_in = group.create(td.inCHOP, "in2")
+    raw_seq_in.nodeX, raw_seq_in.nodeY = -1600, -150
+    group.inputConnectors[0].connect(source)
+    group.inputConnectors[1].connect(comp.op("in1"))
 
     def wire(node, *inputs):
         for index, source_op in enumerate(inputs):
@@ -271,7 +355,7 @@ def main():
         trail = make(td.trailCHOP, name + "_trail", y)
         wire(trail, input_op)
         trail.par.wlengthunit = "seconds"
-        trail.par.wlength.expr = "parent().par.%s" % width_par
+        trail.par.wlength.expr = PARENT_PAR % width_par
         averaged = make(td.analyzeCHOP, name, y)
         wire(averaged, trail)
         averaged.par.function = "average"
@@ -318,8 +402,7 @@ def main():
     #
     # Read from the RAW `in1`, never through the smoothing filter: liveness must not
     # depend on a filter chain that could itself be misconfigured.
-    raw_in = comp.op("in1")
-    seq = select("seq", raw_in, ["seq"], y=ROW_Y - 1200)
+    seq = select("seq", raw_seq_in, ["seq"], y=ROW_Y - 1200)
     seq_slope = make(td.slopeCHOP, "seq_slope", ROW_Y - 1200)
     wire(seq_slope, seq)
     changed = make(td.logicCHOP, "changed", ROW_Y - 1200)
@@ -333,7 +416,7 @@ def main():
     wire(live, changed_trail)
     live.par.function = "maximum"       # 1 if it changed at all in the window
 
-    valid_raw = select("valid_raw", source, ["h0_valid", "h1_valid"],
+    valid_raw = select("valid_raw", derived_in, ["h0_valid", "h1_valid"],
                        ["h0_active", "h1_active"])
 
     # Liveness ANDed in BEFORE the debounce, so presence decays through the normal
@@ -355,7 +438,7 @@ def main():
     trail_on = make(td.trailCHOP, "trail_on")
     wire(trail_on, valid)
     trail_on.par.wlengthunit = "samples"
-    trail_on.par.wlength.expr = "parent().par.Activateframes"
+    trail_on.par.wlength.expr = PARENT_PAR % "Activateframes"
     all_valid = make(td.analyzeCHOP, "all_valid")
     wire(all_valid, trail_on)
     all_valid.par.function = "minimum"
@@ -365,7 +448,7 @@ def main():
     trail_off = make(td.trailCHOP, "trail_off")
     wire(trail_off, valid)
     trail_off.par.wlengthunit = "samples"
-    trail_off.par.wlength.expr = "parent().par.Deactivateframes"
+    trail_off.par.wlength.expr = PARENT_PAR % "Deactivateframes"
     any_valid = make(td.analyzeCHOP, "any_valid")
     wire(any_valid, trail_off)
     any_valid.par.function = "maximum"
@@ -434,7 +517,7 @@ def main():
     # =====================================================================
     # The palm rather than the wrist, because the palm is the mean of six joints
     # and does not swing as the hand rotates (docs/ATTRIBUTES.md).
-    palm = select("palm", source, ["h0_palm_x", "h0_palm_y",
+    palm = select("palm", derived_in, ["h0_palm_x", "h0_palm_y",
                                    "h1_palm_x", "h1_palm_y"], y=ROW_Y - 300)
     slope = derivative("slope", palm, ROW_Y - 300)
     # Averaged, not merely smoothed - see moving_average. Differentiating also
@@ -533,7 +616,8 @@ def main():
     # `hands_approach` is the derivative of a distance, so it has no wrapping
     # problem and needs nothing special. `hands_twist` is the derivative of an
     # ANGLE and does - see the note at the end.
-    approach_in = select("approach_in", source, ["hands_distance"], y=ROW_Y - 600)
+    approach_in = select("approach_in", derived_in, ["hands_distance"],
+                         y=ROW_Y - 600)
     approach_slope = derivative("approach_slope", approach_in, ROW_Y - 600)
     approach = moving_average("approach", approach_slope, ROW_Y - 600)
     out_approach = select("out_approach", approach, ["hands_distance"],
@@ -581,10 +665,19 @@ def main():
     wire(clock, pulled)
     clock.par.cooktype = "always"
 
+    # The group's output. `tmp_ready` goes out too, on a second connector, because
+    # the latch bank gates on it - which makes that cross-group dependency a wire
+    # in the network rather than an `op('tmp_ready')` buried in an expression.
+    group_out = group.create(td.outCHOP, "out1")
+    group_out.nodeX, group_out.nodeY = 400, 0
+    group_out.inputConnectors[0].connect(merged)
+    ready_out = group.create(td.outCHOP, "out2")
+    ready_out.nodeX, ready_out.nodeY = 400, -150
+    ready_out.inputConnectors[0].connect(ready)
+
     print("   presence gate: validity AND liveness (owned here now, not by the "
           "latch bank)")
-    print("3. built %d operators" % sum(1 for c in comp.children
-                                        if c.name.startswith(PREFIX)))
+    print("3. %d operators inside `%s`" % (len(group.children), GROUP))
 
     # -- verification -------------------------------------------------------
     failures = []
@@ -619,25 +712,14 @@ def main():
     # -- into the COMP's output -------------------------------------------
     merge_out = comp.op("merge_out")
     if merge_out is not None:
-        # Rebuild the whole input list rather than appending: a Merge CHOP accepts
-        # the same operator on any number of inputs silently, and connecting to a
-        # connector that reports itself free can INSERT rather than fill. See
-        # tools/td_add_latches.py.
-        keep, seen = [], set()
-        for existing in merge_out.inputs:
-            if existing.name != merged.name and existing.name not in seen:
-                keep.append(existing)
-                seen.add(existing.name)
-        for _attempt in range(256):
-            if not merge_out.inputs:
-                break
-            merge_out.inputConnectors[0].disconnect()
-        for index, node in enumerate([*keep, merged]):
-            merge_out.inputConnectors[index].connect(node)
+        # Exactly once, dropping the loose `tmp_out` this group replaced.
+        _attach_once(merge_out, group, drop_names=("tmp_out",))
         merge_out.cook(force=True)
-        names = [o.name for o in merge_out.inputs]
-        if len(names) != len(set(names)):
-            failures.append("merge_out has duplicate inputs: %r" % names)
+        owners = [x.owner for conn in merge_out.inputConnectors
+                  for x in conn.connections]
+        if owners.count(group) != 1:
+            failures.append("`%s` feeds merge_out %d times, not once"
+                            % (GROUP, owners.count(group)))
 
     out_chop = comp.op("out1")
     out_chop.cook(force=True)

@@ -357,7 +357,47 @@ Either way the consequence is the same and needs writing down: a filter that sto
 cooking has a stale `x_hat_prev`, so re-enabling it has a settling transient. It
 self-converges, and it is the same trade `allowCooking` makes everywhere else.
 
-### 7.3 Group the network into COMPs — IN PROGRESS
+### 7.3 Group the network into COMPs — DONE 2026-08-21
+
+**Top level went from 152 operators to 16**, with four group COMPs: `filter`,
+`coords`, `temporal`, `latches`. `merge_out` has five inputs instead of thirteen.
+Each builder owns exactly one group, reuses it and clears its children, and
+attaches itself to `merge_out` exactly once.
+
+Build order from scratch, and it matters because each group wires to the one
+before:
+
+    td_build_comp.py    the shell, the parameters, the sidecar control
+    td_add_filter.py    `filter` - everything downstream reads through it
+    td_add_coords.py    `coords`
+    td_add_derive.py    the stateless attributes
+    td_add_temporal.py  `temporal` - liveness, presence, velocity, heading
+    td_add_latches.py   `latches` - gates on temporal's second output
+    td_add_groups.py    the Attributes page
+
+**Cross-group dependencies are wires now, not name lookups.** `temporal` has two
+inputs (derived attributes, and the RAW stream for `seq`) and two outputs (its
+channels, and `ready` for the latches). `latches` has two inputs. The latch bank
+used to reach for `op('tmp_ready')` in an expression; the dependency is a line in
+the network instead.
+
+**NOT verified: cook time.** The 0.599 ms figure reported after grouping counts
+only TOP-LEVEL operators, so it excludes everything inside the four groups and is
+not comparable to the 1.040 ms measured flat. Re-measure by summing each group's
+children before claiming grouping changed anything either way.
+
+**Still to do**, both now unblocked by the grouping:
+
+- `allowCooking` gating for `temporal` and `latches`. Both are safe candidates -
+  nothing outside reads their channels except through `merge_out` - and each has
+  its clock INSIDE it, which is what makes disabling one genuinely free. `filter`
+  is not a candidate: it is in the data path, and its `Smoothing` toggle already
+  gates it properly via the bypass flag.
+- The channel-to-group registry for trimming disabled groups' channels out of the
+  output. Now cheaper than it was: each group has one output, so the map is
+  group COMP -> its own channel list, which each builder already knows.
+
+### 7.3 notes from doing it — IN PROGRESS (superseded above)
 
 **Done: `filter/`.** Five operators plus an In and an Out CHOP, inside a base COMP,
 so the top-level network shows one node. The pattern the other groups follow:

@@ -157,41 +157,42 @@ def _page(comp, name="Filter"):
 
 
 def _attach_once(merge, node, drop_names=()):
-    """Make `node` feed `merge` exactly once, dropping anything named in
-    `drop_names`, and leave every other input alone. Returns what it removed.
+    """Normalise a Merge CHOP's inputs: `node` exactly once, anything in
+    `drop_names` gone, every other source exactly once. Returns what it removed.
 
-    Traps, all of them measured in this repo (DESIGN.md 2.11):
+    Traps, all four measured in this repo rather than anticipated (DESIGN.md 2.11):
       * `.inputs` is STALE inside the same script that rewired anything, so this
-        reads `inputConnectors[i].connections` throughout - that is the truth.
-      * disconnecting SHIFTS the connector list, so a single pass over it skips
-        entries. This restarts after every removal. A single-pass version dropped
-        two of four old branches and left the other two to be destroyed while
-        still wired.
-      * "attach if not already attached" is not enough on its own: piecemeal
-        wiring of a Merge CHOP has produced a duplicate three times now, and a
-        Merge accepts the same operator on any number of inputs in silence. The
-        only symptom is the channel count - `filter` connected three times put 274
-        extra channels on the COMP output. So this asserts the END STATE: exactly
-        one connection from `node`.
+        reads `inputConnectors[i].connections` throughout - that is the truth. It
+        once reported an input list containing the COMP's own `out1`, which would
+        have been a loop, while the connectors showed the correct thirteen.
+      * disconnecting SHIFTS the connector list, so a single pass skips entries.
+        This restarts after every removal. A single-pass version dropped two of
+        four stale branches and left the other two wired to operators it then
+        destroyed.
+      * a Merge CHOP accepts the SAME operator on any number of inputs, silently,
+        and the only symptom is the channel count. `filter` reached three
+        connections and put 274 duplicate channels on the output; `derive_chop`
+        reached two and put 87. So this dedupes EVERY source, not just `node` -
+        which means any builder run repairs the whole merge rather than only its
+        own contribution.
       * `connect()` accepts an operator only where it has one unambiguous output,
         which a base COMP does not - hence `outputConnectors[0]`.
     """
     removed = []
     for _attempt in range(256):
-        seen = False
+        seen = []
         cut = False
         for conn in merge.inputConnectors:
             owners = [x.owner for x in conn.connections]
             if not owners:
                 continue
             owner = owners[0]
-            if owner.name in drop_names or (owner is node and seen):
+            if owner.name in drop_names or owner in seen:
                 removed.append(owner.name)
                 conn.disconnect()
                 cut = True
                 break                       # the list has shifted; start again
-            if owner is node:
-                seen = True
+            seen.append(owner)
         if not cut:
             break
 

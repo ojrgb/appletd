@@ -67,6 +67,15 @@ import sys
 
 REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
 COMP_PATH = "/project1/visionhands"
+# The group this builds. Everything it owns lives inside, so the top-level network
+# shows one node - and since nothing outside reads these channels except through
+# merge_out, `allowCooking` on this group gates its whole cost honestly, unlike the
+# `filter` group which sits in the data path. docs/BUILD_PLAN.md 7.3.
+GROUP = "latches"
+# The group that publishes `ready` - the debounced active, ANDed with liveness -
+# on its SECOND output. A wire rather than an `op('tmp_ready')` in an expression,
+# so the cross-group dependency is visible in the network.
+READY_SOURCE = "temporal"
 
 # Every operator this script owns. Destroyed before rebuilding, so the script is
 # idempotent and so a renamed operator cannot leave an orphan behind cooking.
@@ -87,7 +96,7 @@ ROWS = %(rows)r
 
 def _write(comp):
     for node_name, column in (("lat_on", 0), ("lat_off", 1)):
-        node = comp.op(node_name)
+        node = comp.op('%(group)s/' + node_name)
         if node is None:
             continue
         for index, pair in enumerate(ROWS):
@@ -295,6 +304,112 @@ def _fan(td, make, wire, source, name, column, y):
     return merged
 
 
+def _attach_once(merge, node, drop_names=()):
+    """Normalise a Merge CHOP's inputs: `node` exactly once, anything in
+    `drop_names` gone, every other source exactly once. Returns what it removed.
+
+    Traps, all four measured in this repo rather than anticipated (DESIGN.md 2.11):
+      * `.inputs` is STALE inside the same script that rewired anything, so this
+        reads `inputConnectors[i].connections` throughout - that is the truth. It
+        once reported an input list containing the COMP's own `out1`, which would
+        have been a loop, while the connectors showed the correct thirteen.
+      * disconnecting SHIFTS the connector list, so a single pass skips entries.
+        This restarts after every removal. A single-pass version dropped two of
+        four stale branches and left the other two wired to operators it then
+        destroyed.
+      * a Merge CHOP accepts the SAME operator on any number of inputs, silently,
+        and the only symptom is the channel count. `filter` reached three
+        connections and put 274 duplicate channels on the output; `derive_chop`
+        reached two and put 87. So this dedupes EVERY source, not just `node` -
+        which means any builder run repairs the whole merge rather than only its
+        own contribution.
+      * `connect()` accepts an operator only where it has one unambiguous output,
+        which a base COMP does not - hence `outputConnectors[0]`.
+    """
+    removed = []
+    for _attempt in range(256):
+        seen = []
+        cut = False
+        for conn in merge.inputConnectors:
+            owners = [x.owner for x in conn.connections]
+            if not owners:
+                continue
+            owner = owners[0]
+            if owner.name in drop_names or owner in seen:
+                removed.append(owner.name)
+                conn.disconnect()
+                cut = True
+                break                       # the list has shifted; start again
+            seen.append(owner)
+        if not cut:
+            break
+
+    attached = any(x.owner is node for conn in merge.inputConnectors
+                   for x in conn.connections)
+    if not attached:
+        target = node.outputConnectors[0] if node.isCOMP else node
+        for conn in merge.inputConnectors:
+            if not conn.connections:
+                conn.connect(target)
+                break
+    return removed
+
+
+def _fan(td, make, wire, source, name, column, y):
+    """Pick `column` of every latch row out of `source`, renamed to the working
+    names, however often a source channel repeats. Returns the merged CHOP.
+
+    Traps: A Select CHOP can emit a given source channel only ONCE, and both
+           columns this serves now repeat. `h0_valid` gates six latches (pinch,
+           snap and four finger triggers), and `h0_pinch_index` is the distance
+           for BOTH `pinch0` and `index0`, because the named gestures and the
+           uniform trigger grid deliberately overlap.
+
+           Asking one Select for a repeated channel does not error. It emits the
+           unique set, silently, and the rename then maps each source to the first
+           target that claims it - so with thirteen latches `lat_dist` came back
+           with eleven renamed channels in a scrambled order and two still under
+           their source names. Caught by the structural check, which is the only
+           reason it was not shipped.
+
+           So the rows are packed first-fit into the fewest groups such that no
+           group asks for the same source twice, one Select per group, merged.
+           Computed rather than hand-listed, because the latch table is generated
+           and its shape will change again.
+
+           Keyed on NAMES rather than on position throughout: `renamefrom = "*"`
+           would map the To list onto whatever order channels arrive in, which
+           made channel identity positional - and `derive_chop` publishes
+           alphabetically, which is not this order. Worse, `derive()` takes an
+           enabled-groups set, so once the Attributes page exists, unchecking
+           Contacts would drop the pinch channels and silently publish the clap
+           latch as `h0_pinching`. A literal From/To list is pairwise by name
+           (verified live), and a missing source keeps its own name while the rest
+           still map correctly - so a dropped group costs one latch rather than
+           shifting every later one onto the wrong data.
+    """
+    groups = []
+    for row in LATCHES:
+        for group in groups:
+            if all(existing[column] != row[column] for existing in group):
+                group.append(row)
+                break
+        else:
+            groups.append([row])
+
+    parts = []
+    for index, rows in enumerate(groups):
+        part = make(td.selectCHOP, "%s_%d" % (name, index), y)
+        wire(part, source)
+        part.par.channames = " ".join(row[column] for row in rows)
+        part.par.renamefrom = " ".join(row[column] for row in rows)
+        part.par.renameto = " ".join(row[0] for row in rows)
+        parts.append(part)
+    merged = make(td.mergeCHOP, name, y)
+    wire(merged, *parts)
+    return merged
+
+
 def _rewire_merge(merge, nodes):
     """Set merge_out's inputs to exactly: what was there, then `nodes`, once each.
 
@@ -352,7 +467,8 @@ def _refresh_thresholds(comp):
     """
     written = 0
     for node_name, column in (("lat_on", 3), ("lat_off", 4)):
-        node = comp.op(node_name)
+        # Inside the group now, so the path is relative to the top-level COMP.
+        node = comp.op("%s/%s" % (GROUP, node_name))
         if node is None:
             continue
         for index, row in enumerate(LATCHES):
@@ -413,12 +529,24 @@ def main():
         return
 
     # -- clear our own operators ------------------------------------------
+    # REUSE the group, clear its CHILDREN - destroying it orphans everything wired
+    # to its output, and a dangling input cannot be told from one never connected
+    # (DESIGN.md 2.11).
+    group = comp.op(GROUP)
+    if group is None:
+        group = comp.create(td.baseCOMP, GROUP)
+    else:
+        for child in list(group.children):
+            child.destroy()
+    group.nodeX, group.nodeY = -1100, -1500
+    group.color = (0.5, 0.35, 0.45)
     removed = 0
     for child in list(comp.children):
         if child.name.startswith(PREFIX):
             child.destroy()
             removed += 1
-    print("1. cleared %d existing %s* operators" % (removed, PREFIX))
+    print("1. `%s` group%s" % (GROUP, ", cleared %d loose %s* operators"
+                               % (removed, PREFIX) if removed else ""))
 
     _threshold_page(comp)
     print("2. Tuning page: " + ", ".join(
@@ -428,10 +556,23 @@ def main():
     column = [0]
 
     def make(kind, name, y=ROW_Y):
-        node = comp.create(kind, PREFIX + name)
+        node = group.create(kind, PREFIX + name)
         node.nodeX, node.nodeY = -1400 + column[0] * COLUMN_W, y
         column[0] += 1
         return node
+
+    # TWO inputs. Input 0 is the derived attributes - the distances and validity
+    # flags every latch watches. Input 1 is `ready` from the temporal group, which
+    # is what the gate ANDs in. Wired rather than looked up by name, so the
+    # dependency is a line in the network.
+    derived_in = group.create(td.inCHOP, "in1")
+    derived_in.nodeX, derived_in.nodeY = -1600, ROW_Y
+    ready_in = group.create(td.inCHOP, "in2")
+    ready_in.nodeX, ready_in.nodeY = -1600, ROW_Y - 150
+    group.inputConnectors[0].connect(source)
+    ready_group = comp.op(READY_SOURCE)
+    if ready_group is not None and len(ready_group.outputConnectors) > 1:
+        group.inputConnectors[1].connect(ready_group.outputConnectors[1])
 
     def wire(node, *inputs):
         for index, source_op in enumerate(inputs):
@@ -445,9 +586,9 @@ def main():
     # -- the distances and the validity flags, renamed to the working names
     # One helper for both, because both columns repeat a source channel and a
     # Select can emit each source only once - see _fan.
-    dist = _fan(td, make, wire, source, "dist", 1, ROW_Y)
+    dist = _fan(td, make, wire, derived_in, "dist", 1, ROW_Y)
 
-    valid_raw = _fan(td, make, wire, source, "valid_raw", 2, ROW_Y - 150)
+    valid_raw = _fan(td, make, wire, derived_in, "valid_raw", 2, ROW_Y - 150)
 
     # -- the gate: raw validity AND whatever the temporal group says --------
     # docs/ATTRIBUTES.md gates the latches on `h{i}_active` - `valid` DEBOUNCED
@@ -468,7 +609,7 @@ def main():
     # validity and says so, rather than erroring per channel per cook - which is
     # what a missing reference does (measured, when the Trigger thresholds were
     # added).
-    ready = comp.op("tmp_ready")
+    ready = ready_in if group.inputConnectors[1].connections else None
     if ready is not None:
         gate13 = _fan(td, make, wire, ready, "gate", 2, ROW_Y - 150)
         valid = make(td.logicCHOP, "valid", ROW_Y - 150)
@@ -695,6 +836,13 @@ def main():
     wire(clock, terminals)
     clock.par.cooktype = "always"
 
+    # One output for the whole bank - 76 channels - instead of five Merge inputs at
+    # the top level. `lat_terminals` already merges everything the clock has to
+    # pull, so it is exactly what should go out.
+    group_out = group.create(td.outCHOP, "out1")
+    group_out.nodeX, group_out.nodeY = 600, ROW_Y - 900
+    group_out.inputConnectors[0].connect(terminals)
+
     # WHAT IT COSTS, stated honestly: the clock pulls `derive_chop`, which is
     # main-thread Python at 0.210 ms for 171 channels (DESIGN.md 2.7), so that
     # cooks on 100% of frames rather than only when a frame arrives - about 1.3% of
@@ -711,13 +859,12 @@ def main():
         td.parameterexecuteDAT, "lat_threshold_callbacks")
     threshold_dat.nodeX, threshold_dat.nodeY = 200, ROW_Y - 300
     threshold_dat.text = THRESHOLD_CALLBACK % {
-        "rows": [(row[3], row[4]) for row in LATCHES]}
+        "rows": [(row[3], row[4]) for row in LATCHES], "group": GROUP}
     threshold_dat.par.op = comp.path
     threshold_dat.par.pars = " ".join(sorted(THRESHOLD_DEFAULTS))
     threshold_dat.par.valuechange = True
 
-    print("3. built %d operators" % sum(1 for c in comp.children
-                                        if c.name.startswith(PREFIX)))
+    print("3. %d operators inside `%s`" % (len(group.children), GROUP))
 
     # -- structural verification -------------------------------------------
     # Not a formality. `match = name` silently drops a channel it cannot pair,
@@ -770,13 +917,16 @@ def main():
     # -- into the COMP's output -------------------------------------------
     merge = comp.op("merge_out")
     if merge is not None:
-        wired = _rewire_merge(merge, (out_state, out_start, out_end,
-                                      out_count, out_count_end, both))
-        print("   merge_out inputs: %s" % ", ".join(wired))
+        stale = (*("lat_out_%s" % s for s in
+                   ("state", "start", "end", "count", "count_end")),
+                 "lat_both_pinching")
+        _attach_once(merge, group, drop_names=stale)
         merge.cook(force=True)
-        names = [o.name for o in merge.inputs]
-        if len(names) != len(set(names)):
-            failures.append("merge_out still has duplicate inputs: %r" % names)
+        owners = [x.owner for conn in merge.inputConnectors
+                  for x in conn.connections]
+        if owners.count(group) != 1:
+            failures.append("`%s` feeds merge_out %d times, not once"
+                            % (GROUP, owners.count(group)))
 
     out_chop = comp.op("out1")
     out_chop.cook(force=True)
