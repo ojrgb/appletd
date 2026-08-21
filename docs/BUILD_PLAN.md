@@ -284,7 +284,45 @@ the chain cooking, because the Switch CHOP pulls both its inputs and the group
 clock pulls the Switch. So the most expensive thing in the COMP is not gated by its
 own toggle.
 
-### 7.1 Non-destructive optimisations — do these first
+### RESULT so far: 1.828 ms -> 1.040 ms, and 152 operators -> 144
+
+Done 2026-08-21, in this order:
+
+- **Replaced the hand-built one-euro filter with TouchDesigner's own**, `Filter
+  CHOP type = oneeuro`. **0.695 ms across 21 operators -> 0.015 ms in one.** The
+  hand-built version existed because of a wrong conclusion that the Filter CHOP
+  could not work on these channels; it can, on a time-sliced input. DESIGN.md 2.11
+  has the correction. This was 38% of the COMP's entire cook time.
+- **`lat_on` and `lat_off` are static values now**, rewritten by a Parameter
+  Execute DAT when a threshold changes rather than being 30 Python expressions
+  re-evaluated every frame.
+- **One broadcast instead of two**: liveness and the debounced `active` are ANDed
+  per hand first, then broadcast once.
+
+| group | before | after |
+|---|---|---|
+| filter | 0.612 | 0.110 |
+| latches | 0.370 | 0.247 |
+| `derive_chop` | 0.368 | 0.256 |
+| temporal | 0.241 | 0.204 |
+| **total** | **1.828** | **1.040** |
+
+`derive_chop` is now the largest single item at 25%, and it is already gated by the
+group toggles. Measure on a clean frame: a `cook(force=True)` right after a rebuild
+reads nearly 3 ms because it re-cooks everything.
+
+**Still worth doing**, in order of value:
+
+- **The velocity chain may be replaceable the same way.** `tmp_slope` is built from
+  Feedback + Math and so is not time-sliced, which is why Trail + Analyze was
+  needed. If that chain can be made time-sliced, the native Filter CHOP replaces
+  the moving average - possibly the Slope CHOP too. Worth one measurement.
+- 7.3, the COMP restructure, which is now the main remaining item.
+- The DATs cost 0.057 ms between them (`sidecar_control` 0.040,
+  `groups_callbacks` 0.017) and neither needs to be evaluated per frame. Worth a
+  look at why they are cooking at all.
+
+### 7.1 Non-destructive optimisations — done, and what is left
 
 - **`lat_on` and `lat_off` cost 0.110 ms between them, for six numbers.** They are
   Constant CHOPs whose 15 values are each a Python EXPRESSION on a Tuning

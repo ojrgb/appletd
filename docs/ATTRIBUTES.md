@@ -435,7 +435,6 @@ expect to retune these first.
 | `Smoothing` | toggle | on | the one-euro position filter. Off is a bit-exact passthrough, not a filter set to zero |
 | `Mincutoff` | Hz | 1.5 | how heavily a SLOW-moving hand is smoothed |
 | `Beta` | 1/units | 2.0 | how far a FAST-moving hand is allowed through |
-| `Dcutoff` | Hz | 1.0 | smoothing on the speed estimate that drives the adaptation |
 
 ### Page: Advanced — presence and pose
 
@@ -503,22 +502,31 @@ smoothing from one place and there is nothing per-channel to tune. Everything th
 is not a position — confidences, `found`, `seq`, `age_ms` — passes through
 untouched.
 
-**Why adaptive rather than a Lag or a Filter CHOP.** Landmark jitter and hand
-motion occupy the same frequency band, so a fixed cutoff has to choose: smooth
-enough to still a resting hand, and a fast hand lags visibly; responsive enough to
-track a fast hand, and a resting one shimmers. The one-euro filter makes the cutoff
-a function of estimated speed:
+**It is TouchDesigner's own Filter CHOP, `type = oneeuro`** — one operator, 0.015
+ms. It was first built by hand from a Feedback and twelve Math CHOPs, on a wrong
+conclusion that the Filter CHOP could not work on these channels; the hand-built
+version cost **0.695 ms across 21 operators** for functionally identical output.
+`DESIGN.md` 2.11 has the correction and why the wrong conclusion looked right.
+`Dcutoff` is gone because the native filter does not expose it — no loss, since
+1.0 Hz is the published default and there was never a reason to move it.
+
+**Why adaptive rather than a fixed cutoff.** Landmark jitter and hand motion occupy
+the same frequency band, so a fixed cutoff has to choose: smooth enough to still a
+resting hand, and a fast hand lags visibly; responsive enough to track a fast hand,
+and a resting one shimmers. The one-euro filter makes the cutoff a function of
+estimated speed:
 
     dx      = (x - x_prev) * rate
-    dx_hat  = exp_smooth(dx, alpha(Dcutoff))
+    dx_hat  = exp_smooth(dx, alpha(1.0 Hz, fixed))
     cutoff  = Mincutoff + Beta * |dx_hat|
     x_hat   = x_hat_prev + alpha(cutoff) * (x - x_hat_prev)
 
-MEASURED in TouchDesigner: at rest the cutoff sits at `Mincutoff` 1.5 Hz with
-alpha 0.136, and a hand crossing the frame in 0.8 s lifts it to 4.35 Hz with alpha
-0.313 — **2.3x more responsive on a real gesture than at rest**, which is exactly
-the trade a constant cutoff cannot make. A still hand converges to the raw value to
-within float32 precision, so the filter introduces no steady-state offset.
+MEASURED on the hand-built version, where every stage was inspectable: at rest the
+cutoff sat at `Mincutoff` 1.5 Hz with alpha 0.136, and a hand crossing the frame in
+0.8 s lifted it to 4.35 Hz with alpha 0.313 — **2.3x more responsive on a real
+gesture than at rest**, which is exactly the trade a constant cutoff cannot make.
+The native filter converges on a still hand **exactly**, where the hand-built one
+left a float32 residual of 9e-8.
 
 **The published `beta` of 0.007 is wrong for these channels, and copying it makes
 the filter useless.** Every one-euro reference filters PIXELS, where speeds reach

@@ -1758,3 +1758,81 @@ Vision's chirality flickers frame to frame, and what it reports during occlusion
 edge-on. Both decide how often the proximity fallback is actually reached.
 
 201 tests, ruff and mypy clean.
+
+---
+
+## 1.8 ms to 1.0 ms, and TouchDesigner already had the filter
+2026-08-21
+
+Cook time was raised as too high after the live session: 1.5-1.8 ms is 9-11% of a
+frame for what is mostly arithmetic on 15 channels. Profiled per operator, then
+three fixes. **1.828 ms -> 1.040 ms, 152 operators -> 144.**
+
+**THE BIG ONE, and it is a correction rather than an optimisation: TouchDesigner
+has a one-euro filter built in, and I built one by hand out of 21 operators.**
+
+    hand-built chain   0.6949 ms across 21 operators
+    Filter CHOP        0.0153 ms in 1
+
+Functionally identical - within 0.17% under motion - and the native one converges
+EXACTLY on a still hand where mine left a float32 residual of 9e-8. That was 38% of
+the COMP's entire cook time, spent reimplementing a built-in.
+
+**Why the wrong conclusion looked right, because that is the transferable part.** I
+tested the Filter CHOP on `tmp_slope` - a Math CHOP fed by a Feedback - and all
+nine of its filter types returned the identical value, unchanged by width. That
+reading was correct. The generalisation I drew from it, and wrote into DESIGN.md
+2.11 as a rule, was "sample-axis operators do not work here". The truth is narrower:
+they are inert on a NON-TIME-SLICED one-sample CHOP and work perfectly on a
+time-sliced one. `tmp_slope` is built from Math and Feedback and inherits no
+time-slicing; `oef_in` descends from the OSC In CHOP and does.
+
+So the question was never "is this CHOP one sample wide" but "is it time-sliced" -
+and I never asked it, because one measurement had already settled the matter in my
+head. Third correction in that area of 2.11 now. The rule I actually needed: test
+the operator on the input you intend to use it on.
+
+Worth noting the hand-built version was not wasted in one respect - every stage was
+inspectable, which is where the measurement that the cutoff really does open up
+2.3x on a real gesture came from. The native filter is a black box that gives the
+same answer.
+
+**Two cheaper wins from the same profile.**
+
+`lat_on` and `lat_off` cost **0.110 ms a frame to deliver six numbers**, because
+each of their 15 values was a Python expression on a Tuning parameter -
+30 evaluations per cook for thresholds that change when somebody drags a slider.
+Now static values, rewritten by a Parameter Execute DAT on change. Verified both
+ways: they read the Tuning page at build, and setting `Pinchon` to 0.42 showed up
+in `lat_on` on the next frame.
+
+`lat_live5` and `lat_active13` were two 15-channel broadcasts of two booleans,
+0.074 ms, ANDed into the same gate. The AND now happens per hand first, in one
+native Logic CHOP, and only the result is broadcast.
+
+**A measurement trap worth recording.** The first profile after the filter swap read
+**2.946 ms** - worse than before - and the latch bank appeared to have jumped from
+0.370 to 1.822. It was a forced full re-cook immediately after a rebuild. On a
+clean frame it was 1.030, then 1.040 on the next. `cook(force=True)` right after
+building anything makes every downstream cookTime meaningless; sample a frame that
+nobody disturbed.
+
+| group | before | after |
+|---|---|---|
+| filter | 0.612 | 0.110 |
+| latches | 0.370 | 0.247 |
+| `derive_chop` | 0.368 | 0.256 |
+| temporal | 0.241 | 0.204 |
+| DATs / other | 0.138 | 0.133 |
+| coords | 0.099 | 0.090 |
+| **total** | **1.828** | **1.040** |
+
+`derive_chop` is the largest single item now at 25%, and it is already gated by the
+group toggles - so the remaining headroom is mostly in what a project chooses to
+enable rather than in making anything faster.
+
+**Still open**, and recorded in docs/BUILD_PLAN.md step 7: the velocity chain uses
+Trail + Analyze because it is not time-sliced, and might be replaceable by the
+native Filter the same way - one measurement would tell. The two DATs cost 0.057 ms
+between them and it is not obvious why they cook at all. And 7.3, grouping the
+network into COMPs, is now the main remaining item.

@@ -486,22 +486,33 @@ Against the running instance (099), not read anywhere:
 - **Select CHOP `channames` order determines output order**, and its built-in
   `renamefrom = *` / `renameto = <list>` maps the list positionally onto that
   order — so one operator can pick, reorder and rename in a single step.
-- **Operators that CONSUME a sample axis are inert on a one-sample CHOP.** This
-  is the single most useful rule for building anything temporal here, and it cost
-  two operators to learn. Every CHOP in this network carries **one sample per
-  frame** - a snapshot, not a time-sliced signal - so:
-    * the **Slope CHOP** differentiates along the sample axis and has no neighbour
-      to difference against. Measured: it reported palm velocities of 12.5 and
-      32.5 units/second on coordinates that cannot leave 0..1, and an acceleration
-      of 1950.
-    * the **Filter CHOP** smooths along the sample axis and is a silent
-      passthrough. Measured: all nine of its filter types returned the identical
-      value, unchanged by width.
-  Operators that CREATE a sample axis from successive frames - the **Trail CHOP** -
-  work, which is why Trail + Analyze is the tool for both averaging and windowed
-  statistics. And a recurrence written as Feedback + Math works, because it is
-  frame-based by construction. Differentiate with `(x - x_prev) * rate`; smooth
-  with Trail + Analyze, or with Feedback + Math.
+- **Sample-axis operators are inert on a NON-TIME-SLICED one-sample CHOP, and
+  work fine on a TIME-SLICED one.** Get this right before building anything
+  temporal. The first version of this entry was too broad and cost 21 operators.
+    * the **Slope CHOP** differentiates along the sample axis. On a non-time-sliced
+      one-sample CHOP it has no neighbour to difference against: measured, it
+      reported palm velocities of 12.5 and 32.5 units/second on coordinates that
+      cannot leave 0..1, and an acceleration of 1950.
+    * the **Filter CHOP** smooths along the same axis. On `tmp_slope` - a Math CHOP
+      fed by a Feedback, so NOT time-sliced - all nine of its filter types returned
+      the identical value, unchanged by width. A silent passthrough.
+    * **But on a time-sliced input the Filter CHOP works perfectly**, including its
+      built-in `oneeuro` type. `oef_in` descends from the OSC In CHOP, which is
+      time-sliced, so the filter has real slices to carry state across. Measured
+      against a hand-built equivalent on the same 84 channels: functionally
+      identical output, converging EXACTLY on a still hand where the hand-built
+      version left a 9e-8 float32 residual, at **0.0153 ms against 0.6949 ms**.
+  So the question is never "is this CHOP one sample wide" but **"is it
+  time-sliced"**. A chain built from Math and Feedback operators is not and
+  inherits nothing; anything descending from the OSC In CHOP is. Where a chain is
+  not time-sliced, the tools are Trail + Analyze - which CREATES a sample axis from
+  successive frames - and Feedback + Math. Differentiate with `(x - x_prev) * rate`.
+
+  **The lesson, this being the third correction in this area.** The measurement was
+  right; the generalisation drawn from it was wrong. One operator tested on one
+  input became "sample-axis operators do not work here", and a 21-operator
+  hand-built filter was built on the strength of it. Test the operator on the input
+  you actually intend to use.
 - **A frame-to-frame derivative must be AVERAGED to be correct, not merely
   smoothed.** Positions only change when a frame arrives - 30 fps into a 60 fps
   cook rate is every other frame - so the per-cook derivative alternates between a
