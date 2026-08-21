@@ -419,14 +419,32 @@ channels, and `ready` for the latches). `latches` has two inputs. The latch bank
 used to reach for `op('tmp_ready')` in an expression; the dependency is a line in
 the network instead.
 
-**NOT verified: cook time.** The 0.599 ms figure reported after grouping counts
-only TOP-LEVEL operators, so it excludes everything inside the four groups and is
-not comparable to the 1.040 ms measured flat. Re-measure by summing each group's
-children before claiming grouping changed anything either way.
+**Cook time, MEASURED 2026-08-21 and the 0.599 ms figure withdrawn.** Summing all
+162 operators including the groups' children, with data provably arriving:
+**0.997 ms and 1.187 ms** on two single-frame reads, against 1.040 ms measured flat.
+Grouping is cost-neutral. The first attempt at this measurement read 1.2 and 1.55 ms
+from a network that was not cooking at all, because the synthetic feeder had died on
+an import error - `cookTime` is a last-value gauge and reports the previous cook
+happily forever, so check that the data is moving before reading it.
 
 **Still to do**, both now unblocked by the grouping:
 
-- **`allowCooking` gating for `temporal` and `latches` — APPROVED 2026-08-21.**
+- **`allowCooking` gating for `temporal` and `latches` — DONE 2026-08-21.**
+  Built in `tools/td_add_groups.py`: `COOK_GATED` maps each group to the toggles
+  that keep it alive, `COOK_REQUIRES` records that `latches` cooking forces
+  `temporal` (it reads temporal's presence gate, and a frozen gate arms every latch
+  forever or disarms them forever with nothing to show for it), and
+  `groups_callbacks` writes the attribute on change. Verified by counter delta:
+  three toggles off gave `latches` **0 cooks against 377** for temporal and coords
+  over the same interval, with every frozen channel still on the COMP output. Note
+  for anyone measuring it: a frozen group still REPORTS its last `cookTime`, so that
+  column cannot show the saving - only a cook count can.
+
+  Cook time, re-measured with data provably flowing: **0.997 and 1.187 ms** over 162
+  operators and 499 channels, against 1.040 ms flat. Grouping is cost-neutral;
+  gating saves about 0.5 ms of it.
+
+  The original note, for the reasoning:
   Both are safe candidates: nothing outside reads their channels except through
   `merge_out`, and each has its clock INSIDE it, which is what makes disabling one
   genuinely free. `filter` is not a candidate - it is in the data path, and its

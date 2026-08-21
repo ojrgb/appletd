@@ -407,6 +407,35 @@ belong to - a page you have to scroll is a page nobody tunes.
 A disabled group has `allowCooking` off, so it costs nothing, and its channels
 are excluded from the output rather than left stale.
 
+#### What the toggles gate, and the one thing to know about switching one off
+
+Three kinds of toggle, and the label says which:
+
+| toggles | what switching it off saves |
+|---|---|
+| `Core` `Presence` `Contacts` `Pose` `Twohands` `Gestures` `Descriptor` | `derive()` does not compute the group, and its channels leave the output |
+| `Presence` `Motion` (→ `temporal`) and `Triggers` `Gestures` `Events` (→ `latches`) | the group COMP stops cooking entirely, via `allowCooking` |
+| `Landmarks` `Coordstx` `Coordspx` | nothing yet — advisory, and labelled "channels only" |
+
+A group COMP stops cooking when ALL of its toggles are off. **`latches` cooking
+keeps `temporal` cooking** whatever Presence and Motion say, because the latches are
+armed by temporal's presence gate — a frozen gate would either arm every latch
+forever or disarm them forever, with nothing to indicate which.
+
+**A frozen group keeps its channels**, holding their last values. They do not vanish
+from the COMP output, so nothing downstream loses a reference (DESIGN.md 6.2).
+
+**The one behavioural consequence.** A group with memory PAUSES rather than resets,
+so re-enabling one resumes with a `prev` from whenever it was switched off: the state
+is stale for one frame and one edge pulse across the gap may be wrong. It is
+self-correcting, because every recurrence here is level-driven rather than counted —
+but if you are switching a group on and off during a performance, expect that one
+frame rather than being surprised by it.
+
+**`filter` is deliberately not gated this way.** It sits in the data path, so
+freezing it would freeze every position rather than bypass the filter. Its
+`Smoothing` toggle gates its cost through the bypass flag instead.
+
 ### Page: Tuning — the ones you will actually adjust
 
 | parameter | type | default | what it does |

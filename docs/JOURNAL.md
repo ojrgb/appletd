@@ -1918,26 +1918,53 @@ partition as a complement instead of a list: a 141-channel input, pattern
 whole lot again. `* ^h0_wrist_x` gave 282. So there is no complement pattern to be
 had; compute it in Python and name the channels.
 
-### Cook time, and an honest non-answer
+### Cook time, and a measurement I got wrong before I got it right
 
 The task was to re-measure properly, since the 0.599 ms reported after grouping
-counted only top-level operators. Summing all **162** operators including the four
-groups' children, with a synthetic 30 fps one-hand stream and the 499-channel
-output: **1.2 ms and 1.55 ms** on two single-frame reads. Latches 0.45-0.55,
-temporal 0.30-0.34, `derive_chop` 0.23-0.32, coords 0.10-0.16, filter 0.13.
+counted only top-level operators. First attempt: **1.2 ms and 1.55 ms**, summing all
+162 operators. Both figures were junk, and the reason is worth more than the
+numbers. My synthetic feeder was launched as a FILE rather than on stdin, so
+`sys.path[0]` was the script's directory instead of the repo root; it died on
+`ModuleNotFoundError` into `/dev/null` and never sent a byte. Nothing downstream
+cooked - and `cookTime` is a LAST-VALUE gauge, so every operator cheerfully reported
+its previous cook. A dead sender and a live one look identical in that column.
 
-Two things that must be said with it. Three reads inside one script returned the
-identical value three times - the same-frame trap again, so those are two samples
-and not six. And the 1.040 ms measured flat came from the camera with a real hand,
-so the comparison is not clean. What can be said: grouping has not made the network
-cheaper, and the earlier 0.599 ms figure was as misleading as the build plan
-suspected.
+Redone with data provably flowing (`seq` rising 730 -> 1160 across the two reads):
+**0.997 ms and 1.187 ms** over 162 operators and 499 channels. Latches 0.28-0.31,
+temporal 0.23-0.24, `derive_chop` 0.17-0.21, coords 0.11-0.24, filter 0.06-0.12.
+Against the 1.040 ms measured flat, **grouping is cost-neutral** - which is the
+answer the build plan asked for and did not assume either way.
+
+The lesson generalises past this repo: `cookTime` cannot tell you whether anything
+is happening, only what happened last time it did. Check the data is moving first,
+by a channel that has to change.
+
+### allowCooking gating, and proof by counter delta
+
+`temporal` and `latches` now bind `allowCooking` to their toggles - the last
+approved item. Presence or Motion keeps `temporal` cooking; Triggers, Gestures or
+Events keeps `latches`; and `latches` cooking forces `temporal` to keep cooking too,
+because it READS temporal's presence gate. Without that rule a frozen `temporal`
+would leave every latch armed by a stale `ready`: frozen at 1 they keep firing on
+stale liveness, frozen at 0 they never fire again, and neither says anything.
+
+Proved the way anything with memory has to be proved here - counter deltas over an
+interval, never a same-frame read. With the three latch toggles off: `latches`
+cooked **0** times while `temporal` and `coords` each cooked **377**. With all five
+off: latches 0, temporal 0, coords 567. And the frozen groups' channels are all
+still on the COMP output, holding their last values, which is the property that
+matters for a project that references them.
+
+One measured detail with teeth: **a frozen group still reports its old `cookTime`**
+- 0.715 ms for a `temporal` that had not cooked in hundreds of frames. So summing
+that column while anything is frozen double-counts stale work, and the saving can
+only be inferred from what those groups contribute when they ARE cooking: about
+0.5 ms of the ~1.0-1.2 ms total.
 
 ### Left undone, deliberately
 
 No attribute layer for pose - no derived channels, no filter, no temporal - because
-the brief was plumbing plus basic testing. `allowCooking` gating for `temporal` and
-`latches` is still open. Face is next and does NOT fit this shape: its landmarks
+the brief was plumbing plus basic testing. Face is next and does NOT fit this shape: its landmarks
 are 12 named REGIONS of differing point counts rather than one joint table
 (verified, DESIGN.md 2.12), so the channel list needs a level the pose table does
 not have.

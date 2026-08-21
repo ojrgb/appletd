@@ -567,6 +567,13 @@ Against the running instance (099), not read anywhere:
   channel cost one channel instead of shifting every later one onto the wrong
   data. (The recorded trap about non-pairwise lists applies to WILDCARD patterns,
   which is a different thing.)
+- **`cookTime` is a LAST-VALUE gauge, not a live one.** It reports the most recent
+  cook forever after, so an operator that has stopped cooking entirely still quotes
+  its old cost. Measured twice in one afternoon: a whole network read 1.2-1.55 ms
+  while nothing was arriving at all (the sender had died), and a `temporal` group
+  frozen by `allowCooking` for hundreds of frames still reported 0.715 ms. So a
+  duration cannot demonstrate that work is happening or has stopped - a cook COUNT
+  delta over an interval can, and it is the same instrument §2.10 needed.
 - **`^` DOES NOT EXCLUDE in a Select CHOP's `channames`, and the terms are
   ADDITIVE.** MEASURED against a 141-channel input: `*` gave 141, `* ^*_x ^*_y`
   gave **423** - each term matching the whole lot again and the results

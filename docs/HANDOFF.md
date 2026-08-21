@@ -115,18 +115,7 @@ when the real number was 1.030.
 
 ## Next
 
-**1. `allowCooking` gating for `temporal` and `latches` — approved, not started.**
-Small; `docs/BUILD_PLAN.md` 7.2 names the two things to handle.
-
-**2. Cook time, properly.** Re-measured this session and the honest answer is a
-range, not a number: **1.2 ms and 1.55 ms** on two single-frame reads, summing all
-162 operators with a synthetic 30 fps one-hand stream. Three reads inside one script
-returned the identical value three times — the same-frame trap — so a real
-distribution needs a Trail on `cookTime` across frames. What can be said already:
-grouping did not make the network cheaper, and the old 0.599 ms figure was as
-misleading as the build plan suspected.
-
-**3. visionface.** The port, the flag, the status channel, the box and the send path
+**1. visionface.** The port, the flag, the status channel, the box and the send path
 are all built and generic; `sc_face` is already published reading 0, and
 `parse_streams` refuses `face` with "not implemented yet". What is NOT generic is
 the shape: face landmarks are **12 named REGIONS of differing point counts**
@@ -136,10 +125,33 @@ verified against the framework — `DESIGN.md` 2.12. So the channel table needs 
 level `pose_types.py` does not have, and the per-region counts must be READ rather
 than assumed.
 
-**4. An attribute layer for pose, if it is wanted.** There is none: no derived
+**2. An attribute layer for pose, if it is wanted.** There is none: no derived
 channels, no filtering, no temporal channels, and nothing depth-invariant. That was
 the brief (plumbing plus basic testing), not an oversight. `send_synthetic_pose.py
 depth` demonstrates what a naive consumer gets wrong.
+
+**3. A cook-time DISTRIBUTION, if the number ever matters.** Two single-frame
+reads with data provably flowing gave **0.997 ms and 1.187 ms** over 162 operators
+and 499 channels, against 1.040 ms measured flat — so grouping is cost-neutral and
+`allowCooking` now saves about 0.5 ms of it. Anything finer needs a Trail on
+`cookTime` across frames, because reads inside one script all return the same
+frame's value.
+
+### Done 2026-08-21: `allowCooking` gating
+
+`temporal` and `latches` bind `allowCooking` to their Attributes toggles, applied by
+`groups_callbacks` — an attribute cannot take an expression, so it is written on
+change, the same pattern `filter_callbacks` uses. Presence or Motion keeps
+`temporal`; Triggers, Gestures or Events keeps `latches`; and `latches` cooking
+forces `temporal`, because it reads temporal's presence gate and a frozen gate
+either arms every latch forever or disarms them forever, silently.
+
+Proved by counter delta, which is the only honest way here: three toggles off gave
+`latches` **0 cooks against 377** for temporal and coords over the same interval.
+Frozen groups keep their channels on the COMP output, holding their last values.
+
+**`filter` is not a candidate** and should not be made one: it is in the data path,
+so freezing it would freeze every position rather than bypass the filter.
 
 ### Done 2026-08-21: the pose stream
 
