@@ -175,8 +175,10 @@ def main():
     print()
     print("   %s = %s" % (PARAMETER, engaged))
     for stream, arrived, produced, deleted in built:
-        print("   %-5s %4d channels in, %4d out (%d deletable%s)"
-              % (stream, arrived, produced, deleted,
+        counts = ("not measured - frozen" if arrived is None
+                  else "%4d channels in, %4d out" % (arrived, produced))
+        print("   %-5s %-26s (%d deletable%s)"
+              % (stream, counts, deleted,
                  "" if engaged else ", currently bypassed"))
     if failures:
         print("\nFAILURES (%d):" % len(failures))
@@ -238,7 +240,9 @@ def _build_one(td, child, stream, doomed, optional, engaged, failures, node_xy,
               "it.)" % (stream, stream))
         note.text = NOTES % {"parameter": PARAMETER,
                              "n_deleted": len(doomed) + len(optional), "n_kept": 0}
-        return (stream, 0, 0, len(doomed) + len(optional))
+        # None, not zero: "0 channels in, 0 out" reads as a broken stream, and the
+        # honest answer is that a frozen one cannot be measured.
+        return (stream, None, None, len(doomed) + len(optional))
 
     merge.cook(force=True)
     chop_out.cook(force=True)

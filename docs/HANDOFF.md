@@ -187,11 +187,28 @@ magnitude and a divide, so a real branch — or leave them image-space and say s
 direction is most useful as an ANGLE anyway, and `h{i}_dir` already exists.
 
 The bigger prize behind it is the **channel-to-group registry**.
-`spaces.derived_roles()` now classifies 24 of the derived channels; extending that to
-all 171 of `derive()`'s outputs plus the latch table (which still lives in
-`tools/td_add_latches.py` and should move into the package) is what would let
-`Landmarks`, `Triggers`, `Motion` and `Events` stop being advisory. `td_add_groups.py`
-has been asking for it in a printed note since it was written.
+`spaces.derived_roles()` now classifies 24 of the derived channels; extending that
+to all 171 of `derive()`'s outputs plus the latch table (which still lives in
+`tools/td_add_latches.py` and should move into the package) is what
+`td_add_groups.py` has been asking for in a printed note since it was written.
+
+**But read this before starting it, because the goal that note states is not
+achievable.** It says the registry would let `Landmarks`, `Triggers`, `Motion` and
+`Events` gate real cost. It would not, and §2.14's boundary measurement is why:
+
+- **`Landmarks` cannot be a cooking gate at all.** It names the raw wire channels,
+  which are in the DATA PATH — everything downstream reads them, so freezing them
+  freezes the whole stream.
+- **`Triggers`, `Gestures` and `Events` are three slices of ONE 53-operator group**,
+  and `Motion` is a slice of a 75-operator one. To gate a slice you must give it its
+  own COMP, and **a COMP boundary costs about 0.11 ms at these channel counts** while
+  the whole of `latches` costs 0.18. Splitting it three ways to gate thirds of it
+  would cost more than never gating it at all.
+
+So the registry is worth building for what it WOULD give: an exact answer to "which
+channels belong to which group", which is what a channel-trimming Select needs — and
+what `Screenspaceonly` had to be a Delete CHOP to avoid needing. It is not worth
+building to make those four toggles gate cost. Measured, not assumed.
 
 ### 3. Segmentation — PARKED, decision made
 

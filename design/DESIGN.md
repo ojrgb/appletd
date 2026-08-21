@@ -673,6 +673,13 @@ Against the running instance (099), not read anywhere:
   `visionhands/spaces.py` expands each candidate against the stream's own contract
   and falls back to the literal name list unless the match is exact. `fnmatchcase`
   and not `fnmatch` - the latter is case-insensitive on macOS.
+- **`renamefrom = '*'` APPENDS rather than substitutes.** Reproduced deliberately
+  this session to prove the builder's check has teeth: with `renameto = '*_tx'` the
+  42 channels came out as `h0_wrist_x_tx`, `h0_thumb_cmc_x_tx`, ... The recorded
+  form of this trap (a literal `renameto`, giving `h0_wrist_x`, `h0_wrist_x1`,
+  `h0_wrist_x2`) is the same mistake with a different symptom. `renamefrom` must
+  match the part being REPLACED - `'*_x'` -> `'*_tx'` - and a builder that generates
+  a rename should check the resulting names against the list it expected.
 - **A Select CHOP can do its own rename, and it costs more than a separate Rename
   CHOP.** `renamefrom`/`renameto` exist on every CHOP's Common page, and
   `renamefrom = '*_x'` with `renameto = '*_tx'` substitutes the matched part
