@@ -19,6 +19,8 @@ Ref: visionhands/spaces.py, DESIGN.md 7, 6.4.
 
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
+
 import pytest
 
 from visionhands.face_types import FACE_REGIONS, face_channel_names
@@ -33,9 +35,14 @@ from visionhands.spaces import (
     ROLE_SCALAR,
     SMOOTHED_ROLES,
     TRANSFORMED_ROLES,
+    box_branches,
+    box_expressions,
     channel_roles,
+    compact_pattern,
+    companioned_names,
     names_by_role,
     passthrough_names,
+    scope_pattern,
     smoothed_names,
     transform_branches,
 )
@@ -152,12 +159,12 @@ def test_a_face_landmark_point_is_box_relative_not_a_position() -> None:
 @pytest.mark.parametrize("stream", STREAM_NAMES)
 def test_a_position_branch_is_offset_and_an_extent_branch_is_not(stream: str) -> None:
     """The one arithmetic distinction between a point and a size."""
-    for label, suffix, _names, offset in transform_branches(stream):
-        if suffix in ("_tx", "_ty"):
-            assert offset == -0.5, label
+    for branch in transform_branches(stream):
+        if branch.suffix in ("_tx", "_ty"):
+            assert branch.offset == -0.5, branch.label
         else:
             # Pixel branches never offset either: pixel space starts at the corner.
-            assert offset == 0.0, label
+            assert branch.offset == 0.0, branch.label
 
 
 def test_hands_and_pose_get_four_branches_and_the_face_gets_eight() -> None:
@@ -172,13 +179,13 @@ def test_every_branch_channel_actually_belongs_to_the_stream() -> None:
     silently produce an empty space."""
     for stream in STREAM_NAMES:
         known = set(channel_roles(stream))
-        for _label, _suffix, names, _offset in transform_branches(stream):
-            assert names and set(names) <= known
+        for branch in transform_branches(stream):
+            assert branch.names and set(branch.names) <= known
 
 
 def test_nothing_box_relative_or_angular_reaches_a_branch() -> None:
-    branches = {name for _l, _s, names, _o in transform_branches("face")
-                for name in names}
+    branches = {name for branch in transform_branches("face")
+                for name in branch.names}
     grouped = names_by_role("face")
     assert not branches & set(grouped[ROLE_ANGLE])
     assert not branches & set(grouped[ROLE_BOX_RELATIVE])
@@ -199,3 +206,159 @@ def test_transform_branches_is_empty_for_a_stream_with_nothing_to_transform() ->
         assert transform_branches("hands") == []
     finally:
         spaces.channel_roles = original
+
+
+# ---------------------------------------------------------------------------
+# The patterns, which are the part a builder trusts and must not have to
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("stream", STREAM_NAMES)
+def test_every_pattern_selects_exactly_what_it_claims(stream: str) -> None:
+    """The whole point of `compact_pattern`. A pattern that selects one channel too
+    many transforms something twice; one too few makes a channel VANISH from the
+    COMP output with no error anywhere (DESIGN.md 2.11)."""
+    universe = list(channel_roles(stream))
+
+    def expand(pattern: str) -> list[str]:
+        tokens = pattern.split()
+        return [name for name in universe
+                if any(fnmatchcase(name, token) for token in tokens)]
+
+    assert expand(scope_pattern(stream)) == smoothed_names(stream)
+    for branch in transform_branches(stream):
+        assert expand(branch.pattern) == branch.names, branch.label
+    for box in box_branches(stream):
+        assert expand(box.pattern) == box.names, box.label
+
+
+def test_a_pattern_that_cannot_partition_falls_back_to_the_literal_names() -> None:
+    """The fallback is not decoration: it is what makes a wildcard safe to attempt
+    at all. Asked for a set no candidate can express, `compact_pattern` must return
+    the names rather than the closest pattern."""
+    universe = ["a_x", "b_x", "c_x"]
+    assert compact_pattern(["a_x", "b_x"], universe, ["*_x"]) == "a_x b_x"
+    # And it takes the pattern when the pattern is exact.
+    assert compact_pattern(universe, universe, ["*_x"]) == "*_x"
+    # Order matters, not just membership: a branch's Rename maps name to name.
+    assert compact_pattern(["b_x", "a_x"], universe, ["*_x"]) == "b_x a_x"
+
+
+def test_the_face_landmark_pattern_excludes_the_bounding_box() -> None:
+    """`f0_*_x` would sweep `f0_bbox_x` in with 87 landmark points, and the box is
+    in IMAGE space while the points are in box space - so the box would be composed
+    through itself."""
+    for box in box_branches("face"):
+        assert box.origin not in box.names
+        assert box.extent not in box.names
+        assert not any(name.endswith("_bbox_x") or name.endswith("_bbox_y")
+                       for name in box.names)
+
+
+def test_hands_and_pose_have_no_box_relative_branches() -> None:
+    """A hand joint is already in image space. A branch here would compose it
+    through a bounding box that does not exist."""
+    assert box_branches("hands") == []
+    assert box_branches("pose") == []
+    assert len(box_branches("face")) == 8      # 2 faces x 2 axes x 2 spaces
+
+
+def test_a_box_branch_names_real_box_channels() -> None:
+    known = set(channel_roles("face"))
+    for box in box_branches("face"):
+        assert box.origin in known
+        assert box.extent in known
+        # The x axis rides on the LEFT edge and the WIDTH; y on the BOTTOM and the
+        # HEIGHT. Swapping them is plausible on screen and wrong.
+        assert box.origin.endswith("_x" if box.suffix in ("_tx", "_px") else "_y")
+        assert box.extent.endswith("_w" if box.suffix in ("_tx", "_px") else "_h")
+
+
+# ---------------------------------------------------------------------------
+# The composed arithmetic, evaluated rather than eyeballed
+# ---------------------------------------------------------------------------
+def test_box_expressions_compose_through_the_box_and_then_the_space() -> None:
+    """Evaluate the two strings the builder puts on a Math CHOP and check the
+    number, because this is the arithmetic that has been silently wrong twice.
+
+    A Math CHOP computes `(value + preoff) * gain + postoff` - MEASURED - with
+    `preoff` at zero here, so the test applies exactly that.
+    """
+    box = {"f0_bbox_x": 0.30, "f0_bbox_y": 0.20, "f0_bbox_w": 0.22, "f0_bbox_h": 0.30}
+
+    class _FakeOp:
+        def __getitem__(self, name: str) -> float:
+            return box[name]
+
+    scope = {"op": lambda _path: _FakeOp()}
+    point = 0.75                                   # three quarters across the box
+    for branch in box_branches("face"):
+        if not branch.label.startswith("f0"):
+            continue
+        gain_expr, postoff_expr = box_expressions(branch, "2.0")
+        # eval on our OWN generated strings, with `op` faked - which is the only
+        # way to check a TouchDesigner expression without TouchDesigner.
+        gain = eval(gain_expr, dict(scope))
+        postoff = eval(postoff_expr, dict(scope))
+        got = point * gain + postoff
+        origin, extent = box[branch.origin], box[branch.extent]
+        assert got == pytest.approx(
+            ((origin + point * extent) + branch.offset) * 2.0), branch.label
+
+
+def test_a_world_branch_centres_and_a_pixel_branch_does_not() -> None:
+    """The centring term is the only difference between the world and pixel forms of
+    the same landmark, and it belongs to world space alone."""
+    world = [b for b in box_branches("face") if b.suffix == "_tx"]
+    pixels = [b for b in box_branches("face") if b.suffix == "_px"]
+    assert world and pixels
+    assert all(b.offset == -0.5 for b in world)
+    assert all(b.offset == 0.0 for b in pixels)
+    # Same source channels, same box, different space.
+    assert world[0].names == pixels[0].names
+    assert world[0].extent == pixels[0].extent
+
+
+# ---------------------------------------------------------------------------
+# What the screen-space-only toggle is allowed to remove
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("stream", STREAM_NAMES)
+def test_the_toggle_only_ever_removes_a_second_copy(stream: str) -> None:
+    """Nothing without a screen-space companion may be in the delete list. An angle
+    has no pixel form and a confidence has no meaning in one, so dropping either
+    would lose information rather than a duplicate."""
+    doomed = set(companioned_names(stream))
+    grouped = names_by_role(stream)
+    assert not doomed & set(grouped[ROLE_SCALAR])
+    assert not doomed & set(grouped[ROLE_ANGLE])
+
+
+@pytest.mark.parametrize("stream", STREAM_NAMES)
+def test_every_transformed_channel_is_in_the_delete_list(stream: str) -> None:
+    """The other half of the same property: if a channel HAS a companion it must be
+    in the list, or the toggle leaves a duplicate behind and does nothing useful."""
+    doomed = set(companioned_names(stream))
+    for branch in transform_branches(stream):
+        assert set(branch.names) <= doomed, branch.label
+    for box in box_branches(stream):
+        assert set(box.names) <= doomed, box.label
+
+
+def test_the_delete_list_is_in_contract_order() -> None:
+    """A Delete CHOP does not care, but a printed build report and a diff both do -
+    and a list that reorders itself between runs shows as a modified project."""
+    for stream in STREAM_NAMES:
+        ordered = [n for n in channel_roles(stream)
+                   if n in set(companioned_names(stream))]
+        assert companioned_names(stream) == ordered
+
+
+def test_every_branch_carries_the_suffix_its_channels_actually_end_with() -> None:
+    """A builder peels `source` off to build the rename. Getting it from the PATTERN
+    works for `*_x` and breaks the moment `compact_pattern` falls back to a literal
+    list, so it is carried explicitly and checked here."""
+    for stream in STREAM_NAMES:
+        for branch in transform_branches(stream):
+            assert all(n.endswith(branch.source) for n in branch.names), branch.label
+            assert branch.suffix.endswith(branch.source[-1]), branch.label
+        for box in box_branches(stream):
+            assert all(n.endswith(box.source) for n in box.names), box.label
+            assert box.suffix.endswith(box.source[-1]), box.label

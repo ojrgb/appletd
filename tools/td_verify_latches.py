@@ -190,6 +190,10 @@ def main():
     store = comp.op(BASELINE_DAT)
     if store is None:
         store = comp.create(td.textDAT, BASELINE_DAT)
+        # Out of the way, from the one layout table. It used to land wherever
+        # `create` put it, which was in the middle of the attribute layer.
+        from visionhands.td_layout import stream_xy
+        store.nodeX, store.nodeY = stream_xy(BASELINE_DAT)
         store.nodeX, store.nodeY = 200, -1800
         store.text = ""
 

@@ -137,7 +137,65 @@ def onCook(scriptOp):
         scriptOp.appendChan(name)[0] = out[name]
 '''
 
-ROW_Y = -2600
+# ---- layout -----------------------------------------------------------------
+# Every coordinate this script writes comes from here. It matters more in this file
+# than anywhere else: `temporal` is 73 operators, and they used to be placed by a
+# SINGLE running counter, so each new operator went 170 further right whatever row
+# it was on. The result was a network 11,590 units wide with ten rows all starting
+# somewhere different - the "spaghetti" this pass exists to fix.
+#
+# One counter PER ROW is the whole change. A row now reads left to right in the
+# order it is built, and the ten rows line up under each other.
+COL_W = 200
+# 150, not 200: a CHOP node is 90 tall, so 150 leaves a 60-unit gap, and every row
+# offset below is already a multiple of 150.
+ROW_H = 150
+# Row 0. The In CHOPs sit one column to the left of it, the Out CHOPs past the
+# widest row - computed, because the widest row is 13 operators and counting it by
+# hand is how a layout constant goes stale.
+ROW_Y = 0
+IN_X = -COL_W
+
+NOTES = """TEMPORAL - presence with a real debounce, and the velocity family.
+29 channels, and every one of them has MEMORY.
+
+  in1  the DERIVED attributes - what presence and velocity are computed from
+  in2  the RAW landmark stream, for `seq` only
+
+The two inputs are deliberate. Liveness must not depend on the filter chain it is
+supposed to be watching, so `seq` comes straight off the wire. Two In CHOPs make
+that visible in the network instead of hiding it in a path expression.
+
+ROWS, top to bottom - one row per concern, one column per stage:
+
+  presence    valid -> Trail -> Analyze -> the Schmitt recurrence -> active,
+              entering, exiting
+  two hands   held, both_active, n_active
+  velocity    palm -> Slope -> moving average -> vel_x/vel_y
+  speed       vx^2 + vy^2 -> root -> speed, then its derivative -> accel
+  approach    the two palms' distance, differentiated
+  motion      the Script CHOP that does atan2, because no CHOP does
+  direction   dir held through a speed floor, so a still hand keeps its heading
+  liveness    seq -> Slope -> did it change -> Trail -> ready
+  clock       a Cook Type = Always Null pulling every terminal branch
+
+THE DEBOUNCE IS A SCHMITT TRIGGER, the same shape as the latch bank:
+
+  active = min(valid over last A frames) OR (prev AND max(valid over last D))
+
+A Trail plus an Analyze is "was it valid for ALL of the last A frames" when the
+Analyze takes the minimum, and "was it valid for ANY of the last D" when it takes
+the maximum. Between them the state holds, exactly as a dead band does. D > A on
+purpose: dropping a hand mid-gesture is worse than acquiring one a frame late.
+
+THE CLOCK IS NOT OPTIONAL. TouchDesigner does not cook a branch whose channels
+nothing downstream asks for, and a recurrence that cooks intermittently produces
+correct-looking states with nonsense edges between frames that were never
+adjacent. The Null at Cook Type = Always pulls every terminal branch, and it must
+stay INSIDE this group so it is frozen along with everything else when the group
+is gated.
+
+Built by tools/td_add_temporal.py. Edits here are overwritten on the next run."""
 
 
 def _page(comp, name="Advanced"):
@@ -244,6 +302,17 @@ def _clear_keeping_ports(td, group, ports):
     """
     kept = {}
     for child in list(group.children):
+        # TRAP: `child` may ALREADY BE GONE by the time this loop reaches it.
+        # Destroying a Script CHOP also destroys the callbacks DAT docked to it, so
+        # a snapshot of `children` taken before the loop can hold a reference to an
+        # operator a previous iteration removed - and touching it raises "Invalid OP
+        # object. The node this python object referenced has likely been deleted."
+        #
+        # MEASURED, twice, and the first time it was written off as MCP flakiness:
+        # it only started happening when `tmp_motion_callbacks` moved inside this
+        # group, and it left the group half-built at 5 operators of 74.
+        if not child.valid:
+            continue
         if child.name in ports:
             kept[child.name] = child
         else:
@@ -260,6 +329,10 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "visionhands" or n.startswith("visionhands.")]:
         del sys.modules[stale]
+    # Where this group sits inside its stream. One table for every builder, because
+    # two of them once placed their group on the same coordinate with nothing able
+    # to notice.
+    from visionhands.td_layout import stream_xy
 
     master = op(MASTER_PATH)
     comp = op(COMP_PATH)
@@ -279,7 +352,7 @@ def main():
     if group is None:
         group = comp.create(td.baseCOMP, GROUP)
     kept = _clear_keeping_ports(td, group, ("in1", "in2", "out1", "out2"))
-    group.nodeX, group.nodeY = -1100, -900
+    group.nodeX, group.nodeY = stream_xy(GROUP)
     group.color = (0.3, 0.5, 0.4)
     removed = 0
     for child in list(comp.children):
@@ -297,12 +370,16 @@ def main():
         ", ".join("%s=%d" % (n, int(getattr(master.par, n).eval()))
                   for n in sorted(DEFAULTS)), float(master.par.Velocityfilter.eval())))
 
-    column = [0]
+    # One column counter PER ROW, keyed by the row's y. A single shared counter is
+    # what produced a 73-operator network 11,590 units wide with every row starting
+    # at a different x; this makes each row read left to right from the same origin.
+    columns = {}
 
     def make(kind, name, y=ROW_Y):
         node = group.create(kind, PREFIX + name)
-        node.nodeX, node.nodeY = -1400 + column[0] * 170, y
-        column[0] += 1
+        index = columns.get(y, 0)
+        columns[y] = index + 1
+        node.nodeX, node.nodeY = index * COL_W, y
         return node
 
     # TWO inputs, and the split is deliberate. Input 0 is the derived attributes -
@@ -311,9 +388,11 @@ def main():
     # chain that could itself be misconfigured. Two In CHOPs make that visible in
     # the network instead of hidden in a path expression.
     derived_in = kept.get("in1") or group.create(td.inCHOP, "in1")
-    derived_in.nodeX, derived_in.nodeY = -1600, 0
+    derived_in.nodeX, derived_in.nodeY = IN_X, ROW_Y
     raw_seq_in = kept.get("in2") or group.create(td.inCHOP, "in2")
-    raw_seq_in.nodeX, raw_seq_in.nodeY = -1600, -150
+    # Beside the LIVENESS row, which is the only row that reads it - a long wire
+    # across the whole network was the previous arrangement and said nothing.
+    raw_seq_in.nodeX, raw_seq_in.nodeY = IN_X, ROW_Y - 8 * ROW_H
     group.inputConnectors[0].connect(source)
     group.inputConnectors[1].connect(comp.op("in1"))
 
@@ -588,18 +667,23 @@ def main():
     motion_in = make(td.mergeCHOP, "motion_in", ROW_Y - 750)
     wire(motion_in, out_vel, speed)
 
-    motion_dat = comp.op(PREFIX + "motion_callbacks") or comp.create(
-        td.textDAT, PREFIX + "motion_callbacks")
-    motion_dat.nodeX, motion_dat.nodeY = -1600, ROW_Y - 750
-    motion_dat.text = MOTION_CALLBACK % {"repo": REPO_ROOT, "floor": SPEEDFLOOR}
     motion = make(td.scriptCHOP, "motion", ROW_Y - 750)
     wire(motion, motion_in)
+
+    # TRAP: creating a Script CHOP AUTO-CREATES a docked callbacks DAT beside it,
+    # named `<chop>_callbacks`, in the same network. So this one is used rather than
+    # fought. The previous arrangement built its own DAT in the STREAM and destroyed
+    # TD's by guessing the name it would collide into - `tmp_motion_callbacks1` -
+    # which stopped being that name as soon as the Script CHOP moved inside this
+    # group. The result was TWO DATs called `tmp_motion_callbacks`, one at the stream
+    # level orphaned and one in here sitting on top of `tmp_held_prev`. Found by
+    # tools/td_verify_layout.py, which is what that script is for.
+    motion_dat = group.op(motion.name + "_callbacks")
+    if motion_dat is None:
+        motion_dat = group.create(td.textDAT, motion.name + "_callbacks")
+    motion_dat.nodeX, motion_dat.nodeY = IN_X, ROW_Y - 750
+    motion_dat.text = MOTION_CALLBACK % {"repo": REPO_ROOT, "floor": SPEEDFLOOR}
     motion.par.callbacks = motion_dat.path
-    orphan = comp.op(PREFIX + "motion_callbacks1")
-    if orphan:
-        # Creating a Script CHOP auto-creates a docked callbacks DAT; ours replaces
-        # it, and the stray one would sit there cooking (DESIGN.md 2.11).
-        orphan.destroy()
 
     # HOLD `dir` when the hand is slower than Speedfloor, so it stops spinning on
     # noise. Done in CHOPs rather than in motion.py because holding a value is
@@ -704,12 +788,20 @@ def main():
     # The group's output. `tmp_ready` goes out too, on a second connector, because
     # the latch bank gates on it - which makes that cross-group dependency a wire
     # in the network rather than an `op('tmp_ready')` buried in an expression.
+    # Past the WIDEST row, computed rather than guessed: the presence chain is 13
+    # operators and a hardcoded x would sit on top of it the next time a stage is
+    # added.
+    out_x = (max(columns.values()) + 1) * COL_W
     group_out = kept.get("out1") or group.create(td.outCHOP, "out1")
-    group_out.nodeX, group_out.nodeY = 400, 0
+    group_out.nodeX, group_out.nodeY = out_x, ROW_Y
     group_out.inputConnectors[0].connect(merged)
     ready_out = kept.get("out2") or group.create(td.outCHOP, "out2")
-    ready_out.nodeX, ready_out.nodeY = 400, -150
+    ready_out.nodeX, ready_out.nodeY = out_x, ROW_Y - ROW_H
     ready_out.inputConnectors[0].connect(ready)
+
+    note = group.create(td.textDAT, "notes")
+    note.nodeX, note.nodeY = IN_X, ROW_Y + ROW_H
+    note.text = NOTES
 
     print("   presence gate: validity AND liveness (owned here now, not by the "
           "latch bank)")

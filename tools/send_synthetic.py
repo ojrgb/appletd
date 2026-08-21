@@ -47,6 +47,11 @@ from visionhands.osc import datagram_socket, encode_channels
 from visionhands.sequences import SEQUENCES, frames
 from visionhands.sidecar import DEFAULT_HOST, DEFAULT_PORT, SEQ_MODULUS
 from visionhands.slots import SLOT_MODE_CHIRALITY, SLOT_MODES, SlotAssigner
+from visionhands.streams import (
+    STREAM_HANDS,
+    status_channel_names,
+    status_channel_values,
+)
 from visionhands.types import channel_names, channel_values
 
 # Frames per second to send at, and seconds per sweep. 30 fps matches what the
@@ -137,7 +142,17 @@ def send(sequence_name: str, host: str, port: int, fps: float,
             command-line tool; there is nothing to be concurrent with.
     """
     sequence = SEQUENCES[sequence_name]
-    names = channel_names()
+    # The hands PORT carries the four `sc_*` status channels as well as the hands
+    # contract (DESIGN.md 6.4), and this tool used to send only the contract - so
+    # the network saw 137 channels where a real sidecar sends 141. That mattered
+    # twice: `sc_*` is exactly the set that once fell into neither of the filter's
+    # two Selects and left the COMP's output silently, and a rebuilt OSC In CHOP
+    # only has the channels that have ARRIVED, so a synthetic session could not
+    # reproduce the full contract at all.
+    #
+    # `sc_hands` reads 1 and the other two read 0, which is the truth: this process
+    # is the hands stream and there is no pose or face inference behind it.
+    names = list(channel_names()) + list(status_channel_names())
     # The SAME assigner the sidecar uses, so this stream is what the sidecar would
     # produce. Without it, slot assignment would be the one thing in the pipeline
     # that no end-to-end test could reach - it lives in the engine, and this tool
@@ -178,6 +193,8 @@ def send(sequence_name: str, host: str, port: int, fps: float,
             age_ms = max(0.0, (time.monotonic() - due) * 1000.0)
             n_hands = sum(1 for hand in frame.hands if hand.found)
             values = list(channel_values(frame, age_ms, n_hands))
+            values.extend(status_channel_values(time.monotonic() - started,
+                                                (STREAM_HANDS,)))
             # seq wrapped exactly as the sidecar wraps it, so float32 carries it
             # exactly all the way to TouchDesigner. Index 1 is seq - the frame
             # scalars lead the channel list (types.py).

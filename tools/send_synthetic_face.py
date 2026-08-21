@@ -4,6 +4,7 @@
     RUN IT
         ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py turn
         ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py tilt --cycles 6
+        ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py speak
         ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py two
         ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py absent
 
@@ -14,14 +15,22 @@
     port interleave into one set of channels, which looks like data rather than a
     fault. `--force` overrides.
 
-WHAT IT IS FOR. Proving the face plumbing - 23 channels, their names, the port, the
-left-to-right slot rule, and the DEGREES convention on roll/yaw/pitch - with the
-camera left alone.
+WHAT IT IS FOR. Proving the face plumbing with the camera left alone - all 371
+channels, their names, the port, the left-to-right slot rule, the DEGREES convention
+on roll/yaw/pitch, and since the constellation was measured, every one of the 348
+landmark channels.
 
-WHAT IT CANNOT COVER. The landmark points, because they are not published yet: the
-per-region point counts need one camera frame to settle, which is what
-`tools/probe_face_regions.py` is for. Until then this stream is head pose and
-bounding box, and so is the contract.
+    THE LANDMARKS MOVE, which is the whole reason this is worth running. `turn`
+    sweeps them across the box, `tilt` rotates them, and `speak` opens the mouth -
+    so `f0_outer_lips_07_ty` is a channel you can watch rather than a channel that
+    exists. It is also the only way to exercise the MULTIPLY term in the
+    box-relative coordinate transform: with landmarks at zero, `_tx` reduces to the
+    bounding box alone, and a broken `point * bbox_w` would look perfect.
+
+WHAT IT IS NOT. The constellation is a hand-laid caricature, not a face model -
+`visionhands/synth_face.py` says exactly what it does and does not reproduce, and
+the region OVERLAP is the important omission. No threshold should be tuned against
+this stream.
 
 Ref: visionhands/synth_face.py, visionhands/face_types.py, DESIGN.md 6.4.
 """
@@ -80,6 +89,17 @@ def approach(phase: float) -> tuple[FacePose, ...]:
     return (FacePose(size=0.6 + 0.7 * (0.5 - 0.5 * math.cos(2.0 * math.pi * phase))),)
 
 
+def speak(phase: float) -> tuple[FacePose, ...]:
+    """One face opening and closing its mouth.
+
+    The only sequence that moves a landmark WITHOUT moving the head, so it separates
+    two failures that otherwise look identical: a landmark channel wired to the wrong
+    point, and a landmark branch that is really just following the bounding box. Only
+    the twenty lip channels should change here.
+    """
+    return (FacePose(expression=0.5 - 0.5 * math.cos(2.0 * math.pi * phase)),)
+
+
 def two(phase: float) -> tuple[FacePose, ...]:
     """Two faces that SWAP SIDES halfway through.
 
@@ -98,7 +118,8 @@ def absent(phase: float) -> tuple[FacePose, ...]:
 
 
 SEQUENCES: dict[str, Sequence] = {
-    "turn": turn, "tilt": tilt, "approach": approach, "two": two, "absent": absent,
+    "turn": turn, "tilt": tilt, "approach": approach, "speak": speak,
+    "two": two, "absent": absent,
 }
 
 

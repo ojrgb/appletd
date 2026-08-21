@@ -649,6 +649,91 @@ Against the running instance (099), not read anywhere:
   channels, COMP output unchanged at 495, no error anywhere. Any group in the DATA
   PATH needs a check that everything entering it leaves it, which is not the same
   check as "does the output match the contract" (the contract is not what arrived).
+- **A CHOP's `scope` parameter is the Select+op+Merge pattern in one operator,
+  and unscoped channels pass through BIT-EXACT.** Verified on Math, Filter, Lag,
+  Limit, Slope, Speed, Trail, Rename, Null, Expression, Hold, Count, Delay and
+  Reorder: all channels appear on the output, the scoped ones processed and the
+  rest untouched to the last bit (checked by lagging a scoped channel and
+  comparing an unscoped one for exact equality). It removes the whole class of
+  failure above - there is no Select to get wrong and no Merge to drop half of.
+- **`scope` on a LOGIC CHOP DELETES the unscoped channels instead.** Three
+  channels in, `scope` naming two, two out. It was the only operator of fourteen
+  tried that behaves this way, and Logic is exactly what the latch bank and the
+  presence debounce are built from - so `scope` is safe for the filter and is not
+  a general rule.
+- **`^` does not exclude in `scope` either, and for the same reason as
+  `channames`: the terms are a UNION.** A single `^a` term does mean "everything
+  except a" - measured - but `^a ^b` is (all but a) OR (all but b), which is ALL.
+  So `* ^*_conf ^*_quality` scaled every channel including the two it names.
+  Exclusion is usable with exactly one excluded term and never with two.
+- **TouchDesigner's channel matcher agrees with Python's `fnmatchcase` on `*`,
+  `?` and `[0-9]` character classes.** Verified by expanding the same patterns
+  both ways against the same channel set and comparing the lists. That is what
+  makes a generated pattern checkable BEFORE it is written to an operator:
+  `visionhands/spaces.py` expands each candidate against the stream's own contract
+  and falls back to the literal name list unless the match is exact. `fnmatchcase`
+  and not `fnmatch` - the latter is case-insensitive on macOS.
+- **A Select CHOP can do its own rename, and it costs more than a separate Rename
+  CHOP.** `renamefrom`/`renameto` exist on every CHOP's Common page, and
+  `renamefrom = '*_x'` with `renameto = '*_tx'` substitutes the matched part
+  correctly - `f0_left_eye_00_x` becomes `f0_left_eye_00_tx`. That is NOT the
+  wildcard form recorded below as a disaster, which was `renamefrom = '*'` with a
+  literal target. But MEASURED in the live network on 42 channels: a Select doing
+  `channames` AND a rename cost 0.0418 ms against 0.0138 for the same Select doing
+  only `channames`. Moving the rename onto the following Math CHOP - which was
+  already there - took the pair from 0.0515 to 0.0335.
+- **A Math CHOP evaluates `(value + preoff) * gain + postoff`.** Measured: 2 in,
+  preoff 10, gain 3, postoff 100, out 136. So a two-step composition folds into
+  ONE operator when both terms can be written as expressions, and `gain` and
+  `postoff` are evaluated once per cook rather than once per channel. That is what
+  makes a face landmark's `bbox_x + point * bbox_w` then centre-and-scale a single
+  Math CHOP instead of an Expression CHOP evaluating Python 608 times a frame.
+- **A Math CHOP does NOT broadcast a one-channel input across a many-channel
+  one.** With `chopop = multiply`, 2 channels against 1 produced FOUR channels -
+  the two inputs concatenated, with the collision renamed `f0_bbox_w1`. It matches
+  by NAME and there is no `matchbynames` parameter to change that. So "scale these
+  87 channels by that one channel" has no two-input form; it is the expression on
+  a scalar parameter above.
+- **`scriptOp.numChans` RAISES inside a Script CHOP's `onCook`** - "numChans is
+  unavailable for this CHOP while it is cooking". `len(scriptOp.chans())` gives the
+  same number and works. And the property that makes a channel cache possible at
+  all: **a Script CHOP's channels PERSIST between cooks.** Only the first cook
+  after a rebuild starts with none, so `clear()` and re-`appendChan` every frame is
+  optional - MEASURED at 0.0681 ms for 87 channels against 0.0070 to write the
+  values into channels that already exist, plus 0.0041 for the guard that decides.
+- **Creating a Script CHOP AUTO-CREATES a callbacks DAT docked to it**, named
+  `<chop>_callbacks`, in the same network - and **destroying the Script CHOP
+  destroys that DAT with it.** Both halves cost time. The first produced two
+  operators called `tmp_motion_callbacks`, one orphaned at the stream level and one
+  sitting exactly on top of another operator, because the builder was destroying
+  TD's copy by guessing the name it would collide into. The second broke every
+  "destroy each child" loop that had snapshotted `children` first: the DAT is
+  already gone when the loop reaches it, and touching it raises "Invalid OP object.
+  The node this python object referenced has likely been deleted." Guard with
+  `child.valid`.
+- **`allowCooking = False` on a COMP freezes its channels at their LAST VALUE, and
+  a builder that cooks it once before freezing bakes in a plausible wrong number.**
+  Not a new behaviour - it is what makes a frozen group safer than a vanished one
+  (6.2) - but it changes what a default may be. A toggle that was advisory and
+  becomes a real gate must default to NOT freezing, or an existing project's
+  channels silently stop updating. `Coordspx` shipped off and gated nothing; when
+  it started freezing the pixel spaces its default had to become ON.
+- **A frozen half still costs its channels at the merge.** A gated sub-group's
+  output stays on the group's Merge CHOP - that is the point - so the Merge's cost
+  scales with the FULL channel count whether the sources are cooking or not.
+  Measured on the face stream: `coords/out` merging 728 channels cost 0.1073 ms
+  with 712 of them coming from frozen halves.
+- **Node sizes, for anything that generates a layout:** a CHOP or DAT node is
+  130 x 90 and a base COMP is 160 x 130, read from `nodeWidth`/`nodeHeight`.
+- **Cook cost in this COMP is about 1.2 microseconds per channel per operator**,
+  which is the number that decides whether a feature is affordable. It is why 696
+  face-landmark coordinate channels through two operators each cost 1.2 ms, and why
+  the answer was a toggle rather than a cleverer network.
+- **`td.run`, not the bare `run`, and `op(path).module`, not `mod(path)`.** The MCP
+  bridge's exec context has neither `run` nor `mod` in it - "name 'run' is not
+  defined" - while a Text DAT's does. A builder that has to work both ways uses the
+  `td.`-qualified scheduler, and a scheduled string that raises NameError does so
+  SILENTLY: a 90-frame sampling schedule fired every time and reported zero samples.
 - **`ps -Ao args=` is not tokenised by argv**, so splitting it on spaces cannot
   recover argument boundaries: the body of a `python -c "..."` script splits into
   words too, and a test for "`-m` immediately followed by the module" matches
@@ -755,6 +840,47 @@ default socket tops out near 280 channels.
 
 ---
 
+
+### 2.14 The COMP's cook cost, by configuration — measured 2026-08-21
+
+All of it with a synthetic 30 fps stream on every port, sampled over 90 render
+frames from a scheduled callback, medians of the cooks where the operator's
+`totalCooks` actually advanced. `tools/td_profile.py` is what took them, and it
+DISCARDS a run where `seq` did not change — which is the check that would have
+caught the three figures this project has had to throw away.
+
+| configuration | ms | operators cooking |
+|---|---|---|
+| **before this phase**: three streams, every space, nothing gated | **1.6686** | 238 / 238 |
+| like for like now: three streams, world + pixel, no landmark coords | 1.7381 | 207 / 287 |
+| three streams + face landmark WORLD coords (`Lmcoordstx` on) | 2.3854 | 193 / 287 |
+| hands only, world only | 1.1367 | 142 / 277 |
+| hands only, both spaces, attribute layer off | **0.6031** | 29 / 287 |
+
+**The like-for-like number went UP, by 4%, and that is the honest headline.** Three
+changes made things faster and one made them slower:
+
+| change | before | after |
+|---|---|---|
+| the three `filter` groups, Select+Filter+Merge → one scoped Filter | 0.4380 | 0.1527 |
+| `derive_chop`, caching its channel names instead of rebuilding them | 0.2815 | 0.2037 |
+| the three `coords` groups, split into gateable halves | 0.2941 | 0.6260 |
+
+So the filter and the Script CHOP gave back 0.36 ms, and making the coordinate
+spaces switchable cost 0.33 ms — eight extra COMP boundaries and an extra merge
+layer, paid whether anything is gated or not. **Gating is not free, and it only
+pays when something is actually off.** It is worth it here because something almost
+always is: `Coordspx` and the pose and face streams all ship off, and the
+configuration a project actually runs is the fourth row, not the second.
+
+The last row is the one that says the gating works: 287 operators, 29 of them
+cooking, 0.60 ms. Every expensive thing in the COMP is now behind a toggle, and a
+frozen group keeps its channels rather than dropping them (6.2).
+
+**What is left, and it is not the network's fault.** `hands/derive_chop` at 0.20 ms
+is the single most expensive operator, and 0.06 of that is reading 141 input
+channels into a dict and 0.04 is `derive()` itself. The rest is Script CHOP
+framework overhead. There is no arrangement of native CHOPs that computes atan2.
 
 ## 3. Traps — all of these cost real time in the spike
 

@@ -14,23 +14,30 @@ being computed in Python, and Contacts off stops 28, inside the one operator in
 the whole COMP where per-channel cost is real: main-thread Python measured at
 0.210 ms for 171 channels (DESIGN.md 2.7).
 
-**They do NOT yet gate the native groups, and that is a judgement rather than an
-omission.** docs/ATTRIBUTES.md specifies `allowCooking` off on a group COMP. That
-mechanism works - MEASURED below - but wrapping the latch bank, the temporal
-group and the filter in base COMPs is a restructure of about 150 operators, and
-what it would save is negligible: those are tiny native CHOPs on 1-sample inputs,
-against a Python cook that the toggles above already gate. The compute worth
-saving is already saved.
+**AND THEY GATE COOKING on every group that has been wrapped in a COMP.**
+`temporal` and `latches` since docs/BUILD_PLAN.md 7.2; `coords/world` and
+`coords/pixels` in all three streams since 2026-08-21, which is what `Coordstx` and
+`Coordspx` now do - they were "channels only" until the coords group was split into
+two halves for them to freeze.
+
+That change earned its keep on the face stream, where the landmark points gained
+world and pixel companions: MEASURED 1.8628 ms per cook for `face/coords`, 696
+output channels through two operators each. `Coordspx` ships off, so half of it is
+frozen out of the box.
 
 **A disabled DERIVE group's channels genuinely disappear** from the COMP's output,
 because `derive()` simply does not emit them - measured, Verbosity = Minimal takes
 `derive_chop` from 171 channels to 0 and the COMP output from 561 to 393. Nothing
 is left stale there.
 
-**A disabled NATIVE group's channels do NOT disappear**, because nothing gates
-them: the latch, trigger and motion channels keep their last value. That is the one
-real gap, and closing it needs an exact channel-to-group map - see the note at the
-end of this file for why wildcard patterns cannot provide one.
+**A disabled NATIVE group's channels do NOT disappear.** They keep their last
+value, whether the group is frozen by `allowCooking` or not gated at all. That is
+deliberate rather than a gap: a channel that VANISHES breaks every reference to it
+with no error anywhere (DESIGN.md 6.2), which is worse than a stale number on a
+toggle somebody just turned off. The genuinely un-gated toggles are the remaining
+`native` ones - `Landmarks`, `Triggers`, `Motion`, `Events` - and closing those needs
+an exact channel-to-group map; see the note at the end of this file for why wildcard
+patterns cannot provide one.
 
 MEASURED, the `allowCooking` question step 3 could not proceed without: a Feedback
 counter and a Cook Type = Always Null inside a base COMP, with `allowCooking` set
@@ -57,18 +64,34 @@ REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
 MASTER_PATH = "/project1/vision"
 COMP_PATH = MASTER_PATH + "/hands"
 
-# The groups, their defaults, and whether this page can actually gate their cost.
+# The groups, their defaults, and how each one's toggle reaches what it gates.
 #
 # `derive` means the group is computed by visionhands/derive.py, so the toggle
 # reaches it through the existing `_groups()` reader and genuinely saves work.
-# `native` means the group is built from CHOPs, where the toggle is currently
-# advisory - it records intent and drives nothing. Said plainly in the label, so
-# nobody switches one off expecting a saving that is not there.
+# `native` means the group is built from CHOPs, where the toggle gates cost only if
+# those CHOPs live in a COMP that `allowCooking` can freeze - which is what COOK_GATED
+# below records. A `native` toggle that is NOT in COOK_GATED drives nothing, and its
+# LABEL says so, so nobody switches one off expecting a saving that is not there.
 GROUPS = (
     # name          default  gated
     ("Landmarks",   True,  "native"),
     ("Coordstx",    True,  "native"),
-    ("Coordspx",    False, "native"),
+    # ON, and the default CHANGED on 2026-08-21 when this toggle stopped being
+    # advisory. It used to ship off and gate nothing, so the `_px`/`_py` channels
+    # were always live. Now off means FROZEN - the channels are still there, holding
+    # whatever they last cooked, which is a plausible wrong number rather than a
+    # visible failure. A toggle that can do that has to default to NOT doing it, and
+    # turning it off has to be a deliberate saving. Same reasoning as
+    # `Screenspaceonly`, which ships off because on deletes channels.
+    ("Coordspx",    True,  "native"),
+    # The FACE LANDMARK coordinate spaces, separate from the box's own because they
+    # are two orders of magnitude bigger: 348 channels against 8, and MEASURED at
+    # 1.2099 ms per cook against under a tenth of that. A project that wants a
+    # face's bounding box in world space should not have to pay for 174 points.
+    ("Lmcoordstx",  True,  "native"),
+    # OFF, and unlike `Coordspx` that is safe: these 348 channels did not exist
+    # before today, so nothing can be reading a value that is about to go stale.
+    ("Lmcoordspx",  False, "native"),
     ("Core",        True,  "derive"),
     ("Presence",    True,  "derive"),
     ("Contacts",    True,  "derive"),
@@ -99,8 +122,46 @@ GROUPS = (
 # now: `hands/temporal`, not `temporal`. Written out rather than assembled, so the
 # one place that has to change when a stream grows a gated group is this table.
 COOK_GATED = {
+    # THE WHOLE STREAM, on its own toggle. A disabled stream still receives a full
+    # datagram of zeros every frame - deliberately, because a channel that stops
+    # arriving VANISHES and breaks its consumers silently (DESIGN.md 6.2) - and
+    # until now the network went on processing those zeros. Freezing the child COMP
+    # stops all of it and keeps every channel, holding zero.
+    #
+    # MEASURED in the default configuration, where `Streampose` and `Streamface`
+    # both ship OFF: pose cost 0.2456 ms and face 1.4525 ms per cook, computing
+    # coordinate spaces for people who are not there.
+    #
+    # NOTE the one confusing consequence, and it is worth the trade: these toggles
+    # are LAUNCH FLAGS for the sidecar and say "restart to apply", but freezing
+    # takes effect immediately. Turning a stream on therefore stops the freeze at
+    # once and starts the inference at the next restart. Freezing a stream nobody is
+    # producing is right either way round.
+    "hands": ("Streamhands",),
+    "pose": ("Streampose",),
+    "face": ("Streamface",),
     "hands/temporal": ("Presence", "Motion"),
     "hands/latches": ("Triggers", "Gestures", "Events"),
+    # The coordinate spaces, split into a world half and a pixel half by
+    # tools/td_add_coords.py precisely so these two toggles can freeze them. They
+    # were labelled "channels only, gates no cost yet" from the day they were added;
+    # they gate real cost now.
+    #
+    # MEASURED, and it is why this was worth doing: the FACE stream's coords group
+    # cost 1.8628 ms per cook once the landmark points gained world and pixel
+    # companions - 696 output channels through two operators each, at about 1.2
+    # microseconds per channel per operator, which is more than everything else in
+    # the COMP put together. `Coordspx` ships OFF, so a project that only wants
+    # world coordinates does not pay for pixel ones.
+    "hands/coords/world": ("Coordstx",),
+    "hands/coords/pixels": ("Coordspx",),
+    "pose/coords/world": ("Coordstx",),
+    "pose/coords/pixels": ("Coordspx",),
+    "face/coords/world": ("Coordstx",),
+    "face/coords/pixels": ("Coordspx",),
+    # Only the face has box-relative channels, so only the face has these two.
+    "face/coords/lm_world": ("Lmcoordstx",),
+    "face/coords/lm_pixels": ("Lmcoordspx",),
 }
 
 # `latches` READS `temporal`'s second output - the liveness/presence gate that
@@ -116,7 +177,7 @@ COOK_REQUIRES = {"hands/latches": ("hands/temporal",)}
 PRESETS = {
     "Minimal": ("Landmarks", "Coordstx"),
     "Interaction": tuple(n for n, _d, _g in GROUPS
-                         if n not in ("Coordspx", "Descriptor")),
+                         if n not in ("Coordspx", "Lmcoordspx", "Descriptor")),
     "Everything": tuple(n for n, _d, _g in GROUPS),
 }
 
@@ -303,11 +364,24 @@ def main():
     # and `allowCooking` is written on groups that live inside a stream.
     _page(master)
     print("1. Attributes page on %s:" % master.path)
+    # What each toggle actually reaches, from the same two tables the LABELS are
+    # built from - not from the `gated` marker alone, which was still printing
+    # "gates no cost yet" for Coordstx and Coordspx after they started freezing
+    # `coords/world` and `coords/pixels`. A report that contradicts the label it
+    # sits beside is worse than no report.
+    freezes = {}
+    for group_name, toggles in COOK_GATED.items():
+        for toggle in toggles:
+            freezes.setdefault(toggle, []).append(group_name)
     for group, _default, gated in GROUPS:
+        if gated == "derive":
+            reach = "gates derive()"
+        elif group in freezes:
+            reach = "freezes " + ", ".join(sorted(freezes[group]))
+        else:
+            reach = "channels only, gates no cost yet"
         print("   %-12s %-3s  %s"
-              % (group, "on" if getattr(master.par, group).eval() else "off",
-                 "gates derive()" if gated == "derive"
-                 else "channels only, gates no cost yet"))
+              % (group, "on" if getattr(master.par, group).eval() else "off", reach))
     print("   Verbosity = %s" % master.par.Verbosity.eval())
 
     # The preset callback. A Parameter Execute DAT rather than an expression on
@@ -368,28 +442,34 @@ def main():
     # vanishing from the COMP's output and silently breaking every reference
     # (DESIGN.md 6.2). Checked by NAME, which is a same-frame-safe question, unlike
     # anything about cook counts.
-    out = comp.op("out1")
-    if out is not None:
-        out.cook(force=True)
-        print("5. COMP output: %d channels" % out.numChans)
-        present = {c.name for c in out.chans()}
-        for group_name in sorted(COOK_GATED):
-            # Relative to the MASTER: `hands/temporal` is not a child of the stream.
-            group = master.op(group_name)
-            group_out = None if group is None else group.op("out1")
-            if group is None or group_out is None:
-                continue
-            mine = {c.name for c in group_out.chans()}
-            lost = sorted(mine - present)
-            if lost:
-                failures.append("`%s` is %s and %d of its channels are NOT on the "
-                                "COMP output: %r"
-                                % (group_name,
-                                   "cooking" if group.allowCooking else "frozen",
-                                   len(lost), lost[:5]))
-            print("   %-15s %-7s %d channels, all on the output: %s"
-                  % (group_name, "cooking" if group.allowCooking else "FROZEN",
-                     len(mine), not lost))
+    print("5. stream outputs:")
+    for stream_name in sorted({name.split("/")[0] for name in COOK_GATED}):
+        stream_out = master.op(stream_name + "/out1")
+        if stream_out is not None:
+            stream_out.cook(force=True)
+            print("   %-6s %d channels" % (stream_name, stream_out.numChans))
+    for group_name in sorted(COOK_GATED):
+        # Relative to the MASTER: `hands/temporal` is not a child of the stream.
+        group = master.op(group_name)
+        group_out = None if group is None else group.op("out1")
+        # Against ITS OWN stream's output. This used to compare every gated group
+        # against the HANDS stream's out1, which was correct while only hands had
+        # gated groups and reported four false failures the moment pose and face
+        # got them: 356 face channels "missing" from a hands output that never
+        # carried them.
+        stream_out = master.op(group_name.split("/")[0] + "/out1")
+        if group is None or group_out is None or stream_out is None:
+            continue
+        mine = {c.name for c in group_out.chans()}
+        lost = sorted(mine - {c.name for c in stream_out.chans()})
+        if lost:
+            failures.append("`%s` is %s and %d of its channels are NOT on %s: %r"
+                            % (group_name,
+                               "cooking" if group.allowCooking else "frozen",
+                               len(lost), stream_out.path, lost[:5]))
+        print("   %-22s %-7s %4d channels, all on the output: %s"
+              % (group_name, "cooking" if group.allowCooking else "FROZEN",
+                 len(mine), not lost))
 
     if failures:
         print("\nFAILURES (%d):" % len(failures))

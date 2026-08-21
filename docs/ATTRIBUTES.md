@@ -365,7 +365,7 @@ signature of the pose, for gesture matching or as features for a model.
 |---|---|---|
 | `Landmarks` — the raw 137 from the sidecar | 137 | on |
 | `Coordstx` — `_tx`/`_ty` for all 42 joints | 84 | on |
-| `Coordspx` — `_px`/`_py` for all 42 joints | 84 | off |
+| `Coordspx` — `_px`/`_py` for all 42 joints | 84 | **on** |
 | `Core` | 20 | on |
 | `Presence` | 10 | on |
 | `Contacts` | 28 | on |
@@ -378,8 +378,30 @@ signature of the pose, for gesture matching or as features for a model.
 | `Descriptor` | 84 | off |
 
 Presets on the `Verbosity` menu: **Minimal** = Landmarks + Coordstx (221),
-**Interaction** = everything except Coordspx and Descriptor (421), **Everything**
-= all of it (589).
+**Interaction** = everything except the pixel spaces and Descriptor (421),
+**Everything** = all of it (589).
+
+**`Coordspx` DEFAULTS ON as of 2026-08-21, and that is a change.** It used to
+default off and gate nothing at all, so the `_px`/`_py` channels were always live.
+It now freezes `coords/pixels` — the channels stay, holding their last value — and a
+toggle that can silently stop channels updating has to default to not doing that.
+Turning it off is a deliberate saving of about 0.1 ms per stream.
+
+### And on the other two streams
+
+`Coordstx` and `Coordspx` serve all three streams, not just hands, and the FACE
+stream has two more of its own:
+
+| group | channels | default |
+|---|---|---|
+| `Lmcoordstx` — `_tx`/`_ty` for all 174 face landmark points | 348 | on |
+| `Lmcoordspx` — `_px`/`_py` for the same | 348 | off |
+
+Separate from `Coordstx`/`Coordspx` because they are two orders of magnitude
+bigger: the face's own bounding box is 8 channels and its landmark points are 348,
+MEASURED at **1.08 ms per cook** for the world half alone. A project that wants a
+face's box in world space should not have to pay for 174 points, and before this
+split it did.
 
 ## Parameters
 
@@ -392,8 +414,10 @@ belong to - a page you have to scroll is a page nobody tunes.
 |---|---|---|---|
 | `Verbosity` | menu | Interaction | Minimal / Interaction / Everything. Sets the toggles below in one click |
 | `Landmarks` | toggle | on | publish the raw 137 from the sidecar |
-| `Coordstx` | toggle | on | `_tx`/`_ty` for all 42 joints |
-| `Coordspx` | toggle | off | `_px`/`_py` for all 42 joints |
+| `Coordstx` | toggle | on | `_tx`/`_ty`, EVERY stream. Freezes `coords/world` |
+| `Coordspx` | toggle | on | `_px`/`_py`, every stream. Freezes `coords/pixels` |
+| `Lmcoordstx` | toggle | on | `_tx`/`_ty` for the 174 FACE landmark points |
+| `Lmcoordspx` | toggle | off | `_px`/`_py` for the same. 348 channels, 1.08 ms |
 | `Core` | toggle | on | palm, size, bbox |
 | `Presence` | toggle | on | |
 | `Contacts` | toggle | on | |
@@ -404,8 +428,9 @@ belong to - a page you have to scroll is a page nobody tunes.
 | `Events` | toggle | on | momentary pulses |
 | `Descriptor` | toggle | off | 84-channel pose signature |
 
-A disabled group has `allowCooking` off, so it costs nothing, and its channels
-are excluded from the output rather than left stale.
+A disabled `derive` group's channels are excluded from the output. A disabled
+NATIVE group has `allowCooking` off, so it costs nothing and its channels are left
+at their last value — which is deliberate, and 6.2 of `DESIGN.md` is why.
 
 #### What the toggles gate, and the one thing to know about switching one off
 
@@ -414,8 +439,14 @@ Three kinds of toggle, and the label says which:
 | toggles | what switching it off saves |
 |---|---|
 | `Core` `Presence` `Contacts` `Pose` `Twohands` `Gestures` `Descriptor` | `derive()` does not compute the group, and its channels leave the output |
-| `Presence` `Motion` (→ `temporal`) and `Triggers` `Gestures` `Events` (→ `latches`) | the group COMP stops cooking entirely, via `allowCooking` |
-| `Landmarks` `Coordstx` `Coordspx` | nothing yet — advisory, and labelled "channels only" |
+| `Presence` `Motion` (→ `temporal`), `Triggers` `Gestures` `Events` (→ `latches`), `Coordstx` `Coordspx` (→ `coords/world`, `coords/pixels` in all three streams), `Lmcoordstx` `Lmcoordspx` (→ the face's landmark halves) | the group COMP stops cooking entirely, via `allowCooking`. Its channels stay, holding their last value |
+| `Landmarks` `Triggers` `Motion` `Events` | nothing on their own — advisory, and the LABEL says "channels only". Closing that needs an exact channel-to-group map |
+
+**The stream toggles on the Sidecar page gate cooking too**, since 2026-08-21:
+`Streamhands`/`Streampose`/`Streamface` are launch flags for the sidecar AND
+`allowCooking` on the stream's child COMP. A disabled stream was still processing a
+full datagram of zeros every frame — measured at 0.25 ms for pose and 1.45 for face.
+The flag reaches the sidecar only on a restart; the freeze takes effect at once.
 
 A group COMP stops cooking when ALL of its toggles are off. **`latches` cooking
 keeps `temporal` cooking** whatever Presence and Motion say, because the latches are
@@ -497,6 +528,52 @@ geometry validates arithmetic and says nothing about how a hand sits.
 | `Twistrate` | deg/s | 90 | `hands_twist` magnitude for the twist events |
 | `Overlapthreshold` | 0..1 | 0.15 | bbox intersection fraction that counts as overlapping |
 | `Scalereset` | pulse | - | sets `hands_scale` to 1.0 at the current spread |
+
+### Screen space only — one toggle on the Vision page
+
+| parameter | type | default | what it does |
+|---|---|---|---|
+| `Screenspaceonly` | toggle | off | removes every RAW normalised channel that has a screen-space companion |
+
+On, each stream's output loses exactly the channels whose information is fully
+available in TouchDesigner's own spaces — `h0_wrist_x` goes and `h0_wrist_tx`/`_px`
+stay. Measured: hands 499 → 415, pose 275 → 199, face 1083 → 727, with the removed
+set equal to the delete list exactly and nothing else touched.
+
+It KEEPS every boolean, pulse, counter, confidence and **angle**. The rule is
+*remove the second copy of a number, never the only copy* — a yaw has no
+screen-space form and a confidence has no meaning in pixels, so dropping those
+would lose information rather than a duplicate.
+
+It ships OFF, and it is one Delete CHOP per stream sitting after `merge_out`, where
+nothing inside the COMP reads through it. Deleting channels is normally the silent
+failure this whole system is arranged to avoid (`DESIGN.md` 6.2); this is the one
+place it is the point.
+
+**Known gap.** 24 channels on the hands stream are normalised positions with no
+companion, so the toggle leaves them: `h{i}_palm_x/y`, `h{i}_pinch_x/y` and
+`h{i}_point_x/y` are derived POSITIONS and deserve `_tx`/`_ty` companions, while
+`h{i}_vel_x/y` is a rate and `h{i}_dir_x/y` a unit vector — a direction in world
+space is not the image-space direction, because y is scaled by the aspect. Giving
+the three derived positions companions is the obvious next step and is not done.
+
+### Face landmark coordinates — composed through the bounding box
+
+A face's landmark points are normalised to that face's BOUNDING BOX, not to the
+image (`normalizedPoints`, `DESIGN.md` 2.12), so they cannot take the image-space
+rule. They compose first:
+
+    image_x = bbox_x + point_x * bbox_w      image_y = bbox_y + point_y * bbox_h
+
+and then centre and scale like any other position. Written out, a landmark's world
+coordinate is
+
+    _tx = point_x * (bbox_w * K)  +  (bbox_x - 0.5) * K
+
+which is one Math CHOP with `gain` and `postoff` as expressions. Every point gets
+`_tx`/`_ty` and, with `Lmcoordspx` on, `_px`/`_py`. The RAW box-relative `_x`/`_y`
+stay — they are the right space for anything about a face's SHAPE rather than its
+position, and the box channels are on the wire so either form recovers the other.
 
 ### Page: Coords
 

@@ -60,13 +60,38 @@ filter that behaves like a fixed one and invites the conclusion that one-euro do
 not help. The default here is scaled for normalised units, and it is a GUESS -
 measuring per-joint jitter is what should set it (DESIGN.md 11).
 
-ONE FILTER PER STREAM, ONE SET OF CONTROLS. This builds a `filter` group inside
-EVERY stream under `/project1/vision` - hands, pose and face - and all of them read
-the same `Smoothing`, `Mincutoff` and `Beta` on the master COMP. Which channels get
-filtered is decided by `visionhands/spaces.py` rather than by a pattern here:
-positions, extents and angles are smoothed, and confidences, counters and flags are
-not - a smoothed confidence makes every gate that reads it lag behind the thing it
-gates.
+ONE OPERATOR, NOT FOUR, AND THAT IS THE WHOLE GROUP NOW. This used to be
+
+    in1 -> Select(smoothed) -> Filter -> Merge <- Select(everything else) -> out1
+
+and it is now `in1 -> Filter(scope=...) -> out1`. A CHOP's `scope` parameter names
+which channels the operator processes and passes every other one through
+BIT-EXACT - VERIFIED by lagging a scoped channel and comparing an unscoped one to
+the last bit. Two things follow, and the second matters more than the first:
+
+    MEASURED, per cook, with data flowing, BEFORE this change - the four-operator
+    form, summed over the group:
+
+        face   Select 0.1725 + Filter 0.0346 + Select 0.0105 + Merge 0.0299 = 0.2475
+        hands  0.1008 over 5 operators          pose  0.0897 over 5
+
+    The Select was the expensive one, and it was expensive for a stupid reason: its
+    `channames` carried 362 literal channel names, matched against every channel
+    every frame. What survives the change is the Filter CHOP alone. The figures
+    after it are in docs/JOURNAL.md and DESIGN.md 2.13, measured the same way.
+
+    ...and the SILENT FAILURE the old form invited is gone with it. Two Selects
+    merged back together had to partition the stream exactly, and four `sc_*`
+    channels once fell into neither list and left the COMP's output with no error
+    anywhere (DESIGN.md 2.11). There is no Select to get wrong now: a scoped
+    operator cannot drop a channel it was not asked about.
+
+Which channels get filtered is still decided by `visionhands/spaces.py` rather than
+by a pattern written here - positions, extents and angles are smoothed, and
+confidences, counters and flags are not, because a smoothed confidence makes every
+gate that reads it lag behind the thing it gates. `spaces.scope_pattern()` turns
+that list into a `scope` string and VERIFIES the string selects exactly the list
+before handing it over; if no pattern can, it returns the literal names.
 
 Three groups rather than one shared filter operator, deliberately: each stream
 arrives on its own port with its own time-slicing, and merging them into one filter
@@ -141,7 +166,48 @@ def onValuesChanged(changes):
 # should set them is per-joint jitter, which is unmeasured.
 FILTER_PARAMETERS = ("Smoothing", "Mincutoff", "Beta")
 
-ROW_Y = -2100
+# ---- layout -----------------------------------------------------------------
+# The group's position inside its stream comes from `visionhands/td_layout.py`,
+# which is the ONE table for it: this script and td_add_coords.py both used to
+# place their group at (-400, -300), directly on top of each other, and nothing
+# could notice. The positions INSIDE this group are here, next to the code that
+# builds them.
+COL_W = 200
+ROW_H = 150
+# in1, the filter, out1 - three operators on one row, and the notes above them.
+ORIGIN = (0, 0)
+NOTE_XY = (0, ROW_H)
+
+NOTES = """FILTER - the one-euro position filter, one operator.
+
+  in1 -> %(node)s -> out1
+
+%(node)s is a Filter CHOP at type=oneeuro with `scope` set to the channels that
+should be smoothed. Everything else passes through BIT-EXACT: `scope` restricts
+what the operator PROCESSES, not what it passes on.
+
+  scope       %(scope)s
+  smoothed    %(n_smoothed)d channels of %(n_total)d
+  cutoff      op.Vision.par.Mincutoff   (Hz, how hard a SLOW move is smoothed)
+  speedcoeff  op.Vision.par.Beta        (how much of a FAST move gets through)
+
+WHY ONE OPERATOR. This was Select -> Filter -> Merge <- Select. Two things were
+wrong with that. It cost 0.2475 ms per cook on the face stream, nearly all of it
+in a Select matching 362 literal channel names; and the two Selects had to
+partition the stream exactly, because they were merged back together - four sc_*
+channels once fell into neither and left the COMP's output with no error anywhere.
+A scoped operator cannot drop a channel it was not asked about.
+
+WHY IT MUST BE TIME-SLICED. The Filter CHOP is a silent passthrough on a
+non-time-sliced one-sample CHOP and works correctly on a time-sliced one. The
+input is time-sliced because the OSC In CHOP is. Do not turn that off.
+
+SMOOTHING OFF sets this operator's BYPASS flag, from filter_callbacks on the
+master COMP - a bit-exact passthrough that also stops it computing. `bypass` is an
+attribute, not a parameter, so nothing can bind an expression to it.
+
+Built by tools/td_add_filter.py. Edits here are overwritten on the next run."""
+
 
 
 def _attach_once(merge, node, drop_names=()):
@@ -205,8 +271,9 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "visionhands" or n.startswith("visionhands.")]:
         del sys.modules[stale]
-    from visionhands.spaces import passthrough_names, smoothed_names
+    from visionhands.spaces import passthrough_names, scope_pattern, smoothed_names
     from visionhands.streams import STREAM_NAMES
+    from visionhands.td_layout import master_xy, stream_xy
 
     master = op(MASTER_PATH)
     if master is None:
@@ -229,14 +296,15 @@ def main():
             continue
         built.append(_build_one(td, master, child, stream,
                                 smoothed_names(stream), passthrough_names(stream),
-                                failures))
+                                failures, scope_pattern(stream),
+                                stream_xy(GROUP)))
 
     # One DAT for all three groups. Beside the streams rather than inside one, so it
     # keeps working if any group is rebuilt without it - and because a single toggle
     # driving three groups has no business living in one of them.
     bypass_dat = master.op("filter_callbacks") or master.create(
         td.parameterexecuteDAT, "filter_callbacks")
-    bypass_dat.nodeX, bypass_dat.nodeY = -900, 550
+    bypass_dat.nodeX, bypass_dat.nodeY = master_xy("filter_callbacks")
     bypass_dat.text = BYPASS_CALLBACK % {
         "streams": list(STREAM_NAMES), "group": GROUP, "prefix": PREFIX,
         "node": PREFIX + "smooth"}
@@ -249,6 +317,11 @@ def main():
     for stream, arrived, produced, cost in built:
         print("   %-5s %3d channels in, %3d out, filter %.4f ms"
               % (stream, arrived, produced, cost))
+    print()
+    for stream in STREAM_NAMES:
+        pattern = scope_pattern(stream)
+        print("   %-5s scope %s" % (stream, pattern if len(pattern) < 60
+                                    else "%d literal names" % len(pattern.split())))
     print()
     print("   Smoothing=%s, Mincutoff=%.3f, Beta=%.3f - one set of controls on %s,"
           % (bool(master.par.Smoothing.eval()), master.par.Mincutoff.eval(),
@@ -286,6 +359,17 @@ def _clear_keeping_ports(td, group, ports):
     """
     kept = {}
     for child in list(group.children):
+        # TRAP: `child` may ALREADY BE GONE by the time this loop reaches it.
+        # Destroying a Script CHOP also destroys the callbacks DAT docked to it, so
+        # a snapshot of `children` taken before the loop can hold a reference to an
+        # operator a previous iteration removed - and touching it raises "Invalid OP
+        # object. The node this python object referenced has likely been deleted."
+        #
+        # MEASURED, twice, and the first time it was written off as MCP flakiness:
+        # it only started happening when `tmp_motion_callbacks` moved inside this
+        # group, and it left the group half-built at 5 operators of 74.
+        if not child.valid:
+            continue
         if child.name in ports:
             kept[child.name] = child
         else:
@@ -293,15 +377,16 @@ def _clear_keeping_ports(td, group, ports):
     return kept
 
 
-def _build_one(td, master, child, stream, smoothed, passthrough, failures):
+def _build_one(td, master, child, stream, smoothed, passthrough, failures, scope,
+               group_xy):
     """Build one stream's filter group. Returns (stream, chans in, chans out, ms).
 
-    The two Selects must PARTITION the stream exactly: they are merged back together
-    at the end, so a channel in neither list leaves the COMP's output entirely, with
-    no error anywhere. That happened - four `sc_*` status channels vanished this way
-    (DESIGN.md 2.11) - which is why the split comes from `visionhands/spaces.py` and
-    why the check at the bottom compares the output against the INPUT rather than
-    against the contract.
+    The check at the bottom compares the output against the INPUT rather than
+    against the contract, and it stays even though `scope` makes a dropped channel
+    structurally impossible now. It cost nothing and it is the check that caught
+    four `sc_*` channels leaving the network when the group was a pair of Selects
+    merged back together (DESIGN.md 2.11); a builder that stops asking is a builder
+    that will not notice the next time the shape changes.
     """
     source = child.op("in1")
     if source is None:
@@ -318,34 +403,25 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures):
     if group is None:
         group = child.create(td.baseCOMP, GROUP)
     kept = _clear_keeping_ports(td, group, ("in1", "out1"))
-    group.nodeX, group.nodeY = -400, ROW_Y
+    group.nodeX, group.nodeY = group_xy
     group.color = (0.35, 0.45, 0.55)
 
-    def make(kind, name, x, y=0):
-        node = group.create(kind, PREFIX + name)
-        node.nodeX, node.nodeY = x, y
-        return node
-
     group_in = kept.get("in1") or group.create(td.inCHOP, "in1")
-    group_in.nodeX, group_in.nodeY = -1600, 0
+    group_in.nodeX, group_in.nodeY = ORIGIN
     group.inputConnectors[0].connect(source)
 
-    # -- the input, split in two -------------------------------------------
-    raw = make(td.selectCHOP, "in", -1400)
-    raw.inputConnectors[0].connect(group_in)
-    raw.par.channames = " ".join(smoothed)
-    rest = make(td.selectCHOP, "rest", -1400, -150)
-    rest.inputConnectors[0].connect(group_in)
-    rest.par.channames = " ".join(passthrough)
-
-    # -- the filter, which is one operator ---------------------------------
-    smooth = make(td.filterCHOP, "smooth", -1200)
-    smooth.inputConnectors[0].connect(raw)
+    # -- the filter, which is the entire group -----------------------------
+    smooth = group.create(td.filterCHOP, PREFIX + "smooth")
+    smooth.nodeX, smooth.nodeY = ORIGIN[0] + COL_W, ORIGIN[1]
+    smooth.inputConnectors[0].connect(group_in)
     smooth.par.type = "oneeuro"
     # Time-sliced, which is the whole reason this works: the filter needs real
-    # slices to carry state across, and `raw` inherits time-slicing from the OSC In
-    # CHOP. On a non-time-sliced one-sample CHOP it is a silent passthrough.
+    # slices to carry state across, and the input inherits time-slicing from the OSC
+    # In CHOP. On a non-time-sliced one-sample CHOP it is a silent passthrough.
     smooth.par.timeslice = True
+    # WHICH channels, from spaces.py and verified there against the stream's own
+    # contract. Everything not in scope passes through bit-exact.
+    smooth.par.scope = scope
     smooth.par.cutoff.expr = MASTER_PAR % "Mincutoff"
     smooth.par.speedcoeff.expr = MASTER_PAR % "Beta"
     # `Smoothing` drives the BYPASS flag: a bit-exact passthrough that also stops
@@ -355,12 +431,16 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures):
     # settles from wherever it left off. It converges in a fraction of a second.
     smooth.bypass = not bool(master.par.Smoothing.eval())
 
-    out = make(td.mergeCHOP, "out", -800)
-    out.inputConnectors[0].connect(smooth)
-    out.inputConnectors[1].connect(rest)
     group_out = kept.get("out1") or group.create(td.outCHOP, "out1")
-    group_out.nodeX, group_out.nodeY = -600, 0
-    group_out.inputConnectors[0].connect(out)
+    group_out.nodeX, group_out.nodeY = ORIGIN[0] + 2 * COL_W, ORIGIN[1]
+    group_out.inputConnectors[0].connect(smooth)
+
+    # -- what this network is, beside the network --------------------------
+    note = group.create(td.textDAT, "notes")
+    note.nodeX, note.nodeY = NOTE_XY
+    note.text = NOTES % {"node": smooth.name, "scope": scope[:70],
+                         "n_smoothed": len(smoothed),
+                         "n_total": len(smoothed) + len(passthrough)}
 
     # -- verification -------------------------------------------------------
     group_in.cook(force=True)
@@ -370,19 +450,24 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures):
     dropped = sorted(set(arrived) - set(produced))
     if dropped:
         failures.append("%s: %d channel(s) entered the filter and did not leave: "
-                        "%r. Every channel this port carries has to be classified "
-                        "in visionhands/spaces.py."
-                        % (stream, len(dropped), dropped[:6]))
+                        "%r - which `scope` should make impossible, so the shape of "
+                        "this group has changed" % (stream, len(dropped), dropped[:6]))
     duplicated = len(produced) - len(set(produced))
     if duplicated:
-        failures.append("%s: %d duplicate channel(s) out of the filter - the two "
-                        "Selects overlap" % (stream, duplicated))
+        failures.append("%s: %d duplicate channel(s) out of the filter"
+                        % (stream, duplicated))
     if not smooth.isTimeSlice:
         failures.append("%s: %ssmooth is not time-sliced, so it is a silent "
                         "passthrough - see the docstring" % (stream, PREFIX))
-    for node in (raw, rest, smooth, out):
-        if node.errors():
-            failures.append("%s/%s: %s" % (stream, node.name, node.errors()))
+    # And the thing `scope` itself can get wrong: selecting the wrong SET. Read off
+    # the live operator rather than trusting the string that was written to it.
+    in_scope = smooth.numChans - len(passthrough)
+    if arrived and in_scope != len(smoothed):
+        failures.append("%s: the filter's scope covers %d channels, expected %d - "
+                        "spaces.scope_pattern() and the live contract disagree"
+                        % (stream, in_scope, len(smoothed)))
+    if smooth.errors():
+        failures.append("%s/%s: %s" % (stream, smooth.name, smooth.errors()))
 
     # -- into the stream's output ------------------------------------------
     # NOTHING is repointed at the filter here, and that is a deliberate change.

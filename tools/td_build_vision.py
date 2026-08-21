@@ -9,6 +9,7 @@
         td_add_derive.py    the stateless hand attributes
         td_add_temporal.py  presence, liveness, velocity  (hands)
         td_add_latches.py   the proximity latches         (hands)
+        td_add_screenspace.py  the Screen Space Only filter on each output
         td_add_groups.py    the Attributes page and the cook gating
       Idempotent: run any of them as often as you like.
 
@@ -244,6 +245,45 @@ def onExit():
     op("sidecar_control").module.stop()
 '''
 
+MASTER_NOTES = """VISION - one COMP around the three streams, and every control.
+
+%(ports)s
+  status                            the sidecar's own sc_* channels
+
+WHY ONE COMP. The filter and the coordinate spaces were built inside the hands COMP
+because hands came first, and neither is hand-specific: a body's joints and a face's
+bounding box want the same smoothing and the same conversion into TouchDesigner
+world and pixel space. Three copies of the Filter page, three Ortho Widths to keep
+in step and three Start buttons for one process would all have been wrong. So the
+parameters live HERE, once, and every stream reads them.
+
+HOW A NESTED OPERATOR REACHES THEM: op.Vision.par.Orthowidth, through this COMP's
+Global OP Shortcut, which is set by the builder BEFORE anything that writes such an
+expression. Not parent(2).par.X - a group is two levels down now and a relative
+reference would have to be counted per operator.
+
+AN OPERATOR OUTSIDE CANNOT WIRE TO A NESTED ONE, so each stream is exposed on its
+own output connector, in the order above. An expression can still reach inside:
+op('/project1/vision/hands')['h0_index_tip_tx'].
+
+THE SIX PAGES
+  Vision     resolutions, Orthowidth, Screenspaceonly
+  Sidecar    Start/Stop, slot assignment, the three stream toggles
+  Filter     Smoothing, Mincutoff, Beta        - one filter setting for all three
+  Advanced   debounce frames, velocity filter, speed floor
+  Tuning     the fifteen latch threshold pairs
+  Attributes the group toggles and the Verbosity presets
+
+THE STREAM TOGGLES DO TWO THINGS. They are LAUNCH FLAGS for the sidecar, read once
+when the process starts - hence "restart to apply" - and they also drive
+`allowCooking` on the stream's child COMP, which takes effect at once. A disabled
+stream keeps every channel it has, reading zero, because a channel that VANISHES
+breaks its consumers with no error anywhere (DESIGN.md 6.2).
+
+Built by tools/td_build_vision.py, then six more builders in the order its
+docstring lists. Every one is idempotent. Edits here are overwritten.
+"""
+
 PARENT_PATH = "/project1"
 COMP_NAME = "vision"
 # The Global OP Shortcut every nested expression uses. Capitalised because that is
@@ -297,7 +337,11 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "visionhands" or n.startswith("visionhands.")]:
         del sys.modules[stale]
+    # `td_layout` is every coordinate a MASTER-level operator gets. One table,
+    # because seven builders place operators in here and two of them once chose the
+    # same spot with nothing able to notice.
     from visionhands.streams import STATUS_PREFIX, port_for
+    from visionhands.td_layout import COL_W, master_xy, stream_row
 
     parent = op(PARENT_PATH)
     if parent is None:
@@ -325,11 +369,34 @@ def main():
     comp.nodeX, comp.nodeY = 250, 0
     comp.color = (0.25, 0.35, 0.45)
     # Everything inside is rebuilt by this script and the six that follow it, so
-    # clearing is what keeps them all idempotent. The STREAM CHILDREN are spared:
-    # destroying those would throw away the networks the other builders own, and
-    # they clear their own contents when they run (DESIGN.md 2.11 - destroying a
-    # group orphans its consumers).
-    kept = set(STREAM_NAMES)
+    # clearing is what keeps them all idempotent. Two kinds of child are spared.
+    #
+    # The STREAM CHILDREN, because destroying those would throw away the networks
+    # the other builders own, and they clear their own contents when they run
+    # (DESIGN.md 2.11 - destroying a group orphans its consumers).
+    #
+    # The OSC IN CHOPS, which is a fix rather than an optimisation: an OSC In CHOP
+    # only has the channels that have ARRIVED, so a fresh one starts empty and
+    # regains only what is being sent right now. MEASURED: rebuilding took the hands
+    # port from 141 channels to 137, because the four `sc_*` status channels come
+    # from the sidecar and no sidecar was running - and 137 is a plausible number
+    # that nothing complains about. Reusing the CHOP keeps whatever it has learned,
+    # and re-binding a port it already holds is not something to do for no reason.
+    #
+    # And THE OUT CHOPS, which is the same fix as `_clear_keeping_ports` in every
+    # group builder, applied one level up where it had been missed. An Out CHOP IS
+    # the COMP's output connector: destroying it disconnects whatever the PROJECT
+    # had wired to that output, and recreating it does not bring the wire back.
+    #
+    # MEASURED, on this project, by running this builder: three operators reading
+    # `vision` output 1 were silently orphaned - `select3`, `select4` and `select5`,
+    # feeding a live chain - and the only symptom was that the hands stream stopped
+    # cooking, because nothing was pulling it any more. `temporal` and `latches` kept
+    # cooking off their own clocks, so the COMP still looked busy. Nothing errored.
+    # This is precisely the failure DESIGN.md 2.11 records for group builders; the
+    # master had the same hole.
+    kept = (set(STREAM_NAMES) | {name + "_osc" for name in STREAM_NAMES}
+            | {"out%d" % (index + 1) for index in range(len(STREAM_NAMES))})
     for child in list(comp.children):
         if child.name not in kept:
             child.destroy()
@@ -375,11 +442,18 @@ def main():
     # has, reading zero, because a channel that vanishes breaks its consumers
     # silently (DESIGN.md 6.2).
     stream_pars = {}
+    # TWO effects since 2026-08-21, and the label has to say so. The flag reaches
+    # the sidecar only on a restart, but `tools/td_add_groups.py` also binds
+    # `allowCooking` on the stream's child COMP to this toggle, and THAT takes
+    # effect at once. So turning a stream off stops its network processing the zeros
+    # the sidecar still sends - which is the saving - and turning one on unfreezes
+    # the network immediately while the inference waits for a restart.
     for stream, label, default in (("hands", "Hands Stream", True),
                                    ("pose", "Body Pose Stream", False),
                                    ("face", "Face Stream", False)):
-        par = lifecycle.appendToggle("Stream" + stream,
-                                     label="%s (restart to apply)" % label)[0]
+        par = lifecycle.appendToggle(
+            "Stream" + stream,
+            label="%s (off freezes the network; restart to apply)" % label)[0]
         par.default = default
         stream_pars[stream] = par
     for name, parameter in [("Slotassign", par_slots)] + [
@@ -392,6 +466,17 @@ def main():
     lifecycle.appendPulse("Sidecarstatus", label="Print Status")
     par_pid = lifecycle.appendInt("Sidecarpid", label="Sidecar PID")[0]
     par_pid.readOnly = True
+
+    # The output shaping: what leaves the COMP, as opposed to what it computes.
+    # On the Vision page beside the resolutions, because it is a property of the
+    # coordinate contract rather than of the sidecar or of the attribute layer.
+    par_screen = page.appendToggle(
+        "Screenspaceonly", label="Screen Space Only (drop raw normalised)")[0]
+    # OFF. The raw normalised channels are what every existing project reads, and a
+    # toggle that ships ON would delete them out from under one.
+    par_screen.default = False
+    if "Screenspaceonly" not in previous:
+        par_screen.val = par_screen.default
 
     filter_page = _page(comp, "Filter")
     # The filter's own parameters live here, not in a stream, because ONE filter
@@ -441,29 +526,37 @@ def main():
     # -- the three streams -------------------------------------------------
     outputs = []
     for index, stream in enumerate(STREAM_NAMES):
-        row = -400 * index
+        row = stream_row(index)
         osc = comp.op(stream + "_osc")
         if osc is None:
             osc = comp.create(td.oscinCHOP, stream + "_osc")
-        osc.nodeX, osc.nodeY = -900, row
+        osc.nodeX, osc.nodeY = -4 * COL_W, row
         osc.par.port = port_for(stream, OSC_PORT)
         osc.par.active = True
 
         child = comp.op(stream)
         if child is None:
             child = comp.create(td.baseCOMP, stream)
-            # Only a fresh child gets its shell built here. An existing one already
+            # Only a fresh child gets its shell BUILT here. An existing one already
             # holds the networks the other six builders own, and rebuilding its
             # insides would silently discard them.
             _shell(td, child)
-        child.nodeX, child.nodeY = -600, row
+        # But the shell's POSITIONS are re-applied every run, on a fresh child and
+        # an existing one alike. Otherwise a layout change reaches new projects only
+        # - which is how the master and the streams ended up laid out to two
+        # different conventions at once.
+        _place_shell(td, child, stream)
+        child.nodeX, child.nodeY = -2 * COL_W, row
         child.color = (0.35, 0.45, 0.55)
         child.inputConnectors[0].connect(osc)
 
         out = comp.op("out%d" % (index + 1))
         if out is None:
             out = comp.create(td.outCHOP, "out%d" % (index + 1))
-        out.nodeX, out.nodeY = -300, row
+        out.nodeX, out.nodeY = COL_W, row
+        # REUSED, never recreated - see the `kept` set above. The connector index a
+        # project's wire is attached to follows these operators, so replacing one
+        # moves every output the project reads.
         # `outputConnectors[0]`, not the COMP: connect() takes an operator only
         # where it has one unambiguous output, which a base COMP does not.
         out.inputConnectors[0].connect(child.outputConnectors[0])
@@ -476,19 +569,19 @@ def main():
     # second READ of them, not a partition of the data path, which is the mistake
     # that once ate them silently.
     status = comp.create(td.selectCHOP, "status")
-    status.nodeX, status.nodeY = -600, 250
+    status.nodeX, status.nodeY = master_xy("status")
     status.inputConnectors[0].connect(comp.op("hands_osc"))
     status.par.channames = STATUS_PREFIX + "*"
 
     # -- sidecar lifecycle -------------------------------------------------
     control = comp.create(td.textDAT, "sidecar_control")
-    control.nodeX, control.nodeY = -900, 400
+    control.nodeX, control.nodeY = master_xy("sidecar_control")
     control.text = SIDECAR_CONTROL_SOURCE % {
         "python": SIDECAR_PYTHON, "repo": REPO_ROOT, "port": OSC_PORT,
         "comp": comp.path}
 
     callbacks = comp.create(td.parameterexecuteDAT, "sidecar_callbacks")
-    callbacks.nodeX, callbacks.nodeY = -650, 400
+    callbacks.nodeX, callbacks.nodeY = master_xy("sidecar_callbacks")
     callbacks.text = SIDECAR_CALLBACK_SOURCE
     callbacks.par.op = comp.path
     callbacks.par.pars = "Startsidecar Stopsidecar Sidecarstatus"
@@ -497,10 +590,18 @@ def main():
     callbacks.par.custom = True
 
     on_exit = comp.create(td.executeDAT, "sidecar_exit")
-    on_exit.nodeX, on_exit.nodeY = -400, 400
+    on_exit.nodeX, on_exit.nodeY = master_xy("sidecar_exit")
     on_exit.text = SIDECAR_EXIT_SOURCE
     on_exit.par.active = True
     on_exit.par.exit = True
+
+    notes = comp.create(td.textDAT, "notes")
+    notes.nodeX, notes.nodeY = master_xy("notes")
+    notes.text = MASTER_NOTES % {
+        "ports": "\n".join(
+            "  %-5s port %-6d -> %-5s -> out%d"
+            % (name, port_for(name, OSC_PORT), name, index + 1)
+            for index, name in enumerate(STREAM_NAMES))}
 
     # -- retire what this replaces ----------------------------------------
     # Last, and only now: everything above has to have worked first, or a
@@ -545,7 +646,7 @@ def main():
     print()
     print("   NEXT, in order: td_add_filter.py, td_add_coords.py,")
     print("   td_add_derive.py, td_add_temporal.py, td_add_latches.py,")
-    print("   td_add_groups.py")
+    print("   td_add_screenspace.py, td_add_groups.py")
     print()
     print("   Reference a fingertip as:  op('%s/hands')['h0_index_tip_tx']"
           % comp.path)
@@ -563,22 +664,75 @@ def _page(comp, name):
     return comp.appendCustomPage(name)
 
 
+STREAM_NOTES = """%(stream)s - one vision stream, from the port to the output.
+
+  in1 -> filter -> coords ----+
+                             |
+         derive_chop --------+-> merge_out -> screen_only -> out1
+         temporal -----------+
+         latches ------------+
+
+Row 0 is the DATA PATH; everything below it only reads the stream. That is why
+`filter` cannot be gated by allowCooking - freezing it would freeze every position
+rather than bypass the filter - while `coords`, `temporal` and `latches` can be.
+
+EACH CONSUMER STATES ITS OWN INPUT, and that is load-bearing. An earlier version
+had td_add_filter.py push a named list of consumers onto its output; two of the
+names had moved inside the `coords` group and `derive_chop` does not exist yet when
+the filter is built, so it wired itself to the RAW input and stayed there - every
+derived attribute computed on unsmoothed landmarks while the coordinate spaces used
+smoothed ones. Build order cannot be depended on; a consumer naming its own source
+can.
+
+merge_out IS THE ONLY JOIN, and a Merge CHOP accepts the same operator on any
+number of inputs, silently. The only symptom is the channel count - `filter` once
+reached three connections and put 274 duplicate channels on the output. Every
+builder attaches through `_attach_once`, which dedupes by OWNER OBJECT, because
+`.inputs` reports a group COMP as its inner `out1` and a name-keyed dedup collapsed
+two groups into one and dropped 168 channels.
+
+Built by tools/td_build_vision.py and six more builders. Edits here are overwritten.
+"""
+
+
+def _place_shell(td, child, stream):
+    """Re-apply the stream shell's positions, and its notes DAT. Every run.
+
+    Separate from `_shell` because that one only runs for a NEW stream: an existing
+    child already holds the networks six other builders own, so its INSIDES must not
+    be rebuilt - but its layout should still follow the current table.
+    """
+    from visionhands.td_layout import stream_xy
+
+    for name in ("in1", "merge_out", "out1"):
+        node = child.op(name)
+        if node is not None:
+            node.nodeX, node.nodeY = stream_xy(name)
+    notes = child.op("notes") or child.create(td.textDAT, "notes")
+    notes.nodeX, notes.nodeY = stream_xy("notes")
+    notes.text = STREAM_NOTES % {"stream": stream.upper()}
+
+
 def _shell(td, child):
     """The empty stream network: in1 -> merge_out -> out1.
 
     One Merge with one input today, so every group builder attaches itself to it
     rather than restructuring anything - the discipline that survived contact is
     `_attach_once`, and it needs a Merge to attach to.
+
+    `screen_only` is NOT built here: it belongs between `merge_out` and `out1` and
+    `tools/td_add_screenspace.py` owns it, so it survives this builder running again
+    on an existing stream - which is exactly when this function does not run at all.
+
+    Positions come from `_place_shell`, which the caller runs afterwards on a new
+    and an existing stream alike.
     """
     for existing in list(child.children):
         existing.destroy()
     chop_in = child.create(td.inCHOP, "in1")
-    chop_in.nodeX, chop_in.nodeY = -600, 0
     merge = child.create(td.mergeCHOP, "merge_out")
-    merge.nodeX, merge.nodeY = 450, 0
     merge.inputConnectors[0].connect(chop_in)
     chop_out = child.create(td.outCHOP, "out1")
-    chop_out.nodeX, chop_out.nodeY = 650, 0
     chop_out.inputConnectors[0].connect(merge)
 
 

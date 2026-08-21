@@ -4,14 +4,40 @@
 Paste into a Text DAT, Run Script. Idempotent.
 
 Adds `derive_chop` (a Script CHOP) and `derive_callbacks` (its DAT) inside
-/project1/visionhands, wired from the incoming OSC channels. The CHOP is a thin
-wrapper: it reads its input into a dict, calls `visionhands.derive.derive()`, and
-writes the result. All the arithmetic lives in the repo, where 36 tests assert it
-against synthetic hands (docs/ATTRIBUTES.md).
+/project1/vision/hands, reading the FILTERED landmarks. The CHOP is a thin wrapper:
+it reads its input into a dict, calls `visionhands.derive.derive()`, and writes the
+result. All the arithmetic lives in the repo, where 36 tests assert it against
+synthetic hands (docs/ATTRIBUTES.md).
 
 This is the stateless half. Velocity, filters, the Schmitt latches, edge pulses
 and debounce are native CHOPs, added separately - see the implementation section
 of docs/ATTRIBUTES.md for why memory stays out of Python.
+
+IT IS THE MOST EXPENSIVE SINGLE OPERATOR IN THE COMP, and the reason is worth
+knowing before editing the callback. MEASURED per cook at 87 output channels:
+
+    reading the input into a dict   0.0610 ms   (141 channels)
+    derive() itself                 0.0424
+    the eight Params reads          0.0136
+    the thirteen group toggles      0.0043
+    sorting the output names        0.0035
+    ------------------------------
+    accounted                       0.1248
+    the whole operator              0.2391
+
+Most of the 0.11 ms difference was `clear()` plus 87 `appendChan()` calls, every
+frame, to arrive at the identical 87 channels. MEASURED directly, in a scratch
+Script CHOP with the same 87 channels and 40 repetitions per cook:
+
+    clear() and 87 appendChan()              0.0681 ms
+    87 writes into existing channels         0.0070
+    the guard that decides between them      0.0041
+    ------------------------------
+    saved per cook                           0.0570
+
+The channel list is a pure function of which GROUPS are enabled, so it is cached on
+the operator and rebuilt only when it changes. The remaining ~0.05 ms of the gap is
+the Script CHOP's own framework overhead, which is not ours to remove.
 """
 
 import sys
@@ -68,6 +94,29 @@ def _groups(comp):
     return frozenset(enabled)
 
 
+# The channel names this operator built last, cached on the operator itself.
+#
+# WHY: rebuilding the channel list was the largest removable cost in this CHOP.
+# MEASURED, per cook, at 87 output channels: reading the input dict 0.0610 ms,
+# derive() itself 0.0424, the parameters 0.0179, the sort 0.0035 - and the whole
+# operator 0.2391. `clear()` plus 87 `appendChan()` calls accounts for 0.0681 of the
+# gap, measured directly; writing the values into channels that already exist costs
+# 0.0070, and the guard below 0.0041. So 0.0570 ms per cook, every frame, to arrive
+# at exactly the same 87 channels.
+#
+# The name list is a pure function of which GROUPS are enabled, so it changes only
+# when a toggle moves.
+#
+# Operator STORAGE rather than a module global: a scheduled callback in this project
+# has already been observed reaching a different module object for the same DAT, and
+# a stale cache here would write values onto the wrong channels.
+#
+# The property this depends on, MEASURED rather than assumed: a Script CHOP's
+# channels PERSIST between cooks. Only the first cook after a rebuild starts with
+# none, and `len(scriptOp.chans())` is how to tell - `numChans` raises mid-cook.
+_CACHE_KEY = "derive_channel_names"
+
+
 def onCook(scriptOp):
     # Not time-sliced. A Script CHOP defaults to Time Slice mode, where editing
     # numSamples is unsupported - TD warned about it on every cook - and where
@@ -76,8 +125,9 @@ def onCook(scriptOp):
     # the native latch bank downstream then sees a plain 1-sample CHOP with no
     # rate negotiation of its own to get wrong.
     scriptOp.isTimeSlice = False
-    scriptOp.clear()
     if not scriptOp.inputs:
+        scriptOp.clear()
+        scriptOp.store(_CACHE_KEY, ())
         return
     source = scriptOp.inputs[0]
     # One dict build per cook. 137 reads, which is the cheap part - the
@@ -97,9 +147,38 @@ def onCook(scriptOp):
         comp = scriptOp.parent()
     out = derive(values, _params(comp), _groups(comp))
 
-    scriptOp.numSamples = 1
-    for name in sorted(out):
-        scriptOp.appendChan(name)[0] = out[name]
+    names = tuple(sorted(out))
+    # The LIVE channel count as well as the cache: the cache says what WE built, the
+    # count says what the operator actually has, and they disagree whenever anything
+    # else cleared the CHOP - a recompile, a builder rebuild, or the first cook after
+    # either. A cache trusted alone would write 87 values onto zero channels.
+    #
+    # TRAP, measured: `scriptOp.numChans` RAISES inside onCook - "numChans is
+    # unavailable for this CHOP while it is cooking". `len(scriptOp.chans())` gives
+    # the same number and is available. Also measured, and the property this whole
+    # cache depends on: a Script CHOP's channels DO persist between cooks; only the
+    # first cook after a rebuild starts empty.
+    existing = scriptOp.chans()
+    if len(existing) != len(names) or scriptOp.fetch(_CACHE_KEY, None) != names:
+        scriptOp.clear()
+        scriptOp.numSamples = 1
+        for name in names:
+            scriptOp.appendChan(name)
+        built = tuple(chan.name for chan in scriptOp.chans())
+        if built != names:
+            # The zip below pairs by POSITION, so a channel order that does not
+            # match `names` would put one attribute's value in another's channel -
+            # plausible on screen and wrong (DESIGN.md 7). Checked here, in the
+            # rebuild path, which is the only place the pairing is established.
+            raise RuntimeError("derive_chop built %%r, expected %%r"
+                               %% (built[:3], names[:3]))
+        scriptOp.store(_CACHE_KEY, names)
+
+    # By position, against the list the channels were appended in and the check
+    # above confirmed. `chan.name` per channel would be 87 more calls into C++ for
+    # information we already have.
+    for name, chan in zip(names, scriptOp.chans()):
+        chan[0] = out[name]
 '''
 
 
@@ -161,6 +240,19 @@ def main():
 
     if REPO_ROOT not in sys.path:
         sys.path.append(REPO_ROOT)
+    # TouchDesigner caches our modules for the life of the process (DESIGN.md 2.11),
+    # and this builder is the one where that bites hardest: `visionhands.derive` is
+    # what the Script CHOP calls every cook, so an edited formula would be invisible
+    # until TouchDesigner was restarted. Safe to purge - pure Python with no C
+    # extension state, and the only thing holding a reference is the callbacks DAT,
+    # whose text this script rewrites anyway, which is what makes TD recompile it
+    # against the fresh import.
+    for stale in [n for n in list(sys.modules)
+                  if n == "visionhands" or n.startswith("visionhands.")]:
+        del sys.modules[stale]
+    # One layout table for every builder - two of them once placed their group on the
+    # same coordinate, and nothing could notice.
+    from visionhands.td_layout import stream_xy
 
     comp = op(COMP_PATH)
     if comp is None:
@@ -168,11 +260,11 @@ def main():
         return
 
     callbacks = comp.op("derive_callbacks") or comp.create(td.textDAT, "derive_callbacks")
-    callbacks.nodeX, callbacks.nodeY = -400, -800
+    callbacks.nodeX, callbacks.nodeY = stream_xy("derive_callbacks")
     callbacks.text = CALLBACK_SOURCE % {"repo": REPO_ROOT}
 
     chop = comp.op("derive_chop") or comp.create(td.scriptCHOP, "derive_chop")
-    chop.nodeX, chop.nodeY = -150, -800
+    chop.nodeX, chop.nodeY = stream_xy("derive_chop")
     chop.par.callbacks = callbacks.path
     # The raw OSC channels are the input; derive() needs the landmark positions.
     # The FILTERED stream, not the raw input, and this line is a bug fix. It used to

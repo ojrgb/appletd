@@ -207,8 +207,60 @@ WORKING = tuple(row[0] for row in LATCHES)
 THRESHOLD_DEFAULTS = None       # populated by main() from visionhands.tuning
 
 # Where the bank is laid out, below the derive Script CHOP at y = -800.
-ROW_Y = -1100
+# ---- layout -----------------------------------------------------------------
+# One place for every coordinate this script writes. The reason it is here rather
+# than scattered: these 52 operators were placed by a SINGLE running counter, so
+# each one went 200 further right whatever row it was on, and the network came out
+# 9,800 units wide with eight rows all starting somewhere different.
+#
+# One counter PER ROW is the change. Rows are ROW_Y - n * ROW_H, and every call
+# site below already passes one of those.
+ROW_Y = 0
 COLUMN_W = 200
+# 150, not 200: a CHOP node is 90 tall, and every row offset in this file is a
+# multiple of 150.
+ROW_H = 150
+IN_X = -COLUMN_W
+
+NOTES = """LATCHES - fifteen Schmitt triggers, their edge pulses and their counters.
+76 channels. Everything in here has MEMORY.
+
+  in1  the DERIVED attributes - the distances each latch compares
+  in2  `tmp_ready` from the temporal group: the debounced presence gate
+
+WHY TWO THRESHOLDS PER LATCH. A single one chatters: a distance sitting on the
+threshold flips the state every frame it wobbles, and every flip fires a start
+pulse and bumps a counter. Two thresholds - engage below `on`, release above
+`off`, with `off` > `on` - give a dead band, and inside it the state HOLDS. That
+recurrence is `state = engage OR (prev AND NOT release)`, which is the same shape
+the presence debounce in `temporal` uses.
+
+ROWS, top to bottom:
+
+  dist        the distance channels, fanned out one per latch row
+  gate        raw validity AND tmp_ready - so one low-confidence frame mid-pinch
+              no longer drops the state and fires a spurious release
+  on / off    the two threshold banks, refreshed from the Tuning page by
+              lat_threshold_callbacks (a threshold is a parameter; the Constant
+              CHOP holding it is not, so it has to be WRITTEN on change)
+  state       the recurrence, its Feedback, and the start/end edge pulses
+  counters    a Count per latch for starts and another for ends
+  publish     each bank renamed to its channel names
+  clock       a Cook Type = Always Null pulling all 76 terminal channels
+
+THE FAN-OUT NEEDS MORE THAN ONE SELECT. A Select CHOP emits a given source channel
+only ONCE, and these columns repeat: `h0_valid` gates six latches, and
+`h0_pinch_index` is the distance for both `pinch0` and `index0`, because the named
+gestures and the uniform trigger grid deliberately overlap. Asking one Select for a
+repeated channel does not error - it emits the unique set, silently, and the rename
+then maps each source to the first name in the list. So the fan is built as as many
+Selects as the deepest repeat, merged.
+
+A LATCH CANNOT BE VERIFIED FROM ONE FRAME. tools/td_verify_latches.py drives a
+generated sweep and checks counter DELTAS: fires minus releases must equal the
+number still engaged, for every row.
+
+Built by tools/td_add_latches.py. Edits here are overwritten on the next run."""
 
 
 def _threshold_page(comp, page_name="Tuning"):
@@ -520,6 +572,17 @@ def _clear_keeping_ports(td, group, ports):
     """
     kept = {}
     for child in list(group.children):
+        # TRAP: `child` may ALREADY BE GONE by the time this loop reaches it.
+        # Destroying a Script CHOP also destroys the callbacks DAT docked to it, so
+        # a snapshot of `children` taken before the loop can hold a reference to an
+        # operator a previous iteration removed - and touching it raises "Invalid OP
+        # object. The node this python object referenced has likely been deleted."
+        #
+        # MEASURED, twice, and the first time it was written off as MCP flakiness:
+        # it only started happening when `tmp_motion_callbacks` moved inside this
+        # group, and it left the group half-built at 5 operators of 74.
+        if not child.valid:
+            continue
         if child.name in ports:
             kept[child.name] = child
         else:
@@ -550,6 +613,7 @@ def main():
         del sys.modules[stale]
     # One table, shared with the tests. Its import-time self-check refuses a
     # threshold pair with no dead band, which is a build that would chatter.
+    from visionhands.td_layout import master_xy, stream_xy
     from visionhands.tuning import THRESHOLD_DEFAULTS as DEFAULTS
     THRESHOLD_DEFAULTS = DEFAULTS
 
@@ -572,7 +636,7 @@ def main():
     if group is None:
         group = comp.create(td.baseCOMP, GROUP)
     kept = _clear_keeping_ports(td, group, ("in1", "in2", "out1"))
-    group.nodeX, group.nodeY = -1100, -1500
+    group.nodeX, group.nodeY = stream_xy(GROUP)
     group.color = (0.5, 0.35, 0.45)
     removed = 0
     for child in list(comp.children):
@@ -589,12 +653,15 @@ def main():
         "%s=%.2f" % (n, float(getattr(master.par, n).eval()))
         for n in sorted(THRESHOLD_DEFAULTS)))
 
-    column = [0]
+    # One column counter PER ROW, keyed by the row's y - see the layout block at the
+    # top of this file for what a single shared counter did to this network.
+    columns = {}
 
     def make(kind, name, y=ROW_Y):
         node = group.create(kind, PREFIX + name)
-        node.nodeX, node.nodeY = -1400 + column[0] * COLUMN_W, y
-        column[0] += 1
+        index = columns.get(y, 0)
+        columns[y] = index + 1
+        node.nodeX, node.nodeY = index * COLUMN_W, y
         return node
 
     # TWO inputs. Input 0 is the derived attributes - the distances and validity
@@ -602,9 +669,9 @@ def main():
     # is what the gate ANDs in. Wired rather than looked up by name, so the
     # dependency is a line in the network.
     derived_in = kept.get("in1") or group.create(td.inCHOP, "in1")
-    derived_in.nodeX, derived_in.nodeY = -1600, ROW_Y
+    derived_in.nodeX, derived_in.nodeY = IN_X, ROW_Y
     ready_in = kept.get("in2") or group.create(td.inCHOP, "in2")
-    ready_in.nodeX, ready_in.nodeY = -1600, ROW_Y - 150
+    ready_in.nodeX, ready_in.nodeY = IN_X, ROW_Y - ROW_H
     group.inputConnectors[0].connect(source)
     ready_group = comp.op(READY_SOURCE)
     if ready_group is not None and len(ready_group.outputConnectors) > 1:
@@ -876,7 +943,14 @@ def main():
     # the top level. `lat_terminals` already merges everything the clock has to
     # pull, so it is exactly what should go out.
     group_out = kept.get("out1") or group.create(td.outCHOP, "out1")
-    group_out.nodeX, group_out.nodeY = 600, ROW_Y - 900
+    # Past the WIDEST row, computed rather than fixed: a hardcoded x sits on top of
+    # the network the next time a stage is added to the longest row.
+    group_out.nodeX, group_out.nodeY = ((max(columns.values()) + 1) * COLUMN_W,
+                                       ROW_Y - 900)
+
+    note = group.create(td.textDAT, "notes")
+    note.nodeX, note.nodeY = IN_X, ROW_Y + ROW_H
+    note.text = NOTES
     group_out.inputConnectors[0].connect(terminals)
 
     # WHAT IT COSTS, stated honestly: the clock pulls `derive_chop`, which is
@@ -896,7 +970,7 @@ def main():
     # stream would mean watching parameters that are not there.
     threshold_dat = master.op("lat_threshold_callbacks") or master.create(
         td.parameterexecuteDAT, "lat_threshold_callbacks")
-    threshold_dat.nodeX, threshold_dat.nodeY = -650, 700
+    threshold_dat.nodeX, threshold_dat.nodeY = master_xy("lat_threshold_callbacks")
     threshold_dat.text = THRESHOLD_CALLBACK % {
         "rows": [(row[3], row[4]) for row in LATCHES], "group": GROUP,
         "stream": comp.name}

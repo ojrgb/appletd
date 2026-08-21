@@ -2253,3 +2253,183 @@ Verified after both fixes: 499 channels, every probe channel present, no operato
 errors, re-running `td_add_filter` and `td_add_groups` changes nothing, and
 `td_verify_latches` reports ramp **+4** with fires - releases == engaged on all five
 rows.
+
+## Making it cheaper, and finding out that gating is not free
+
+*2026-08-21. The six-item pass the user asked for: bring the cook time down, gate
+what is left, use `scope` instead of Select+Merge, give the face landmarks world and
+pixel coordinates, add a screen-space-only toggle, and make the networks readable.*
+
+### The first thing built was an instrument, and it earned that immediately
+
+`cookTime` is a last-value gauge. This project has thrown away three separate sets
+of figures because of it, and I was about to produce a fourth. So the first thing
+this session built was `tools/td_profile.py`: samples every operator across 90
+frames from a scheduled callback, reports the delta in `totalCooks` alongside the
+median duration of the cooks that actually happened, and **discards the whole run if
+`seq` did not change.**
+
+It discarded its second run. The synthetic senders had expired — 200 cycles at 3
+seconds is ten minutes and I had been going longer than that — and every number in
+that run was the last value from whenever the stream stopped. Without the check I
+would have written those numbers into `DESIGN.md`.
+
+Building it also cost three of TouchDesigner's own traps: `totalCooks`, not
+`cookCount`, which does not exist; `td.run`, not `run`, which the MCP bridge's exec
+context does not have; and `op(path).module`, not `mod(path)`, for the same reason.
+The last one is the nasty one — **a scheduled string that raises NameError does so
+silently.** The schedule fired ninety times and the report saw zero samples.
+
+### `scope` is everything the user suspected, with one exception
+
+A CHOP's `scope` parameter does Select+op+Merge in one operator, and unscoped
+channels pass through bit-exact — verified by lagging a scoped channel and comparing
+an unscoped one for exact equality. Each `filter` group went from four working
+operators to one: **0.4380 ms to 0.1527 across the three streams**, and the failure
+mode that has cost this project the most time is now impossible rather than merely
+tested for. There is no Select whose pattern can miss a channel.
+
+The exception, found by trying fourteen operators rather than assuming: **`scope` on
+a Logic CHOP DELETES the unscoped channels.** Three in, two named, two out. Logic is
+what the latch bank and the presence debounce are built from, so that would have
+been an expensive assumption.
+
+And `^` does not exclude in `scope` any more than in `channames`, for the same
+reason: the terms are a union. `^a` alone does mean "everything but a" — but
+`^a ^b` is (all but a) OR (all but b), which is all of them. `* ^*_conf ^*_quality`
+scaled every channel including the two it named.
+
+### What replaced the long name lists
+
+`coords` could not use `scope` — a coordinate branch produces new channels alongside
+the originals, and `scope` modifies in place. But its Selects were carrying up to
+362 literal channel names, and that one Select cost 0.1725 ms per cook, more than
+the filter it fed.
+
+So `spaces.compact_pattern()`: given the wanted names, the universe they will be
+matched against, and some candidate patterns, it EXPANDS each candidate with
+`fnmatchcase` and returns it only on an exact match, falling back to the literal
+list. That is the part that makes a wildcard safe to attempt at all — `DESIGN.md`
+2.11 records twice that a wildcard cannot partition these channels, and both times
+the damage was silent. Now a pattern is checked before it is written.
+
+It needed one more measurement to be trustworthy: **TouchDesigner's matcher agrees
+with `fnmatchcase` on `*`, `?` and `[0-9]`**, verified by expanding the same
+patterns both ways. Which is what lets `f0_*_[0-9][0-9]_x` separate 87 landmark
+points from `f0_bbox_x` — every landmark name has a two-digit index and the box does
+not.
+
+### The face landmarks, and the operator that did the whole composition
+
+A face's points are normalised to its bounding box, so `_tx` needs
+`bbox_x + point_x * bbox_w` before the usual centre-and-scale. Written out that is
+`point * (bbox_w * K) + (bbox_x - 0.5) * K` — and a Math CHOP computes
+`(value + preoff) * gain + postoff`, measured. So `gain` and `postoff` as
+expressions do the whole two-step composition in one operator, evaluated once per
+cook. The alternative I nearly built was an Expression CHOP composing per channel:
+608 Python evaluations a frame on the main thread.
+
+I tried the obvious thing first — a Math CHOP multiplying the 87 landmark channels
+by the one `bbox_w` channel — and **it does not broadcast.** Two inputs of 2 and 1
+channels produced FOUR channels: the inputs concatenated, with the collision renamed
+`f0_bbox_w1`. It matches by name and there is no parameter to change that.
+
+Verifying it needed a synthetic face with real landmarks, and that turned out to be
+necessary rather than nice. With every point at zero, `_tx` reduces to the bounding
+box alone — a completely broken `point * bbox_w` term would have looked perfect. So
+`synth_face.py` grew a 76-point constellation: a hand-laid caricature with the head
+angles applied, which is enough to prove a channel is wired to the right name and
+moves when the head moves, and is not enough to tune anything against. It says so.
+
+### The number that did not go the way it was supposed to
+
+**Like for like, the COMP got 4% SLOWER: 1.6686 ms to 1.7381.**
+
+| change | before | after |
+|---|---|---|
+| the three filter groups | 0.4380 | 0.1527 |
+| `derive_chop` | 0.2815 | 0.2037 |
+| the three coords groups | 0.2941 | 0.6260 |
+
+The filter and the Script CHOP gave back 0.36 ms. Splitting `coords` into gateable
+halves cost 0.33 — eight extra COMP boundaries and an extra merge layer, paid
+whether anything is gated or not. And a frozen half still costs its channels at the
+merge, which is the point of it keeping them.
+
+I could have reported the 1.1367 ms of the configuration a project actually runs and
+called it a 32% improvement. It is a real number and it is the one that matters to a
+user, but it is not a like-for-like comparison and presenting it as one would be a
+lie by framing. **Gating is not free. It is right here anyway** — every
+configuration that runs has something switched off, and with the attribute layer off
+the COMP is 0.6031 ms with 29 of 287 operators cooking, which is the thing the
+toggles were for.
+
+One thing inside that regression was a straightforward mistake of mine. I had
+collapsed Select+Rename into a single Select doing both, on the assumption that
+fewer operators is cheaper. Measured in the live network: **0.0418 ms for a Select
+doing `channames` and a rename, against 0.0138 for the same Select doing only
+`channames`.** Moving the rename onto the Math CHOP that was already there took the
+pair from 0.0515 to 0.0335. My scratch-network benchmark had said all the variants
+were identical at 0.001 ms — because operators in a scratch COMP are not
+time-sliced, so it was measuring a different thing entirely. The live network is the
+only honest place to measure this.
+
+### Then the tidy-up found four real bugs
+
+Asked to lay the networks out properly, I put every coordinate in one table
+(`visionhands/td_layout.py`) with a test that nothing collides, and wrote
+`tools/td_verify_layout.py` to check the live network. It found, on the first run:
+
+- **`td_add_filter.py` and `td_add_coords.py` had both been placing their group at
+  (-400, -300)** — exactly on top of each other, for as long as both files existed.
+- **`temporal` and `latches` were 58 and 49 columns wide** because a single running
+  counter advanced for every operator whatever row it was on. One counter per row
+  makes them 22 and 21.
+- **Two operators called `tmp_motion_callbacks`**, one orphaned and one sitting
+  exactly on top of `tmp_held_prev`. Creating a Script CHOP auto-creates a docked
+  callbacks DAT, and the builder had been destroying TD's copy by guessing the name
+  it would collide into — a guess that stopped being right when the Script CHOP moved
+  into the group.
+- And once that DAT lived inside the group, **every "destroy each child" loop
+  started failing intermittently**, because destroying a Script CHOP destroys its
+  docked DAT too and the snapshot list still holds a reference. I had written the
+  first occurrence off as MCP flakiness. It was not. `child.valid` is the guard.
+
+### The one that could have cost somebody real work
+
+While re-running the chain I noticed the hands stream had **zero cooks** on `coords`
+and on `out1`, while `temporal` and `latches` kept cooking off their own clocks. So
+the COMP looked busy and a third of it was dead.
+
+`td_build_vision.py` destroys and recreates everything at the master level that is
+not a stream child — and that included `out1`, `out2` and `out3`, which ARE the
+COMP's output connectors. Every run of it silently disconnected whatever the project
+had wired to them. Three operators reading output 1 were orphaned, so nothing pulled
+the hands stream and it stopped cooking. Nothing errored, in TouchDesigner or in the
+builder.
+
+This is exactly the failure `_clear_keeping_ports` exists for in every group
+builder. The master had the same hole and nobody had looked. Fixed the same way —
+the Out CHOPs are reused, never replaced — and verified by running the builder again
+and checking all three external connections survive. I reconnected the three
+orphaned operators from their patterns (`*_tx`, `*_ty`, `*trigger*`, all
+unambiguously hands) and flagged it, because that repair is a judgement and the
+user's project is the user's.
+
+Two smaller ones came out of the same pass: `td_add_groups.py`'s frozen-channel
+check was comparing every gated group against the HANDS stream's output, which was
+correct until pose and face got gated groups and then reported four false failures;
+and `send_synthetic.py` was sending 137 channels where the sidecar sends 141,
+omitting the four `sc_*` channels — which are precisely the set that once vanished
+silently between the OSC In CHOP and the COMP output. It sends them now.
+
+### What I would want to know next
+
+The screen-space toggle leaves 24 channels behind, and they are the interesting
+ones: `h{i}_palm_x/y`, `h{i}_pinch_x/y` and `h{i}_point_x/y` are derived POSITIONS
+with no companion — they should have one. `h{i}_vel_x/y` and `h{i}_dir_x/y` need a
+different rule, because a rate and a unit vector do not transform like a point: a
+direction in world space is not the image-space direction, since y is scaled by the
+aspect. That is a real piece of design, not an oversight to sweep up.
+
+And the review gate is now SEVEN milestones unpaid.

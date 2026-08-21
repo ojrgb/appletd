@@ -736,3 +736,134 @@ existing C++ plugin pinning the frame rate at 50 fps - was presumably `Accurate`
 If `Fast` is cheap the whole question gets easier; if `Accurate` is what looks
 right, 10 fps may be the honest answer whatever the transport. Measure before
 building.
+
+## Step 10 — the optimisation and tidy pass — DONE 2026-08-21
+
+The six things the user asked for on 2026-08-21, in their order, and what each
+turned into. All figures from `tools/td_profile.py`, which is new and is the first
+honest instrument this project has had for cook time — it samples across frames
+from a scheduled callback and DISCARDS a run in which `seq` did not move.
+
+### 1. Cook time — 1.6686 ms measured, and the result is mixed
+
+`DESIGN.md` 2.14 has the whole table. The short version:
+
+| configuration | ms |
+|---|---|
+| before this phase | 1.6686 |
+| like for like now | 1.7381 |
+| what a project actually runs (hands, world only) | 1.1367 |
+| everything gated off except landmarks and coordinates | 0.6031 |
+
+**The like-for-like number went up 4%**, because making the coordinate spaces
+gateable cost 0.33 ms of COMP boundaries and merges while the filter and
+`derive_chop` changes gave back 0.36. Gating is not free. It is right here anyway,
+because the configurations a project runs all have something switched off — but
+"we made it faster" would be the wrong summary.
+
+### 2. `scope` instead of Select + Merge — DONE, and it is the one clear win
+
+Each `filter` group went from `in1 -> Select -> Filter -> Merge <- Select -> out1`
+to `in1 -> Filter(scope) -> out1`. **0.4380 ms -> 0.1527 across the three
+streams**, and the class of bug that has cost the most time here is now
+structurally impossible: there is no Select whose pattern can miss a channel.
+
+`scope` did NOT go into `coords`, because a coordinate branch produces NEW channels
+alongside the originals and `scope` modifies in place. What went in there instead
+was verified PATTERNS in place of literal name lists — `spaces.compact_pattern()`
+expands each candidate against the stream's own contract with `fnmatchcase` and
+returns the literal list unless the match is exact. No network in this COMP now
+carries a 362-name string.
+
+### 3. Gating — every expensive thing is now behind a toggle
+
+| toggle | freezes | measured saving |
+|---|---|---|
+| `Streamhands` / `Streampose` / `Streamface` | the whole stream COMP | pose 0.25, face 1.45 |
+| `Coordstx` / `Coordspx` | `coords/world`, `coords/pixels` | ~0.1 per stream |
+| `Lmcoordstx` / `Lmcoordspx` | `coords/lm_world`, `coords/lm_pixels` | **1.08** (face) |
+| `Presence` / `Motion` | `temporal` | 0.32 |
+| `Triggers` / `Gestures` / `Events` | `latches` | 0.26 |
+
+Proved by cook COUNT, never by duration: 29 of 287 operators cooking in the
+all-off configuration. `Coordspx`'s DEFAULT had to change from off to ON in the
+same edit — it used to gate nothing, so the pixel channels were always live, and a
+toggle that starts freezing them must default to not freezing.
+
+`derive_chop` is not gated and should not be: it feeds the latch bank. It was made
+cheaper instead — the channel list is a pure function of the enabled groups, so it
+is cached on the operator and rebuilt only when it changes. **0.2815 -> 0.2037.**
+
+### 4. Face landmarks get world and pixel coordinates — DONE
+
+All 174 points per face, composed through that face's own bounding box:
+
+    image_x = bbox_x + point_x * bbox_w    then the usual centre-and-scale
+
+folded into ONE Math CHOP per branch with `gain` and `postoff` as expressions,
+because a Math CHOP computes `(value + preoff) * gain + postoff` and an expression
+on a scalar parameter is evaluated once per cook. The alternative — an Expression
+CHOP composing per channel — would have been 608 Python evaluations a frame.
+
+The face stream went **387 -> 1083 channels**. It costs 1.08 ms with the world half
+on, which is why it has its own toggle rather than riding on `Coordstx`.
+
+`visionhands/synth_face.py` grew a full 76-point constellation to verify it, and
+that was necessary rather than nice: with landmarks at zero, `_tx` reduces to the
+bounding box alone and a broken `point * bbox_w` term looks perfect.
+
+### 5. `Screenspaceonly` — one toggle, one Delete CHOP per stream
+
+Between `merge_out` and `out1`, holding the exact list of channels that HAVE a
+screen-space companion (`spaces.companioned_names()`). On: hands 499 -> 415, pose
+275 -> 199, face 1083 -> 727, and the removed set equals the delete list exactly
+with zero collateral. Off: the operator is bypassed, bit-exact.
+
+A Delete CHOP and not a Select, because a Select needs the KEEP list and the
+stream's output carries 87 derived attributes, 27 temporal channels and 76 latch
+channels named by tables in three different builders.
+
+It keeps every boolean, counter, confidence and ANGLE — the rule is "remove the
+second copy of a number, never the only copy". **What it therefore does NOT remove,
+and this is a real gap:** 24 channels on the hands stream that are normalised
+positions with no companion at all — `h{i}_palm_x/y`, `h{i}_pinch_x/y`,
+`h{i}_point_x/y` (derived positions, which deserve companions), and
+`h{i}_vel_x/y`, `h{i}_dir_x/y` (a rate and a unit vector, which need different
+rules — a direction in world space is not the image-space direction, because y is
+scaled by the aspect). Giving the derived positions companions is the obvious next
+step and is not done.
+
+### 6. Text DATs and deliberate layout — DONE, and it found bugs
+
+Every network has a `notes` DAT explaining it, and every generated coordinate comes
+from `visionhands/td_layout.py` — one table, with a test asserting nothing collides.
+`tools/td_verify_layout.py` checks the LIVE network for overlaps, undocumented
+groups, ribbons and orphans, and it earned its keep on the first run:
+
+- `td_add_filter.py` and `td_add_coords.py` had both been placing their group at
+  **(-400, -300)**, exactly on top of each other, for as long as both existed.
+- `temporal` and `latches` were laid out by a single running column counter, so
+  every operator advanced one column whatever row it was on: **58 columns x 13 rows
+  and 49 x 7**. One counter per row makes them 22 x 11 and 21 x 8.
+- Two operators called `tmp_motion_callbacks` existed, one orphaned at the stream
+  level and one sitting exactly on top of `tmp_held_prev`, because creating a Script
+  CHOP auto-creates a docked callbacks DAT and the builder was destroying TD's copy
+  by guessing the name it would collide into.
+
+### And three bugs the pass turned up that were nothing to do with layout
+
+- **`td_build_vision.py` was destroying and recreating `out1`/`out2`/`out3`**, which
+  are the COMP's output connectors — so every rebuild silently disconnected whatever
+  the PROJECT had wired to them. It happened during this session: three operators
+  reading `vision` output 1 were orphaned, the hands stream stopped being pulled and
+  stopped cooking, and the only reason it was visible at all is that `temporal` and
+  `latches` kept cooking off their own clocks while `coords` and `out1` went to zero
+  cooks. Nothing errored. Fixed the same way the group builders were: the Out CHOPs
+  are reused, never replaced.
+- **`td_add_groups.py`'s frozen-channel check compared every gated group against the
+  HANDS stream's output**, which was correct while only hands had gated groups and
+  reported four false failures the moment pose and face got them.
+- **`tools/send_synthetic.py` was sending 137 channels where the sidecar sends 141**,
+  omitting the four `sc_*` status channels — which are exactly the set that once
+  vanished silently between the OSC In CHOP and the COMP output. It sends them now,
+  so a synthetic session exercises the whole contract.
