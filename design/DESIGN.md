@@ -1158,8 +1158,9 @@ another process publishing real Vision masks.
 | `seg_mask` | stat, coherent read, y-flip, `copyNumpyArray` | **0.0915 ms** median |
 | `seg_fit` | 512 × 384 → 1280 × 720, non-uniform, on the GPU | **0.0312 ms** |
 
-About **0.12 ms** for the whole mask path, against the 0.11 ms the single CHOP output
-costs. A numpy resize on the main thread instead of the Fit TOP would have been a
+About 0.12 ms for the whole mask path measured under a forced loop; **~0.3 ms in
+situ**, once it was cooking every frame - see §2.21, which is also where the reason it
+was not cooking at all lives. A numpy resize on the main thread instead of the Fit TOP would have been a
 1280 × 720 resample per frame, which is why the stretch is undone on the GPU.
 
 **`copyNumpyArray`, verified rather than assumed:**
@@ -1206,6 +1207,59 @@ ever, which looks exactly like a sidecar that failed to start. A file that has G
 left mapped on purpose — POSIX keeps it valid, and that is what lets a sidecar restart
 without faulting the reader. VERIFIED live: the writer killed and its buffer unlinked,
 the TOP kept showing its last frame with no error.
+
+### 2.21 An input-less Script TOP cooks ONCE — measured 2026-08-22
+
+The mask was black in TouchDesigner while the shared buffer held a perfectly good
+one: frame 666, 16,599 of 49,152 pixels lit, source geometry stated. Reading the
+buffer by hand from the callback's own module worked first time. The Script TOP was
+simply **not cooking**: `totalCooks` sat at **151 across many frames**, and the one
+cook it had done happened before the sidecar had created the file, so it published
+the blank and served that texture for ever.
+
+**A Script TOP with no input is never dirtied.** Nothing about the file changing is
+visible to TouchDesigner, so there is no dependency to invalidate it — and there is
+no Cook Type parameter on a Script TOP to override that with. Its whole parameter
+list is `aspect1 aspect2 callbacks chanmask fillmode filtertype format
+inputfiltertype modoutsidecook npasses outputaspect outputresolution parmcolorspace
+parmreferencewhite resmult resolutionh resolutionw setuppars` — there is nothing
+there to set.
+
+**This project had already recorded the same trap for a CHOP** — `docs/BUILD_PLAN.md`
+says an input-less Script CHOP "cooks once and freezes" when `CookLevel` is missing —
+and I did not connect it to the TOP. That is the second time in two days a finding
+already in these documents cost time again because it was filed under the operator
+family it was first seen in rather than under the behaviour.
+
+**The fix is a custom parameter whose value changes every frame**, which is what
+dirties an operator:
+
+    seg_mask.par.Tick.expr = "absTime.frame if op.Vision.par.Streamsegment else 0"
+
+VERIFIED both ways. With `Streamsegment` on, `totalCooks` climbs — 151 to 640 in a
+few seconds, `null5` from 3 to 103, and the reader appears in the callback's cache.
+With it off the expression goes constant, the operator stops being dirtied, and
+`totalCooks` settles. So the toggle genuinely stops the work, which is the gating
+`allowCooking` refused to give a bare operator (§2.20).
+
+**Cost, now that it cooks naturally rather than under a forced loop:**
+
+| operator | forced, tight loop | natural, per frame |
+|---|---|---|
+| `seg_mask` | 0.0915 ms | **0.2802 ms** |
+| `seg_fit` | 0.0312 ms | 0.0371 ms |
+| `outmask` | — | 0.0042 ms |
+
+Both are given because they measure different things and neither is the honest number
+on its own: the tight loop isolates the work, and the natural figure is a last-value
+wall-clock gauge that includes whatever else the frame was doing (§2.14 records that
+`cookTime` is wall-clock). Call the mask path **~0.3 ms in situ**.
+
+**And a diagnostic flaw of my own, worth the note.** The blank frame was 256x192 —
+which is exactly the size of a `fast` mask. So "the buffer has never been read" and
+"a real mask arrived" looked identical in the operator's resolution, and telling them
+apart meant running the callback's logic by hand. The blank is 16x16 now: a shape
+nothing else produces, so the question is answered at a glance.
 
 ## 3. Traps — all of these cost real time in the spike
 

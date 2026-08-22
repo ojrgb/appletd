@@ -79,10 +79,16 @@ from visionhands.maskbuf import MaskReader
 # dataclass. A module global is not saved, and is rebuilt on demand.
 _READERS = {}
 
-# What to publish before anything has been written. A defined black frame rather than
-# the Script TOP's 2x2 default, so a project wired to `outmask` has a sane image from
-# the first cook instead of something that changes shape when the sidecar starts.
-_BLANK = numpy.zeros((192, 256, 1), dtype=numpy.uint8)
+# What to publish before anything has been written. A defined frame rather than the
+# Script TOP's 2x2 default, so a project wired to `outmask` has a sane image from the
+# first cook instead of something that changes shape when the sidecar starts.
+#
+# 16x16, and the SIZE is the diagnostic. It used to be 256x192 - which is exactly the
+# size of a `fast` mask, so "the buffer has never been read" and "a real mask arrived"
+# looked identical in the operator's resolution. That cost real time on 2026-08-22:
+# the mask was black and the only way to tell which case it was involved running the
+# callback's own logic by hand. A shape nothing else produces answers it at a glance.
+_BLANK = numpy.zeros((16, 16, 1), dtype=numpy.uint8)
 
 
 def _reader(path):
@@ -112,15 +118,15 @@ def onCook(scriptOp):
     # write side are always wanted together, and two toggles a letter apart
     # (`Segment` and `Streamsegment`) would have been a trap of my own making.
     #
-    # Checked HERE and not by freezing the operator. MEASURED 2026-08-22:
-    # `allowCooking = False` raises "This flag can only be disabled for COMPs" on a
-    # Script TOP, so the gating pattern the CHOP groups use is simply not
-    # available to a bare operator. Wrapping these three in a base COMP just to get
-    # the flag would buy a COMP boundary and a second output connector to explain,
-    # for an operator that only cooks when something is looking at it anyway.
+    # WHAT ACTUALLY STOPS THE WORK is the `Tick` parameter, not this check - see the
+    # builder. `allowCooking = False` raises "This flag can only be disabled for
+    # COMPs" on a Script TOP (MEASURED), so the gating pattern the CHOP groups use is
+    # unavailable here; the Tick expression goes constant when this toggle is off,
+    # the operator stops being dirtied, and it stops cooking altogether. VERIFIED:
+    # totalCooks settles instead of climbing.
     #
-    # The toggle still DOES something: off releases the mmap, so the buffer's file
-    # handle is not held open by a project that is not using it.
+    # This branch is what runs on the ONE cook after the toggle changes, and its job
+    # is to release the mmap so a project not using the mask holds no file handle.
     if hasattr(comp.par, "Streamsegment") and not bool(comp.par.Streamsegment.eval()):
         reader = _READERS.pop(str(comp.par.Maskbuffer.eval()), None)
         if reader is not None:
@@ -279,6 +285,36 @@ def main():
                 child.destroy()
     _at(script, master_xy("seg_mask"), keep_layout, script_existed)
     script.par.callbacks = callbacks.path
+
+    # THE THING THAT MAKES IT COOK AT ALL, and it took a black mask to find.
+    #
+    # A Script TOP with NO INPUT is never dirtied, so TouchDesigner cooks it once and
+    # then serves that texture for ever. MEASURED 2026-08-22: `totalCooks` sat at 151
+    # across many frames while the buffer held a perfectly good mask, because the
+    # single cook had happened before the file existed and published the blank. There
+    # is no Cook Type parameter on a Script TOP to fix it with - the Common page has
+    # none. This project had already recorded the same trap for an input-less Script
+    # CHOP ("it cooks once and freezes", docs/BUILD_PLAN.md) and I did not connect it.
+    #
+    # A custom parameter whose VALUE CHANGES each frame is what dirties it. Gated on
+    # `Streamsegment` so the expression goes constant when the mask is off - which
+    # stops the cook entirely and is the gating `allowCooking` refused to give.
+    # VERIFIED both ways: cooks climb with it on, and settle with it off.
+    tick_page = None
+    for existing_page in script.customPages:
+        if existing_page.name == "Tick":
+            tick_page = existing_page
+            break
+    if tick_page is None:
+        tick_page = script.appendCustomPage("Tick")
+    # Append only what is absent: `append*` on an existing parameter resets it, and
+    # the reset fires a deferred callback that outlives any write-it-back fix
+    # (DESIGN.md 2.17).
+    if not hasattr(script.par, "Tick"):
+        tick_page.appendInt("Tick", label="Tick (drives the cook - do not set)")
+    script.par.Tick.expr = (
+        "absTime.frame if op.Vision.par.Streamsegment else 0")
+    script.par.Tick.readOnly = True
     # `mono8fixed`: one byte per pixel on the GPU, which is what a mask is. The
     # default rgba8fixed would carry four and copy three of them for nothing.
     script.par.format = "mono8fixed"
@@ -319,7 +355,9 @@ def main():
     out.inputConnectors[0].connect(fit_top)
 
     print("2. seg_mask -> seg_fit -> outmask")
-    print("   seg_mask format=mono8fixed, gated by `Segment` inside onCook")
+    print("   seg_mask format=mono8fixed, cooked by its `Tick` expression")
+    print("            (an input-less Script TOP is never dirtied on its own - "
+          "DESIGN.md 2.21)")
     print("   seg_fit  fit=fill, resolution from Masksourcew/h (%dx%d), bypass=%s"
           % (int(master.par.Masksourcew.eval()), int(master.par.Masksourceh.eval()),
              fit_top.bypass))

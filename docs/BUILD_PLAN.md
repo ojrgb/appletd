@@ -561,6 +561,13 @@ script, both the registry and the builders can import it.
   freezes. `td.noiseTOP` and friends ARE on the `td` module; `CookLevel` is not.
 - `appendChan()` outside `onCook` "causes random behavior" unless the operator is
   locked. Same for `copyNumpyArray`.
+- **An operator with NO INPUT is never dirtied, so it cooks once and then serves its
+  last result for ever.** True of a Script CHOP (below, via `CookLevel`) AND of a
+  Script TOP - which has no Cook Type parameter at all to fix it with. The cure is a
+  custom parameter whose value changes every frame, e.g. `absTime.frame`; gate the
+  expression on your enable toggle and the operator stops cooking when it is off.
+  Cost the project two separate afternoons because it was filed under CHOPs the first
+  time. DESIGN.md 2.21.
 - A DAT to CHOP takes its DAT by PARAMETER (`par.dat`), not by a wire - it has no
   CHOP input connector, so `inputConnectors[0]` raises IndexError.
 - Rename CHOP supports wildcard back-references (`*_lm08_*` to `*_index_tip_*`)
@@ -1469,3 +1476,31 @@ The live path. Everything here is tested with a fake source and a stand-in mask 
 506 tests, no camera - and the whole chain builds with zero failures. What has NOT
 been run is a real sidecar publishing real masks into TouchDesigner, because that
 needs the camera.
+
+## Step 19 — why the mask was black — DONE 2026-08-22
+
+Step 18 shipped the wiring untested on the live path, and the first thing the user
+tried came back black. The sidecar was blameless: the buffer held frame 666 with
+16,599 of 49,152 pixels lit and the source geometry stated, and reading it by hand
+from the callback's own module worked first time.
+
+**The Script TOP was not cooking at all.** `totalCooks` sat at 151 across many
+frames. An input-less Script TOP has no dependency to dirty it and no Cook Type
+parameter to override that with, so the single cook it had done - before the sidecar
+created the file - published the blank and it served that texture for ever.
+
+Fixed with a `Tick` parameter on the Script TOP:
+
+    absTime.frame if op.Vision.par.Streamsegment else 0
+
+Verified both directions: cooks climb with the toggle on, settle with it off. Which
+also gives `Streamsegment` real gating, the thing `allowCooking` refused a bare
+operator in step 17.
+
+**The blank is 16x16 now, not 256x192.** It was exactly the size of a `fast` mask, so
+"never read the buffer" and "read a real mask" were indistinguishable in the
+operator's resolution - which is what turned a five-minute diagnosis into a long one.
+
+The `CookLevel` note above already recorded this behaviour for an input-less Script
+CHOP. It cost time again because it was filed under the operator family it was first
+seen in rather than under the behaviour, so it now says both.

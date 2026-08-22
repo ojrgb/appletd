@@ -3018,3 +3018,53 @@ noisy the first time the two legitimately differ.
 The live path. 506 tests, a fake source, a stand-in mask, and the whole builder chain
 green - but no real sidecar has published a real mask into TouchDesigner, because that
 needs the camera and the camera needs asking for.
+
+## Why the mask was black, and a finding I had already written down
+
+Step 18 shipped the sidecar wiring with the live path untested - I said so in the
+commit and asked for the camera. The user ran it and got black.
+
+The sidecar was blameless. The buffer held frame 666, 16,599 of 49,152 pixels lit,
+source geometry stated, hard alpha exactly as `fast` should give. Reading it by hand
+from the Script TOP's own callback module worked first time and returned the mask.
+
+**The Script TOP was not cooking.** `totalCooks` sat at 151 across two calls seconds
+apart - hundreds of frames. An input-less Script TOP has no dependency that can dirty
+it, and there is no Cook Type parameter on one to override that with; its whole
+parameter list has nothing to set. So the single cook it had done - before the sidecar
+had created the file - published the blank, and it served that texture for ever.
+
+`docs/BUILD_PLAN.md` has said for weeks that an input-less Script **CHOP** "cooks once
+and freezes". I wrote that note. It cost time again because it was filed under the
+operator family it was first seen in rather than under the behaviour, and I went
+looking for a bug in the read path instead. It now says both, in the traps list where
+the next person will hit it.
+
+The fix is a parameter whose value changes every frame:
+
+    absTime.frame if op.Vision.par.Streamsegment else 0
+
+Verified both directions rather than one: cooks climb with the toggle on (151 to 640
+in seconds, `null5` 3 to 103, and the reader appears in the callback's cache), and
+settle with it off. That last half is a bonus - `Streamsegment` now genuinely stops
+the work, which is the gating `allowCooking` refused a bare operator two commits ago.
+
+### The part that was my own fault twice over
+
+The blank frame was 256x192. A `fast` mask is 256x192. So "never read the buffer" and
+"read a real mask" were **identical in the operator's resolution**, and there was no
+way to tell them apart without running the callback's logic by hand - which is exactly
+what I ended up doing. A five-minute diagnosis became a long one because I had chosen
+a placeholder that impersonates the real thing.
+
+It is 16x16 now: a shape nothing else in this path produces. The lesson is cheap and I
+would rather have it written down than remembered - **a placeholder should be
+recognisable as a placeholder.** Zero-filled data that is also the right SHAPE is a
+disguise.
+
+### On the cost, honestly
+
+Under a forced tight loop `seg_mask` was 0.0915 ms. Cooking naturally, its `cookTime`
+gauge reads 0.2802. Both are in DESIGN.md 2.21 because neither is the honest number
+alone: the loop isolates the work, the gauge is wall-clock and includes whatever else
+the frame was doing. The mask path is ~0.3 ms in situ.

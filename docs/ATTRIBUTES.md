@@ -1174,6 +1174,13 @@ is `fast` and not Vision's own default of `accurate`. `fast` is not simply a sma
 to match on both sides, not something a consumer of this COMP chooses. The sidecar
 writes there and the Script TOP reads there - the same arrangement `Oscport` has.
 
+**If the mask is black**, the first thing to check is that `seg_mask` is cooking:
+`op('/project1/vision/seg_mask').totalCooks` has to be CLIMBING. An input-less Script
+TOP is never dirtied on its own, so it is driven by a `Tick` parameter whose
+expression changes every frame - and that expression is gated on `Streamsegment`, so
+with the toggle off the operator correctly stops cooking altogether (`DESIGN.md` 2.21).
+A `seg_mask` that is 16x16 has never read the buffer; a real mask is 256x192 or larger.
+
 **To see the mask with no camera**, which is also how it was verified:
 
     ~/.venvs/visionhands/bin/python tools/segmentation_probe.py --write-only
