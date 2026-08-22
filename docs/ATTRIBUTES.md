@@ -814,7 +814,7 @@ moved to Advanced.
 |---|---|---|
 | `Active` | off | is the capture process running. Replaces the Start and Stop pulses |
 | `Restartcapture` | pulse | **Restart** — stop and start in one press |
-| `Capturestate` | READ-ONLY | `Running` / `Stopped` / `Requires Restart`, with a colour swatch beside it |
+| `Capturestate` | READ-ONLY | `Running` / `Stopped` / `Requires Restart` |
 | `Camera` | `(default)` | a MENU of the real devices. `(default)` lets the engine pick |
 | `Listcameras` | pulse | **Refresh Camera List** — re-enumerate and repopulate the menu |
 | `Streamhands` | on | run `VNDetectHumanHandPoseRequest` |
@@ -861,14 +861,23 @@ apply", and until now nothing told you when you had actually triggered that. It 
 a real twenty minutes: `Streamdepth` was switched on while the sidecar was already
 running, so the panel said depth was on and the process had never been asked for it.
 
-It is a colour SWATCH beside the word because a TouchDesigner parameter carries
-`style`, `enable` and `readOnly` and no colour of its own — an RGB parameter renders
-as a swatch, which is the only way to get colour into a parameter page from Python.
+There was an RGB swatch beside it for about ten minutes, to get real colour into a
+parameter page — a TouchDesigner parameter carries `style`, `enable` and `readOnly` and
+no colour of its own, so an RGB par rendered as a swatch is the only way. It went
+because the cost was three visible float fields and a meaningless label sitting next to
+a word that already said the thing.
 
 **It updates on changes and on button presses, not on a timer.** `pgrep` costs
 milliseconds — nothing on a click, rude every frame. So a process that dies on its own
 reads `Running` until something asks; `sc_uptime_s` freezing is the signal that catches
 that, and it is why that channel exists.
+
+**`Active` off reads `Stopped` immediately**, and getting that right needed `stop()` to
+WAIT for the process to go. SIGTERM is a request: the sidecar handles it by releasing
+the capture session properly, which takes a moment, so anything checking straight
+afterwards still sees the pid — and the light read `Running` in green with the toggle
+off. It is a bounded wait of up to 1 s on a button press, which is invisible, and it
+says so rather than assuming if a process outlives it.
 
 **`Active` is a COMMAND, not a reading.** The process can die on its own — a camera
 unplugged, a crash, a kill from a terminal — and the toggle would still read on.
