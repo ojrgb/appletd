@@ -66,8 +66,18 @@ STREAM_NAMES: Final[tuple[str, ...]] = (STREAM_HANDS, STREAM_POSE, STREAM_FACE)
 #     number, because a mask has nowhere to go on a UDP socket.
 REQUEST_SEGMENT: Final = "segment"
 
-# What `--streams` accepts. STREAM_NAMES plus the requests that have no port.
-REQUEST_NAMES: Final[tuple[str, ...]] = (*STREAM_NAMES, REQUEST_SEGMENT)
+# DEPTH, on the same terms and for the same reasons: a 518x392 fp16 map is 406 KB a
+# frame, so it goes through its own shared mmap and has no port either.
+#
+# It is the most expensive thing this project runs by a wide margin - MEASURED at
+# 23.00 ms a frame against hands' 3.41 (DESIGN.md 2.22) - so enabling it is a real
+# decision rather than a preference, and the label says so.
+REQUEST_DEPTH: Final = "depth"
+
+# What `--streams` accepts. STREAM_NAMES plus the requests that have no port, in the
+# order they RUN on the capture queue: the cheap ones a live project reads first.
+REQUEST_NAMES: Final[tuple[str, ...]] = (*STREAM_NAMES, REQUEST_SEGMENT,
+                                         REQUEST_DEPTH)
 
 # The segmentation quality levels, IN COST ORDER, and they live here rather than in
 # `segmentation.py` for the same reason the ports do: both sides of a boundary have
@@ -119,10 +129,10 @@ def port_for(stream: str, base_port: int = BASE_PORT) -> int:
               with no channels and no error.
     """
     if stream not in PORT_OFFSETS:
-        if stream == REQUEST_SEGMENT:
+        if stream in (REQUEST_SEGMENT, REQUEST_DEPTH):
             raise ValueError(
-                "%r has no UDP port - a segmentation mask goes through the shared "
-                "buffer, not over OSC (visionhands/maskbuf.py)" % (stream,))
+                "%r has no UDP port - it publishes an IMAGE through a shared buffer, "
+                "not channels over OSC (visionhands/maskbuf.py)" % (stream,))
         raise ValueError("unknown stream %r; known: %s"
                          % (stream, ", ".join(STREAM_NAMES)))
     return base_port + PORT_OFFSETS[stream]
@@ -229,7 +239,7 @@ def _self_check() -> None:
     for name in DEFAULT_STREAMS:
         if name not in REQUEST_NAMES:
             raise RuntimeError("%r is not in REQUEST_NAMES" % (name,))
-    if set(REQUEST_NAMES) - set(STREAM_NAMES) - {REQUEST_SEGMENT}:
+    if set(REQUEST_NAMES) - set(STREAM_NAMES) - {REQUEST_SEGMENT, REQUEST_DEPTH}:
         raise RuntimeError("a request without a port was added to REQUEST_NAMES "
                            "without teaching `port_for` to refuse it by name")
     if DEFAULT_SEGMENT_QUALITY not in SEGMENT_QUALITIES:

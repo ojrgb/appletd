@@ -207,6 +207,11 @@ def start():
         # like everything else here, so changing it needs a restart.
         argv += ["--mask-path", str(comp.par.Maskbuffer.eval()),
                  "--mask-quality", str(comp.par.Segquality.eval())]
+    if "depth" in streams:
+        argv += ["--depth-path", str(comp.par.Depthbuffer.eval())]
+        pins = str(comp.par.Depthpins.eval()).strip()
+        if pins:
+            argv += ["--depth-pins", pins]
     process = subprocess.Popen(
         argv, cwd=REPO_ROOT,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -222,6 +227,12 @@ def start():
     if "segment" in streams:
         print("[visionhands]   segment -> %%s  (a shared mmap, no port), quality %%s"
               %% (comp.par.Maskbuffer.eval(), comp.par.Segquality.eval()))
+    if "depth" in streams:
+        pins = str(comp.par.Depthpins.eval()).strip()
+        print("[visionhands]   depth   -> %%s  (a shared mmap, no port), %%s"
+              %% (comp.par.Depthbuffer.eval(),
+                  "%%d pin(s)" %% len(pins.split()) if pins else
+                  "NO PINS - the map is relative, bigger means nearer"))
     return process.pid
 
 
@@ -390,6 +401,11 @@ OTHER_BUILDERS_OWN = {
     "outmask": "td_add_segmentation.py",
     "seg_callbacks": "td_add_segmentation.py",
     "seg_par_callbacks": "td_add_segmentation.py",
+    "depth_map": "td_add_depth.py",
+    "depth_fit": "td_add_depth.py",
+    "outdepth": "td_add_depth.py",
+    "depth_callbacks": "td_add_depth.py",
+    "depth_par_callbacks": "td_add_depth.py",
 }
 # How a nested operator reaches a parameter on this COMP. Same form every builder
 # uses, and it is depth-independent - see the module docstring.
@@ -440,7 +456,7 @@ RETIRED_PAGES = ("Sidecar",)
 VISION_PAGE_ORDER = (
     "Active", "Camera", "Listcameras",
     "Streamhands", "Streampose", "Streamface", "Streamsegment", "Segquality",
-    "Slotassign",
+    "Streamdepth", "Slotassign",
     "Resw", "Resh", "Renderw", "Renderh", "Orthowidth",
     "Screenspaceonly", "Deleteempty", "Keeplayout",
 )
@@ -485,7 +501,7 @@ def main():
     # `td_layout` is every coordinate a MASTER-level operator gets. One table,
     # because seven builders place operators in here and two of them once chose the
     # same spot with nothing able to notice.
-    from visionhands.sidecar import DEFAULT_MASK_PATH
+    from visionhands.sidecar import DEFAULT_DEPTH_PATH, DEFAULT_MASK_PATH
     from visionhands.streams import (
         DEFAULT_SEGMENT_QUALITY,
         SEGMENT_QUALITIES,
@@ -647,7 +663,15 @@ def main():
                                    # `allowCooking` on a stream COMP, because
                                    # `allowCooking` cannot be disabled on anything
                                    # that is not a COMP (DESIGN.md 2.20).
-                                   ("segment", "Segmentation Mask", False)):
+                                   ("segment", "Segmentation Mask", False),
+                                   # DEPTH, and the label carries the cost because
+                                   # this one is in a class of its own: MEASURED at
+                                   # 23.00 ms a frame against hands' 3.41
+                                   # (DESIGN.md 2.22), which is most of a 30 fps
+                                   # frame interval on its own. It also needs a
+                                   # 47 MB model that is not in this repo - see
+                                   # docs/DEPTH.md and ./tools/fetch_models.sh.
+                                   ("depth", "Depth Map  (23 ms/frame)", False)):
         par = stream_pars.setdefault(stream, page.appendToggle(
             "Stream" + stream,
             label="%s (off freezes it; restart to apply)" % label)[0])
@@ -753,6 +777,20 @@ def main():
     # anything has read a mask.
     par_mask = advanced.appendStr("Maskbuffer", label="Mask Buffer Path")[0]
     par_mask.default = DEFAULT_MASK_PATH
+    par_depthbuf = advanced.appendStr("Depthbuffer",
+                                     label="Depth Buffer Path")[0]
+    par_depthbuf.default = DEFAULT_DEPTH_PATH
+    # THE PINS, and they are on Advanced with the paths rather than on the Depth page
+    # for one reason: they are a LAUNCH FLAG. The solve runs in the sidecar, on the
+    # capture thread, against the raw fp16 map - so changing them needs a restart, and
+    # a control that says "restart to apply" belongs beside the others that do.
+    #
+    # EMPTY BY DEFAULT, deliberately. Pins are measurements of a specific room; a
+    # default list would produce confident metres for somebody else's room, which is
+    # the most convincing wrong number this project could ship. docs/DEPTH.md.
+    par_pins = advanced.appendStr(
+        "Depthpins", label="Depth Pins  X,Y,M ... (restart to apply)")[0]
+    par_pins.default = ""
     par_pid.readOnly = True
 
     filter_page = _page(comp, "Filter")
@@ -777,6 +815,7 @@ def main():
              ("Orthowidth", par_ortho), ("Screenspaceonly", par_screen),
              ("Keeplayout", par_keep), ("Deleteempty", par_empty),
              ("Segquality", par_quality), ("Maskbuffer", par_mask),
+             ("Depthbuffer", par_depthbuf), ("Depthpins", par_pins),
              ("Oscport", par_port),
              ("Smoothing", par_smooth), ("Mincutoff", par_mincut),
              ("Beta", par_beta)]
@@ -960,19 +999,29 @@ def main():
     # script should assume, and reconnecting a consumer that was already on out1 to
     # out1 costs nothing. Guessing the mapping and getting it wrong would silently
     # leave a project reading a dead wire.
-    moved = []
-    for connector in comp.outputConnectors:
-        for connection in list(connector.connections):
-            moved.append((connection.owner, connection.index))
     retired = [name for name in ("out2", "out3")
                if comp.op(name) is not None and comp.op(name).valid]
-    for name in retired:
-        comp.op(name).destroy()
-    for owner, connector_index in moved:
-        if owner.valid:
-            owner.inputConnectors[connector_index].connect(comp.outputConnectors[0])
+    # GUARDED, and the guard is a bug fix. This block is a one-time migration from the
+    # three-output shape, and the capture-and-reconnect used to run unconditionally -
+    # harmless while the COMP had only CHOP outputs, and a hard error the moment it
+    # grew a TOP one: `outputConnectors[0]` is no longer necessarily the CHOP, so
+    # every TOP consumer got repointed at a CHOP output and TouchDesigner refused.
+    # MEASURED 2026-08-22, when `outdepth` was added and the whole chain stopped.
+    #
+    # Two lessons in one line: a migration that has already run should not keep
+    # running, and code that indexes a connector list has to say WHICH FAMILY it means.
     if retired:
-        print("   retired %s; %d consumer%s now on the single output: %s"
+        moved = []
+        for connector in comp.outputConnectors:
+            for connection in list(connector.connections):
+                moved.append((connection.owner, connection.index))
+        for name in retired:
+            comp.op(name).destroy()
+        for owner, connector_index in moved:
+            if owner.valid:
+                owner.inputConnectors[connector_index].connect(
+                    comp.outputConnectors[0])
+        print("   retired %s; %d consumer%s now on the single CHOP output: %s"
               % (", ".join(retired), len(moved), "" if len(moved) == 1 else "s",
                  ", ".join(sorted({owner.name for owner, _i in moved})) or "none"))
 

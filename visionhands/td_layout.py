@@ -114,6 +114,11 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "seg_mask": (COL_W, -2 * ROW_H),
     "seg_fit": (2 * COL_W, -2 * ROW_H),
     "outmask": (3 * COL_W, -2 * ROW_H),
+    # The depth map, its own row below the mask's. Same shape of path and the same
+    # reason it is not in the CHOP network: it arrives by shared memory.
+    "depth_map": (COL_W, -3 * ROW_H),
+    "depth_fit": (2 * COL_W, -3 * ROW_H),
+    "outdepth": (3 * COL_W, -3 * ROW_H),
     "status": (-3 * COL_W, MASTER_ROW_H),
     "sidecar_control": (-5 * COL_W, -4 * MASTER_ROW_H),
     "sidecar_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H),
@@ -124,6 +129,8 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "screenspace_callbacks": (-5 * COL_W, -4 * MASTER_ROW_H - 2 * ROW_H),
     "seg_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H - 3 * ROW_H),
     "seg_par_callbacks": (-1 * COL_W, -4 * MASTER_ROW_H - 3 * ROW_H),
+    "depth_callbacks": (-5 * COL_W, -4 * MASTER_ROW_H - 4 * ROW_H),
+    "depth_par_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H - 4 * ROW_H),
     "profiler": (-3 * COL_W, -4 * MASTER_ROW_H - 2 * ROW_H),
     "notes": (-5 * COL_W, MASTER_ROW_H),
 }

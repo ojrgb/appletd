@@ -779,12 +779,14 @@ to `/project1/vision`**, the master COMP, and every stream reads it:
                                   sc_* channels                       10 chans
 
   /tmp/...mask.buf ->  seg_mask  ->  seg_fit  ->  outmask     a TOP, 1280x720
+  /tmp/...depth.buf -> depth_map -> depth_fit -> outdepth    a TOP, 1280x720
 ```
 
-**TWO outputs, of two families.** `out1` is the single CHOP output and is what
-everything in this document is about. `outmask` is a TOP carrying the person
-segmentation mask, and it arrives by shared memory rather than over OSC - a different
-transport for a different kind of data. Nothing about the channel contract touches it.
+**THREE outputs, of two families.** `out1` is the single CHOP output and is what
+everything in this document is about. `outmask` and `outdepth` are TOPs - the person
+segmentation mask and the monocular depth map - and both arrive by shared memory rather
+than over OSC, a different transport for a different kind of data. Nothing about the
+channel contract touches either.
 
 **ONE output as of 2026-08-22**, not three. The three streams merge, `trim_empty`
 keeps only what the Attributes page has switched on, and that is the COMP's single
@@ -818,6 +820,7 @@ moved to Advanced.
 | `Streamface` | **off** | run `VNDetectFaceLandmarksRequest` |
 | `Streamsegment` | **off** | run `VNGeneratePersonSegmentationRequest`, and read its mask into `outmask` |
 | `Segquality` | `fast` | the mask's quality, and therefore its size and its cost |
+| `Streamdepth` | **off** | run Depth Anything V2 and read its map into `outdepth`. **23 ms a frame** - see `docs/DEPTH.md` |
 | `Slotassign` | on | h0 is the right hand, h1 the left (DESIGN.md 6.3) |
 | `Resw` `Resh` | 1280x720 | the SOURCE image, for pixel space |
 | `Renderw` `Renderh` | 1280x720 | the RENDER, for the world-space aspect |
@@ -1200,3 +1203,42 @@ something else that is also mask-shaped.
 writer publishing while the Script TOP is reading - holds the previous frame rather
 than blocking or blanking, which for a mask is the right answer and is why the
 transport never takes a lock (`DESIGN.md` 2.19, 2.20).
+
+
+## The depth map - a TOP, and metres if you pin it
+
+`docs/DEPTH.md` is the real documentation: first run, the model download, the pins and
+every caveat. This is the parameter table.
+
+| where | parameter | default | what it does |
+|---|---|---|---|
+| Vision | `Streamdepth` | **off** | run the model and read its map |
+| Advanced | `Depthbuffer` | `/tmp/visionhands_depth.buf` | the shared file. Must match on both sides |
+| Advanced | `Depthpins` | **empty** | `X,Y,METRES` triples. Empty = no metric claim |
+| Depth | `Depthfit` | on | stretch the map back to the camera's aspect |
+| Depth | `Depthfitalpha` `Depthfitbeta` | READ-ONLY | this frame's fit: `Z = 1/(alpha*d + beta)` |
+| Depth | `Depthfitpins` | READ-ONLY | how many pins the fit used |
+| Depth | `Depthfitresidual` | READ-ONLY | worst disagreement, in metres |
+| Depth | `Depthfitchecked` | READ-ONLY | **1 only when the residual means anything** |
+
+**Three things to know before using it.**
+
+**It costs 23 ms a frame** - MEASURED, against hands' 3.41 and a 30 fps frame interval
+of 33.3. It runs last on the capture queue, and with it on the camera will drop
+buffers. Depth at 30 fps and hands at 30 fps are not both available.
+
+**The map is INVERSE depth and bigger means NEARER**, and it is not comparable between
+frames: the model divides by the frame's own maximum, so a hand coming toward the lens
+darkens everything else. Build nothing on the raw numbers without pins.
+
+**`Depthfitresidual` lies when `Depthfitchecked` is 0.** Two pins always fit a line
+exactly, so with two the residual is 0.000 and checks nothing - which reads as the best
+possible news. Gate on `Depthfitchecked` first, then on the residual. Use three pins.
+
+**Converting to metres is yours to do**, and on purpose: `Z = 1/(alpha*d + beta)` from
+the two published numbers, in a GLSL TOP or an expression. Doing it here would mean
+choosing a clamp and a colour window for every project whether it wants metres or not.
+
+**The model is not in this repository.** 47 MB from Apple's Hugging Face account:
+`./tools/fetch_models.sh`, once. `docs/DEPTH.md` has the first-run walkthrough and the
+troubleshooting table.

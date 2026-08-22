@@ -82,8 +82,9 @@ from visionhands.face_types import (
     face_channel_names,
     face_channel_values,
 )
-from visionhands.maskbuf import MaskWriter
+from visionhands.maskbuf import DTYPE_F16, MaskWriter
 from visionhands.osc import datagram_socket, encode_channels
+from visionhands.pins import parse_pins
 from visionhands.pose_types import blank_pose_frame, pose_channel_names, pose_channel_values
 from visionhands.slots import SLOT_MODE_CHIRALITY, SLOT_MODES
 from visionhands.source import (
@@ -96,6 +97,7 @@ from visionhands.source import (
 from visionhands.streams import (
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
+    REQUEST_DEPTH,
     REQUEST_NAMES,
     REQUEST_SEGMENT,
     SEGMENT_QUALITIES,
@@ -115,6 +117,7 @@ if TYPE_CHECKING:
     # stay importable for `--list-cameras` and for the tests on a machine where the
     # request is not being used. The mask arrives as an argument, never constructed
     # here.
+    from visionhands.depth import DepthFrame
     from visionhands.segmentation import MaskImage
 
 # Where TouchDesigner's OSC In CHOP listens. Loopback only: this stream is
@@ -134,6 +137,11 @@ DEFAULT_PORT = 10000
 # It has to MATCH `Maskbuffer` on the TouchDesigner side. One default in each place
 # and a parameter on both, which is the same arrangement the OSC port has.
 DEFAULT_MASK_PATH = "/tmp/visionhands_mask.buf"
+
+# The depth map's own buffer. A SECOND file rather than a second slot in the first
+# one: the two are different sizes, different dtypes and different cadences, and a
+# consumer wanting only the mask should not be mapping 406 KB of depth to get it.
+DEFAULT_DEPTH_PATH = "/tmp/visionhands_depth.buf"
 
 # How often to send, independent of camera delivery.
 #
@@ -178,7 +186,11 @@ class Sidecar:
                  slot_mode: str = SLOT_MODE_CHIRALITY,
                  streams: tuple[str, ...] = DEFAULT_STREAMS,
                  mask_path: str = DEFAULT_MASK_PATH,
-                 mask_quality: str = DEFAULT_SEGMENT_QUALITY) -> None:
+                 mask_quality: str = DEFAULT_SEGMENT_QUALITY,
+                 depth_path: str = DEFAULT_DEPTH_PATH,
+                 depth_pins: str = "",
+                 depth_drop_m: float = 0.5,
+                 depth_compute: str = "all") -> None:
         """`source` is injectable so the send path can be tested with no camera.
 
         Defaulting to InProcessSource keeps the production path a one-liner; a
@@ -205,10 +217,26 @@ class Sidecar:
         self.mask_quality = mask_quality
         self._mask_writer: MaskWriter | None = None
         self.n_masks_written = 0
+        # DEPTH's buffer, on the same terms as the mask's. The PINS are parsed here,
+        # at construction, so a typo is a startup error rather than a wrong number on
+        # screen all session - `pins.parse_pins` raises with which pin and why.
+        #
+        # An EMPTY pin list is a legitimate configuration and not an error: it means
+        # "publish the raw map, make no metric claim". A default pin list would be
+        # measurements of somebody else's room, which is the most convincing wrong
+        # number this project could ship. docs/DEPTH.md says so at length.
+        self.depth_path = depth_path
+        self.depth_pins = parse_pins(depth_pins) if depth_pins.strip() else ()
+        self.depth_drop_m = depth_drop_m
+        self._depth_writer: MaskWriter | None = None
+        self.n_depth_written = 0
         self.source = source if source is not None else InProcessSource(
             camera_name=camera_name, slot_mode=slot_mode, streams=streams,
             on_mask=self._write_mask if REQUEST_SEGMENT in streams else None,
-            mask_quality=mask_quality)
+            mask_quality=mask_quality,
+            on_depth=self._write_depth if REQUEST_DEPTH in streams else None,
+            depth_pins=self.depth_pins, depth_drop_m=depth_drop_m,
+            depth_compute=depth_compute)
         # A source can implement one stream and not the other. Asked once, here,
         # rather than per send: with no pose support the pose bundle is sent from
         # a blank frame, which is the same zeros a disabled stream sends.
@@ -277,6 +305,36 @@ class Sidecar:
                      source=self._source_px())
         self.n_masks_written += 1
 
+    def _write_depth(self, frame: DepthFrame) -> None:
+        """Publish one depth map, with this frame's affine fit riding in the aux block.
+
+        Thread: THE CAPTURE QUEUE, from the engine's `_publish_depth`. Same contract as
+                `_write_mask` - one writer, one thread, no lock, and `stop()` stops the
+                source before it closes anything.
+        Why the fit travels WITH the pixels: it is solved from THIS frame and is
+                meaningless against any other (visionhands/pins.py). Sending it
+                separately - a second channel, a parameter - would let a consumer pair
+                a map with a neighbouring frame's scale and get a plausible wrong
+                metric depth, which is exactly the failure the whole module exists to
+                remove.
+        """
+        writer = self._depth_writer
+        if writer is None:
+            # fp16, and the dtype is not a detail: the model's output has ~7,300
+            # distinct values in a typical frame (MEASURED) and reading it as 8-bit
+            # would throw that away twice over. DESIGN.md 2.22.
+            writer = MaskWriter(self.depth_path, frame.width, frame.height,
+                                dtype=DTYPE_F16)
+            self._depth_writer = writer
+            print("depth buffer %s: %dx%d fp16, %d bytes, %d pin%s"
+                  % (self.depth_path, frame.width, frame.height, writer.capacity,
+                     len(self.depth_pins), "" if len(self.depth_pins) == 1 else "s"),
+                  flush=True)
+        writer.write(frame.pixels, width=frame.width, height=frame.height,
+                     timestamp=frame.captured_at, source=self._source_px(),
+                     aux=frame.fit.pack())
+        self.n_depth_written += 1
+
     def _source_px(self) -> tuple[int, int]:
         """What the camera actually delivered, or (0, 0) for "not stated".
 
@@ -330,14 +388,16 @@ class Sidecar:
             # the socket and the buffer must still be released, and the original
             # exception must still be the one that propagates.
             try:
-                writer = self._mask_writer
-                if writer is not None:
-                    self._mask_writer = None
-                    # `close`, NOT `unlink`. A reader inside TouchDesigner may still
-                    # hold the mapping, and on POSIX that keeps working after the
-                    # file goes - so leaving the file is what lets TD show the last
-                    # mask instead of going black the instant the sidecar exits.
-                    writer.close()
+                # Both buffers, each guarded, so one that will not close cannot keep
+                # the other open. `close`, NOT `unlink`: a reader inside TouchDesigner
+                # may still hold the mapping, and on POSIX that keeps working after the
+                # file goes - so leaving the files is what lets TD show the last mask
+                # and the last depth map instead of going black the instant we exit.
+                for attribute in ("_mask_writer", "_depth_writer"):
+                    writer = getattr(self, attribute, None)
+                    if writer is not None:
+                        setattr(self, attribute, None)
+                        writer.close()
             finally:
                 self.socket.close()
 
@@ -711,6 +771,27 @@ def main(argv: list[str] | None = None) -> int:
                              "accurate 30.73 at 2016x1512 - and all of it lands on "
                              "the same serial queue as hands' 3.41 ms. `accurate` "
                              "cannot hold 30 fps. (default: %(default)s)")
+    parser.add_argument("--depth-path", default=DEFAULT_DEPTH_PATH,
+                        help="where `depth` publishes its fp16 map, as a shared mmap. "
+                             "Must match `Depthbuffer` on the TouchDesigner side. "
+                             "(default: %(default)s)")
+    parser.add_argument("--depth-pins", default="", metavar="X,Y,M X,Y,M ...",
+                        help="points of KNOWN distance, as normalised x,y and metres, "
+                             "which turn the model's relative output into metres. "
+                             "Two minimum, THREE to survive somebody standing in "
+                             "front of one - and with two the residual is always "
+                             "0.000 and checks nothing. Empty means no metric claim, "
+                             "which is the honest default for a room nobody has "
+                             "measured. See docs/DEPTH.md")
+    parser.add_argument("--depth-drop", type=float, default=0.5, metavar="M",
+                        help="with 3+ pins, ignore one disagreeing by more than this "
+                             "many metres - a pin someone has walked in front of "
+                             "reads their chest. (default: %(default)s)")
+    parser.add_argument("--depth-compute", default="all",
+                        choices=("all", "cpu", "gpu", "ane"),
+                        help="Core ML compute units. `all` lets it use the Neural "
+                             "Engine, which is where this model wants to be. "
+                             "(default: %(default)s)")
     parser.add_argument("--parent-pid", type=int, default=None,
                         help="exit when this pid does. Pass os.getpid() from a "
                              "TouchDesigner launcher so a TD crash cannot leave "
@@ -736,7 +817,10 @@ def main(argv: list[str] | None = None) -> int:
     sidecar = Sidecar(host=args.host, port=args.port, send_fps=args.fps,
                       camera_name=args.camera, parent_pid=args.parent_pid,
                       slot_mode=args.slots, streams=streams,
-                      mask_path=args.mask_path, mask_quality=args.mask_quality)
+                      mask_path=args.mask_path, mask_quality=args.mask_quality,
+                      depth_path=args.depth_path, depth_pins=args.depth_pins,
+                      depth_drop_m=args.depth_drop,
+                      depth_compute=args.depth_compute)
 
     def handle_signal(signum: int, frame: FrameType | None) -> None:
         # Only sets a flag. Doing the teardown here would run camera shutdown

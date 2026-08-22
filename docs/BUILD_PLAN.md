@@ -1512,3 +1512,80 @@ operator's resolution - which is what turned a five-minute diagnosis into a long
 The `CookLevel` note above already recorded this behaviour for an input-less Script
 CHOP. It cost time again because it was filed under the operator family it was first
 seen in rather than under the behaviour, so it now says both.
+
+## Step 20 — depth, with pins — DONE 2026-08-22
+
+Depth Anything V2 Small through Core ML, in the sidecar, with its own TOP output and
+the pin-based metric correction ported from `apple-vision-examples/examples/depth`.
+`docs/DEPTH.md` is the user-facing guide; `DESIGN.md` 2.22 has the measurements.
+
+### The shape
+
+    visionhands/depth.py    the VNCoreMLRequest, the .mlpackage -> .mlmodelc compile,
+                            and the fp16 extraction. Imports Core ML; imports no
+                            TouchDesigner and lets no pyobjc object escape the queue
+    visionhands/pins.py     the affine solve. numpy only - no Vision, no Core ML, no
+                            maskbuf - which is why it has 31 tests and no fixtures
+    engine.py               `depth_detector` + `on_depth`, `_publish_depth` LAST
+    sidecar.py              a SECOND MaskWriter, and the pins parsed at construction
+    tools/td_add_depth.py   depth_map (Script TOP) -> depth_fit -> outdepth
+
+`pins.py` is a separate module from `depth.py` for one reason: every metric number a
+user sees comes out of it, and separating it from the framework code is what makes it
+testable against a synthetic frame whose true alpha and beta are known. The solve
+recovers both to 1e-6.
+
+### Shipping a model we do not own
+
+47 MB of weights from Apple's Hugging Face account. `models/` is gitignored,
+`./tools/fetch_models.sh` fetches it with `curl` - no account, no token, no
+`huggingface_hub` dependency - and `resolve_model` raises naming the script and
+`docs/DEPTH.md` rather than letting Core ML report a missing file. An `.mlpackage` is a
+DIRECTORY, so the script builds the tree Core ML expects rather than unpacking an
+archive. `pyobjc-framework-CoreML` went into requirements.txt as a hard requirement,
+because a framework that only surfaces when somebody flips a toggle is the worst place
+to discover a dependency.
+
+`tools/depth_probe.py` is the first thing to run after fetching: it runs the model over
+the fixture, publishes through the real shared buffer, reads it back in a second
+process, and reports the three numbers that matter - inference, distinct levels, and
+the fit.
+
+### fp16 all the way through
+
+The model's output is `OneComponent16Half` with ~7,300 distinct values per frame.
+`maskbuf` gained an fp16 dtype and a 32-byte AUX block rather than the map being
+narrowed on the way out - reading it as 8-bit would have quantised the pin solve to a
+sixth of its precision. The header went from 64 bytes to 128 and VERSION to 2, so a
+stale buffer fails loudly and the message names the file to delete.
+
+`copyNumpyArray` REFUSES float16, so the Script TOP widens to float32 - 406 KB in, 812
+KB out, 0.2911 ms measured for the whole read/flip/widen/copy.
+
+### The residual that lies, and it appeared on the first run
+
+**Two pins always fit a line exactly, so with two the residual is 0.000 and checks
+nothing.** That is the most convincing wrong number in the whole system, and the very
+first real run produced it - the fixture is a person filling the frame, so one of three
+default pins is occluded every frame and the fit falls back to two. `Solve` carries
+`residual_is_a_check`, the note says so in words, and `Depthfitchecked` publishes it.
+
+### Two bugs this found in existing code
+
+**`td_build_vision.py`'s out2/out3 migration was running unconditionally.** Harmless
+while the COMP had only CHOP outputs; a hard error the moment it grew a TOP one, because
+`outputConnectors[0]` is no longer necessarily the CHOP and every TOP consumer got
+repointed at it. The whole chain stopped. Guarded now: a migration that has already run
+should not keep running, and code indexing a connector list has to say which family it
+means.
+
+**A 0x0 frame printed Fortran.** `numpy.median` of an empty slice is nan, and a nan
+reaches `polyfit` as an illegal LAPACK argument written straight to stderr - `On entry
+to DLASCL, parameter number 4 had an illegal value`, not an exception. Refused before
+sampling now.
+
+### Not done
+
+Live camera verification. Everything here is fixture replay and a writer in a second
+process; the TD side was verified against real model output flowing through the real
+buffer, but no sidecar has yet run depth off the camera - that needs asking for it.

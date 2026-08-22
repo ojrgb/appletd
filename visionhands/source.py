@@ -44,6 +44,7 @@ from visionhands.slots import SLOT_MODE_CHIRALITY
 from visionhands.streams import (
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
+    REQUEST_DEPTH,
     REQUEST_SEGMENT,
     STREAM_FACE,
     STREAM_HANDS,
@@ -55,7 +56,15 @@ if TYPE_CHECKING:
     # Type-checking only: these imports do NOT execute at runtime, so the module
     # keeps its property of being importable with no pyobjc present, while mypy
     # still gets the real types instead of a pile of `# type: ignore`.
+    from visionhands.depth import DepthFrame
     from visionhands.engine import HandEngine
+
+    # `pins` imports numpy AT MODULE SCOPE, and this module promises to be importable
+    # with neither pyobjc nor numpy present - `visionhands/__init__.py` says the core
+    # layer needs no numpy and `test_boundaries.py` enforces it. So the type comes in
+    # here and the VALUE is passed straight through without this module ever touching
+    # it. That is the same reason `HandEngine` is a TYPE_CHECKING import.
+    from visionhands.pins import Pin
     from visionhands.segmentation import MaskImage
 
 # Frames whose seq is 0 have never been published: `blank_frame()` uses 0 and the
@@ -327,7 +336,11 @@ class InProcessSource:
                  slot_mode: str = SLOT_MODE_CHIRALITY,
                  streams: tuple[str, ...] = DEFAULT_STREAMS,
                  on_mask: Callable[[MaskImage], None] | None = None,
-                 mask_quality: str = DEFAULT_SEGMENT_QUALITY) -> None:
+                 mask_quality: str = DEFAULT_SEGMENT_QUALITY,
+                 on_depth: Callable[[DepthFrame], None] | None = None,
+                 depth_pins: tuple[Pin, ...] = (),
+                 depth_drop_m: float = 0.5,
+                 depth_compute: str = "all") -> None:
         """`streams` is which Vision requests to run - see visionhands/streams.py.
 
         Read once, here, because it is a launch flag: the sidecar is started with
@@ -349,6 +362,15 @@ class InProcessSource:
         # `balanced` gives can ask for it; the default should not spend a third of
         # the frame budget without being asked.
         self._mask_quality = mask_quality
+        # DEPTH's destination and its configuration. The PINS live here rather than in
+        # the detector's defaults because they are a property of the ROOM, not of the
+        # model - and a default pin list that silently produced metres for somebody
+        # else's room would be the most convincing wrong number in the project. An
+        # empty tuple means "no metric claim", which `pins.py` reports as such.
+        self._on_depth = on_depth
+        self._depth_pins = depth_pins
+        self._depth_drop_m = depth_drop_m
+        self._depth_compute = depth_compute
         self.box = LatestFrameBox()
         # Always constructed, even with pose disabled, so `latest_pose()` has the
         # full fixed shape to publish from the first tick. A disabled stream sends
@@ -422,6 +444,22 @@ class InProcessSource:
                     from visionhands.segmentation import SegmentationDetector
                     seg_detector = SegmentationDetector(self._mask_quality)
 
+            depth_detector = None
+            if REQUEST_DEPTH in self._streams:
+                if self._on_depth is None:
+                    self._retained_errors.append(
+                        "depth was requested but no map destination was given, so "
+                        "the request was not built")
+                else:
+                    # Built HERE, inside the lifecycle lock and before the engine, so
+                    # a missing model - which is the first thing a new clone hits -
+                    # raises on THIS thread with no camera open. The message names
+                    # tools/fetch_models.sh; depth.py owns that wording.
+                    from visionhands.depth import DepthDetector
+                    depth_detector = DepthDetector(
+                        pins=self._depth_pins, drop_m=self._depth_drop_m,
+                        compute=self._depth_compute)
+
             engine = HandEngine(
                 on_frame=self.box.publish,
                 hands=STREAM_HANDS in self._streams,
@@ -431,6 +469,8 @@ class InProcessSource:
                 on_face=self.face_box.publish if face_detector is not None else None,
                 segmentation_detector=seg_detector,
                 on_mask=self._on_mask if seg_detector is not None else None,
+                depth_detector=depth_detector,
+                on_depth=self._on_depth if depth_detector is not None else None,
                 camera_name=self._camera_name or DEFAULT_CAMERA_NAME,
                 width_px=self._width_px or DEFAULT_WIDTH_PX,
                 height_px=self._height_px or DEFAULT_HEIGHT_PX,

@@ -9,3 +9,8 @@ pyobjc-framework-Vision==12.2.2
 pyobjc-framework-Quartz==12.2.2
 pyobjc-framework-AVFoundation==12.2.2
 pyobjc-framework-libdispatch==12.2.2
+# Core ML, for the depth stream. Only `visionhands/depth.py` imports it, so a machine
+# that never enables depth never loads it - but it is a HARD requirement rather than an
+# extra, because a missing framework that only surfaces when somebody flips a toggle is
+# the worst place to discover a dependency. docs/DEPTH.md
+pyobjc-framework-CoreML==12.2.2

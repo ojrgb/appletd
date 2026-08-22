@@ -16,6 +16,7 @@ from visionhands.streams import (
     BASE_PORT,
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
+    REQUEST_DEPTH,
     REQUEST_NAMES,
     REQUEST_SEGMENT,
     SEGMENT_QUALITIES,
@@ -116,6 +117,23 @@ def test_format_and_parse_round_trip() -> None:
         assert parse_streams(format_streams(streams)) == streams
 
 
+def test_depth_is_a_request_with_no_port_either() -> None:
+    """A 518x392 fp16 map is 406 KB a frame. Same reasoning as the mask, and the same
+    refusal - by name, saying where the image actually goes."""
+    assert REQUEST_DEPTH in REQUEST_NAMES
+    assert REQUEST_DEPTH not in STREAM_NAMES
+    assert parse_streams("depth,hands") == (STREAM_HANDS, REQUEST_DEPTH)
+    with pytest.raises(ValueError, match="has no UDP port"):
+        port_for(REQUEST_DEPTH)
+
+
+def test_depth_runs_after_everything_else() -> None:
+    """MEASURED at 23.00 ms a frame against hands' 3.41 (DESIGN.md 2.22), so it is
+    last on the queue and last in REQUEST_NAMES - which is the same order. Everything
+    a live project reads is published before depth starts."""
+    assert REQUEST_NAMES[-1] == REQUEST_DEPTH
+
+
 def test_segment_is_a_request_with_no_port() -> None:
     """It runs on the same camera and the same serial queue as the others, so it
     needs a launch flag - but a 197 KB mask has nowhere to go on a UDP socket, so it
@@ -133,7 +151,7 @@ def test_the_portless_requests_sort_after_the_ported_ones() -> None:
     rename live channels. Also the order the requests run in on the capture queue:
     hands first, because that is what a live project is reading."""
     assert REQUEST_NAMES[:len(STREAM_NAMES)] == STREAM_NAMES
-    assert REQUEST_NAMES[len(STREAM_NAMES):] == (REQUEST_SEGMENT,)
+    assert REQUEST_NAMES[len(STREAM_NAMES):] == (REQUEST_SEGMENT, REQUEST_DEPTH)
 
 
 def test_the_quality_levels_are_in_cost_order_and_the_default_is_the_cheapest() -> None:
@@ -153,7 +171,7 @@ def test_the_status_channels_are_named_and_ordered() -> None:
     start, which is what these channels are for. The ORDER is the port order followed
     by the portless requests, and reordering it would rename live channels."""
     assert status_channel_names() == ("sc_uptime_s", "sc_hands", "sc_pose", "sc_face",
-                                     "sc_segment")
+                                     "sc_segment", "sc_depth")
 
 
 def test_status_values_line_up_with_status_names() -> None:
@@ -168,6 +186,7 @@ def test_status_values_line_up_with_status_names() -> None:
     assert reading["sc_hands"] == 0.0
     assert reading["sc_face"] == 0.0
     assert reading["sc_segment"] == 0.0
+    assert reading["sc_depth"] == 0.0
 
 
 def test_a_stream_that_did_not_start_reads_zero() -> None:

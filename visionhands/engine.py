@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     # the camera and knows nothing about which extra requests it is carrying
     # beyond the two attributes below - `source.py` constructs the detector and
     # passes it in (DESIGN.md 6.4).
+    from visionhands.depth import DepthDetector, DepthFrame
     from visionhands.face import FaceDetector
     from visionhands.face_types import FaceFrame
     from visionhands.pose import PoseDetector
@@ -707,7 +708,9 @@ class HandEngine:
                  face_detector: FaceDetector | None = None,
                  on_face: Callable[[FaceFrame], None] | None = None,
                  segmentation_detector: SegmentationDetector | None = None,
-                 on_mask: Callable[[MaskImage], None] | None = None) -> None:
+                 on_mask: Callable[[MaskImage], None] | None = None,
+                 depth_detector: DepthDetector | None = None,
+                 on_depth: Callable[[DepthFrame], None] | None = None) -> None:
         """seq_start continues an existing frame sequence rather than restarting it.
 
         Why it exists: this engine keeps `_seq` monotonic across its OWN
@@ -735,6 +738,11 @@ class HandEngine:
         # with nowhere to publish would burn 2.21 ms a frame and drop the result.
         self._seg_detector = segmentation_detector if on_mask is not None else None
         self._on_mask = on_mask if segmentation_detector is not None else None
+        # DEPTH, on the same both-or-neither terms. It is the expensive one: 23.00 ms
+        # a frame MEASURED, against hands' 3.41 (DESIGN.md 2.22), so a detector with
+        # nowhere to publish would spend most of the frame budget and drop the result.
+        self._depth_detector = depth_detector if on_depth is not None else None
+        self._on_depth = on_depth if depth_detector is not None else None
         self._camera_name = camera_name
         self._requested_px = (width_px, height_px)
         self._max_hands = max_hands
@@ -753,7 +761,8 @@ class HandEngine:
         # the blank frame's zeros (DESIGN.md 6.4).
         self._detector = HandDetector(max_hands=max_hands) if hands else None
         if (self._detector is None and self._pose_detector is None
-                and self._face_detector is None and self._seg_detector is None):
+                and self._face_detector is None and self._seg_detector is None
+                and self._depth_detector is None):
             # A camera with no requests: it would open the device, hold it, warm
             # up, deliver frames and do nothing with any of them - while every
             # channel read zero and nothing said why. Refused on the caller's
@@ -795,6 +804,9 @@ class HandEngine:
         self.n_mask_published = 0   # masks that reached on_mask
         self.n_mask_dropped = 0     # masks lost to a Vision or a buffer failure
         self.n_mask_empty = 0       # frames Vision found nobody in
+        self.n_depth_published = 0  # depth maps that reached on_depth
+        self.n_depth_dropped = 0    # maps lost to a Core ML or a buffer failure
+        self.n_depth_empty = 0      # frames Core ML returned no observation for
         self.n_face_dropped = 0     # buffers where the face request failed
         self.delivered_px: tuple[int, int] | None = None
         self.errors: list[str] = []
@@ -883,6 +895,13 @@ class HandEngine:
         # AVFoundation starts dropping buffers, which shows up as n_delivered
         # falling rather than as anything failing - the same trade pose has.
         self._publish_mask(sample_buffer, captured_at)
+        # LAST of all, and it is in a class of its own for cost: 23.00 ms MEASURED,
+        # which on a 30 fps camera is most of the frame interval on its own. With
+        # depth enabled AVFoundation will drop buffers - visible as `n_delivered`
+        # falling, not as anything failing - and that is the honest trade rather than
+        # a fault. Everything a live project reads has already been published by the
+        # time this runs.
+        self._publish_depth(sample_buffer, captured_at)
 
     def _publish_hands(self, sample_buffer: ObjCObject, captured_at: float) -> None:
         """Run the hand request and publish the result. Never raises.
@@ -1040,10 +1059,51 @@ class HandEngine:
         self.n_mask_published += 1
         self._mark_first_frame()
 
+    def _publish_depth(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+        """Run the depth model on the buffer the other streams have already seen.
+
+        Thread: capture queue only, from `_on_sample_buffer`.
+        Contract: shares `_seq` and `captured_at` with the other streams' frames from
+                  the same buffer, so a consumer can align a depth map with the hands
+                  in it - which is the whole reason this is one process (DESIGN.md 6.4).
+        Never raises: a depth fault costs depth and nothing else.
+        """
+        detector, publish = self._depth_detector, self._on_depth
+        if detector is None or publish is None:
+            return
+        try:
+            frame = detector.detect_sample_buffer(sample_buffer, self._seq,
+                                                  captured_at)
+        except EngineError as exc:
+            self.n_depth_dropped += 1
+            self._record_error("depth: %s" % exc)
+            return
+        if frame is None:
+            # Core ML returned no observation. Not published: the previous map stays
+            # in the buffer, the same hold-the-last-frame policy the mask uses.
+            self.n_depth_empty += 1
+            return
+        try:
+            publish(frame)
+        except (OSError, ValueError) as exc:
+            self.n_depth_dropped += 1
+            self._record_error("depth publish: %s" % exc)
+            return
+        self.n_depth_published += 1
+        self._mark_first_frame()
+
     # -- calling-thread side ------------------------------------------------
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def depth_inference_ms(self) -> float:
+        """Cost of the most recent DEPTH inference, or 0.0 with it off. A gauge, not a
+        measurement - DESIGN.md 3 forbids quoting live-camera timings. Benchmark by
+        replaying the fixture, which is where the 23.00 ms figure comes from."""
+        detector = self._depth_detector
+        return detector.last_inference_ms if detector is not None else 0.0
 
     @property
     def mask_inference_ms(self) -> float:

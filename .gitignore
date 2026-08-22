@@ -14,3 +14,9 @@ temp/
 # deliberately, once it has been confirmed to show hands only.
 fixtures/*.mp4
 fixtures/*.mov
+
+# Core ML models are NOT committed. 47 MB of weights that Apple already hosts would be
+# in every clone, every fork and every diff of a repository meant to be cloned. Get
+# them with `./tools/fetch_models.sh`; docs/DEPTH.md is the first-run guide. The
+# compiled .mlmodelc is a build product of the .mlpackage and is equally not ours.
+models/

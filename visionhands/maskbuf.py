@@ -73,7 +73,7 @@ import os
 import struct
 import threading
 from types import TracebackType
-from typing import TYPE_CHECKING, Final, NamedTuple
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 if TYPE_CHECKING:
     # Type-checking only, so the runtime import path stays numpy-free - see
@@ -86,11 +86,28 @@ if TYPE_CHECKING:
 # builds; a native-order header is a bug that only appears on the machine you do
 # not own.
 _HEADER: Final = struct.Struct("<IIIIIIIIQdII")
-HEADER_BYTES: Final = 64
-assert _HEADER.size <= HEADER_BYTES, "header fields must fit the reserved 64"
+# 32 bytes of AUX, written and read verbatim, whose meaning belongs to whoever put
+# it there. It exists because the depth stream needs to publish the affine fit it
+# solved for this frame - alpha, beta and how well the pins agreed - and that has to
+# travel WITH the pixels it describes or it is describing a different frame
+# (visionhands/pins.py packs it, visionhands/depth.py hands it over).
+#
+# Opaque on purpose. This module moves an image and says nothing about what the
+# numbers mean; teaching it about metres would make it a depth transport rather than
+# a transport. The same reasoning that keeps the y-flip out of here.
+AUX_BYTES: Final = 32
+# 128, not 64. Raised 2026-08-22 when the aux block landed, because 56 + 32 = 88 and
+# the old reserve had 8 bytes left - a reserve with nothing in it is not a reserve.
+# The payload is hundreds of KB, so 64 more bytes of header costs nothing measurable.
+HEADER_BYTES: Final = 128
+assert _HEADER.size + AUX_BYTES <= HEADER_BYTES, "header + aux must fit the reserve"
 
 MAGIC: Final = 0x56484D42          # 'VHMB' - visionhands mask buffer
-VERSION: Final = 1
+# 2 as of 2026-08-22: the header grew from 64 bytes to 128 and gained the aux block.
+# A version bump rather than a silent layout change, so a stale buffer from the
+# previous version fails LOUDLY - the reader says which version it found and which it
+# speaks. Misparsing an old header would give a plausible geometry and garbage pixels.
+VERSION: Final = 2
 
 # The SOURCE frame this image was derived from, and it is in the header because the
 # alternative is a side channel that goes stale. MEASURED 2026-08-22 and this is not
@@ -113,7 +130,18 @@ VERSION: Final = 1
 # reader can REFUSE a buffer it does not understand rather than reinterpret it: a
 # mask read at the wrong component count is a plausible-looking wrong image.
 DTYPE_U8: Final = 0
-BYTES_PER_COMPONENT: Final = {DTYPE_U8: 1}
+# FP16, for Depth Anything V2: its output buffer is `OneComponent16Half` ('L00h') with
+# several hundred distinct values in a typical frame, and reading it as 8-bit throws
+# that away twice over - once by quantising to 256 levels and once by applying a
+# second per-frame normalisation on top of the reduce_max already in the model's
+# graph. The whole point of the pin solve is arithmetic on those values, so they
+# travel at full precision.
+DTYPE_F16: Final = 1
+DTYPE_F32: Final = 2
+BYTES_PER_COMPONENT: Final = {DTYPE_U8: 1, DTYPE_F16: 2, DTYPE_F32: 4}
+# What each code means to numpy. Separate from the size table so a reader that
+# understands the size but not the interpretation cannot silently guess.
+NUMPY_DTYPE: Final = {DTYPE_U8: "uint8", DTYPE_F16: "float16", DTYPE_F32: "float32"}
 
 # What a reader does when it keeps losing the race. Four attempts, because each one
 # costs a full copy of the pixels and this runs on TouchDesigner's main thread: at
@@ -152,6 +180,7 @@ class MaskFrame(NamedTuple):
     pixels: bytes
     source_width: int   # the frame this describes. 0 = not stated
     source_height: int
+    aux: bytes          # 32 opaque bytes, meaning owned by the writer
 
     @property
     def stride(self) -> int:
@@ -173,7 +202,7 @@ class MaskFrame(NamedTuple):
             return (1.0, 1.0)
         return (self.source_width / self.width, self.source_height / self.height)
 
-    def as_numpy(self) -> numpy.typing.NDArray[numpy.uint8]:
+    def as_numpy(self) -> numpy.typing.NDArray[Any]:
         """`(height, width)` for one component, else `(height, width, components)`.
 
         numpy is imported HERE and not at module scope, and that is a package rule
@@ -189,7 +218,11 @@ class MaskFrame(NamedTuple):
         """
         import numpy
 
-        flat = numpy.frombuffer(self.pixels, dtype=numpy.uint8)
+        if self.dtype not in NUMPY_DTYPE:
+            raise ValueError("dtype code %d has a size but no numpy meaning - a "
+                             "reader that guessed would produce a plausible wrong "
+                             "image" % self.dtype)
+        flat = numpy.frombuffer(self.pixels, dtype=NUMPY_DTYPE[self.dtype])
         if self.components == 1:
             return flat.reshape(self.height, self.width)
         return flat.reshape(self.height, self.width, self.components)
@@ -232,6 +265,7 @@ class MaskWriter:
         self._seq = 0
         self._frame = 0
         self._source = (0, 0)
+        self._aux = b"\x00" * AUX_BYTES
 
         # Created with the size written before the mapping exists, because mmap on a
         # file shorter than the map is a SIGBUS when the pages are touched, not an
@@ -280,10 +314,12 @@ class MaskWriter:
             self._seq if seq_tail is None else seq_tail,
             self._width, self._height, self._components, self._dtype,
             self._frame, timestamp, *self._source)
+        self._map[_HEADER.size:_HEADER.size + AUX_BYTES] = self._aux
 
     def write(self, pixels: bytes | bytearray | memoryview, *,
               width: int | None = None, height: int | None = None,
-              timestamp: float = 0.0, source: tuple[int, int] = (0, 0)) -> int:
+              timestamp: float = 0.0, source: tuple[int, int] = (0, 0),
+              aux: bytes = b"") -> int:
         """Publish one frame. Returns its frame number.
 
         `width`/`height` default to the geometry this writer was opened with, and
@@ -310,8 +346,14 @@ class MaskWriter:
                              % (live_w, live_h, self._capacity, self._width,
                                 self._height))
 
+        if len(aux) > AUX_BYTES:
+            raise ValueError("aux is %d bytes, the header reserves %d"
+                             % (len(aux), AUX_BYTES))
         self._width, self._height = live_w, live_h
         self._source = source
+        # Padded, not truncated, and re-set every frame: aux describes THIS frame, so
+        # carrying the previous frame's over would be worse than carrying zeros.
+        self._aux = aux.ljust(AUX_BYTES, b"\x00")
         self._frame += 1
 
         # ODD, and published BEFORE the pixels move: a reader arriving now must see
@@ -443,8 +485,15 @@ class MaskReader:
                                  "buffer, or the writer is a different build"
                                  % (self._path, magic, MAGIC))
             if version != VERSION:
-                raise ValueError("%s: version %d, this reader speaks %d"
-                                 % (self._path, version, VERSION))
+                # Named with the FIX, because this is what an upgrade looks like: the
+                # header layout changed, a buffer written by the old code is still
+                # sitting in /tmp, and the answer is always the same. A version
+                # mismatch that only said the numbers would send somebody reading
+                # source code.
+                raise ValueError(
+                    "%s: buffer version %d, this reader speaks %d. Delete the file - "
+                    "the writer recreates it on its next frame:  rm %s"
+                    % (self._path, version, VERSION, self._path))
             if seq == 0:
                 return None                 # nothing published yet, not a miss
             if seq % 2:
@@ -461,6 +510,10 @@ class MaskReader:
                 self.misses += 1
                 continue
             pixels = self._map[HEADER_BYTES:HEADER_BYTES + size]
+            # INSIDE the seqlock, with the pixels: the aux describes this frame, so a
+            # read that paired one frame's fit with another's map would be a metric
+            # depth map that is quietly scaled from the wrong solve.
+            aux = self._map[_HEADER.size:_HEADER.size + AUX_BYTES]
 
             # Fence, then re-read the counters. `seq_tail` from the SAME read as the
             # pixels is not enough: a whole write can start and finish while the
@@ -472,7 +525,8 @@ class MaskReader:
                 self.misses += 1
                 continue
             return MaskFrame(width, height, components, dtype, seq, frame,
-                             timestamp, bytes(pixels), source_w, source_h)
+                             timestamp, bytes(pixels), source_w, source_h,
+                             bytes(aux))
         return None
 
     def close(self) -> None:

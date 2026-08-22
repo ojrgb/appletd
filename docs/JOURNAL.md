@@ -3068,3 +3068,85 @@ Under a forced tight loop `seg_mask` was 0.0915 ms. Cooking naturally, its `cook
 gauge reads 0.2802. Both are in DESIGN.md 2.21 because neither is the honest number
 alone: the loop isolates the work, the gauge is wall-clock and includes whatever else
 the frame was doing. The mask path is ~0.3 ms in situ.
+
+## Depth, and the residual that lies
+
+Depth Anything V2 Small through Core ML, in the sidecar, with its own TOP output and
+the pin-based metric correction ported from the examples repo. The user asked for the
+pinning specifically, and it turned out to be the part worth the most care.
+
+**23.00 ms a frame.** Against hands' 3.41 and a 30 fps frame interval of 33.3. That is
+not a number to bury: depth at 30 fps and hands at 30 fps are not both available, and
+`docs/DEPTH.md` says exactly that rather than leaving somebody to discover it as
+"choppy hands". It runs last on the queue, behind everything a live project reads.
+
+**7,302 distinct fp16 levels per frame, against 256 for an 8-bit read.** That
+measurement is why `maskbuf` grew an fp16 dtype instead of the map being narrowed on
+the way out - and it is also why the user asked about fp16 through `copyNumpyArray` two
+hours before I wrote any of this. They were ahead of me: `copyNumpyArray` refuses
+float16, so the Script TOP widens to float32, 406 KB in and 812 KB out, 0.2911 ms for
+the whole read/flip/widen/copy.
+
+### The thing I am most glad I caught
+
+The first real run printed `2 pins, dropped #1` with a worst residual of **0.000 m**.
+
+That looks like a perfect fit. It is not a fit at all: **two points always fit a line
+exactly**, so with two pins the residual is identically zero and checks nothing. And
+the fixture produces it every frame - it is a person filling the frame, so one of the
+three default pins is occluded and the solve correctly falls back to two.
+
+A `0.000 m` on a panel is the most convincing wrong number in this entire system. So
+`Solve` carries `residual_is_a_check`, false below three pins; the note says so in
+words on every such fit; `Depthfitchecked` publishes it to TouchDesigner; and
+`docs/DEPTH.md` has a table telling people to gate on that flag before the residual. It
+cost twenty minutes to build and it is the single most valuable thing in the change.
+
+I only saw it because I ran the thing and read the output rather than checking that it
+did not crash.
+
+### Where I split the module, and why it paid
+
+`pins.py` imports numpy and nothing else - no Vision, no Core ML, no `maskbuf`. That
+made it testable against a synthetic frame built to satisfy a known alpha and beta, and
+the solve recovers both to 1e-6 with `metres()` reading each pin's true distance back
+to a centimetre. 31 tests, no model, no camera.
+
+Three of those tests were wrong when I wrote them: I poisoned a pin at 1.6 m and
+expected it to be dropped, and it was not - because occluding a 1.6 m pin only puts it
+0.4 m out and the threshold is 0.5. **The code was right and my test was too gentle.**
+Moving the pin to the far wall, where an occlusion is a 3.8 m disagreement, made it a
+real test of the mechanism instead of a coincidence.
+
+### Two bugs in code I had already written
+
+**My own out2/out3 migration was running on every build.** Capture every consumer,
+reconnect it to `outputConnectors[0]`. Harmless while the COMP had only CHOP outputs -
+and a hard error the moment it grew a TOP one, because connector 0 is no longer
+necessarily the CHOP and every TOP consumer got repointed at it. The entire chain
+stopped on the first run after adding `outdepth`. Two lessons in one line: a migration
+that has already run should not keep running, and code that indexes a connector list
+has to say which family it means.
+
+**A 0x0 frame printed Fortran.** `numpy.median` of an empty slice is nan, the nan
+reaches `polyfit`, and LAPACK writes `On entry to DLASCL, parameter number 4 had an
+illegal value` straight to stderr. Not an exception - a line of Fortran in the
+sidecar's log. Refused before sampling now.
+
+### Shipping something we do not own
+
+47 MB of weights that Apple already hosts. `models/` is gitignored, one `curl` script
+fetches it, and `resolve_model` raises naming that script and the docs rather than
+letting Core ML report a missing file - "No such file or directory" is not an
+instruction, and a missing model is the first thing a new clone hits.
+
+`pyobjc-framework-CoreML` went in as a hard requirement rather than an extra. A
+framework that only surfaces when somebody flips a toggle is the worst possible place
+to find a dependency.
+
+### What is not verified
+
+The live camera. Everything is fixture replay plus a writer in a second process; the
+TouchDesigner side was verified against real model output flowing through the real
+buffer at 1280x720, and the readouts populate correctly - but no sidecar has run depth
+off the camera yet, because the camera needs asking for.

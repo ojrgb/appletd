@@ -47,6 +47,7 @@ LAYERS = (
     # after `groups` only because `groups` must not be the last word on a page it
     # does not own.
     ("segmentation", "td_add_segmentation.py"),
+    ("depth", "td_add_depth.py"),
 )
 
 # What each layer drags along, and why. Anything listed here is added to the run
@@ -57,7 +58,7 @@ REQUIRES = {
     # (OTHER_BUILDERS_OWN, 2026-08-22), so a master rebuild is genuinely standalone.
     # It does re-derive the Attributes page's parameters though, and `groups` is what
     # writes the gating and the trim list from them.
-    "master": ("groups", "segmentation"),
+    "master": ("groups", "segmentation", "depth"),
     # These four each rebuild a group whose channels the trim list is generated
     # from, so the list has to be rewritten or the new channels are invisible - a
     # keep list fails closed (DESIGN.md 2.15).
@@ -73,6 +74,9 @@ REQUIRES = {
     # Nothing. It owns its own page, its own three operators and its own callbacks,
     # and `td_build_vision.py` no longer destroys any of them (OTHER_BUILDERS_OWN).
     "segmentation": (),
+    # Same as segmentation: its own page, its own three operators, its own callbacks,
+    # and td_build_vision.py destroys none of them.
+    "depth": (),
 }
 
 ALL = tuple(name for name, _script in LAYERS)

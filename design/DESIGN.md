@@ -1261,6 +1261,97 @@ which is exactly the size of a `fast` mask. So "the buffer has never been read" 
 apart meant running the callback's logic by hand. The blank is 16x16 now: a shape
 nothing else produces, so the question is answered at a glance.
 
+### 2.22 Depth Anything V2 through Core ML, measured — 2026-08-22
+
+Apple's Core ML conversion of Depth Anything V2 Small, run as a `VNCoreMLRequest` on
+the same sample buffer as the other requests. Measured over
+`fixtures/hand_clip.mp4`, no camera.
+
+| | |
+|---|---|
+| model input / output | **518 × 392** in, 518 × 392 out |
+| inference, median | **23.00 ms** (p95 23.27, max 23.33) |
+| that against a 30 fps frame interval | **69%** |
+| hands inference, for comparison | 3.41 ms |
+| payload | 406,112 bytes — fp16, one component |
+| distinct levels per frame | **~7,300** |
+
+**It costs more than everything else this project runs, put together.** So it goes
+LAST on the capture queue, behind everything a live project reads, and with it on the
+camera's frame interval cannot always cover the total — AVFoundation drops buffers,
+visible as `n_delivered` falling rather than as anything failing. Depth at 30 fps and
+hands at 30 fps are not both available, and `docs/DEPTH.md` says so in those words
+rather than leaving it to be discovered.
+
+**The output is `OneComponent16Half` ('L00h'), and reading it as 8-bit loses precision
+TWICE** — once by quantising 7,300 levels to 256, and once by applying a second
+per-frame normalisation on top of the `reduce_max` already in the graph. That is why
+`maskbuf` gained an fp16 dtype rather than the map being converted on the way out. The
+reference implementation this was ported from records making that mistake, and the
+measurement above is what settles it: 7,302 against 256 is not a rounding difference.
+
+**BIGGER MEANS NEARER, and nothing is comparable between frames.** The graph ends in a
+`reduce_max`: the output is divided by the frame's own maximum, and the maximum
+inverse-depth pixel is the nearest thing in shot — so a hand approaching the lens
+darkens every other pixel. Not the model changing its mind; division.
+
+#### The pin solve, and the residual that lies
+
+The corruption is AFFINE, so it can be solved away: given points of known distance,
+fit `1/Z = alpha*d + beta` each frame and read metres anywhere. Two unknowns, two pins
+minimum. Re-solved EVERY frame — a cached alpha/beta is the stale-scale problem the
+correction exists to remove, wearing the costume of a fix.
+
+Verified against a synthetic frame built to satisfy a known alpha and beta: the solve
+recovers both to 1e-6, and `metres()` reads each pin's true distance back to a
+centimetre.
+
+**WITH TWO PINS THE RESIDUAL IS IDENTICALLY 0.000, AND IT CHECKS NOTHING.** Two points
+always fit a line. That reads as a perfect fit on a panel, which makes it the most
+convincing wrong number in this system — and it appeared on the very first real run,
+where the fixture's own geometry drops one of three pins every frame. So `Solve` carries
+`residual_is_a_check`, false below three pins, and both the note and the published
+readout say which it is. Three pins is the smallest number where a fit can disagree
+with itself, and it is also the number that survives one pin being occluded.
+
+Occlusion handling, ported deliberately: with three or more, the worst-fitting pin is
+dropped when it disagrees by more than 0.5 m. VERIFIED that only ONE is ever dropped —
+dropping until the residual looks good would fit a line through whichever two pins
+happened to agree, which is a confident answer from no evidence.
+
+#### Two API facts and one Fortran diagnostic
+
+`resolve_model` raises naming `tools/fetch_models.sh` rather than letting Core ML
+report a missing file: the model is 47 MB from Hugging Face and is NOT in this
+repository, so a missing one is the first thing a new clone hits, and "No such file or
+directory" is not an instruction.
+
+An `.mlpackage` compiles to a `.mlmodelc` at load time with no Xcode involved. Cached
+beside the package, and the compile PRINTS that it is happening — a silent multi-second
+stall on first run looks exactly like a hang.
+
+And a 0×0 frame made `numpy.median` return nan, which reached `polyfit` as an illegal
+LAPACK argument printed **straight to stderr as Fortran diagnostics** — not an
+exception, a line of `On entry to DLASCL, parameter number 4 had an illegal value` in
+the sidecar's log. Refused before sampling now.
+
+#### The TouchDesigner side
+
+`depth_map` (Script TOP) → `depth_fit` → `outdepth`, and `copyNumpyArray` **refuses
+float16** ("Arrays with float data must be float32"), so the Script TOP widens: 406 KB
+in, 812 KB out, one `astype` per frame. Measured **0.2911 ms** for the read, flip,
+widen and copy, and **0.0040 ms** for the 518 × 392 → 1280 × 720 stretch on the GPU.
+
+The fit travels in the buffer's 32-byte AUX block, not on a parameter of its own,
+because it is solved from ONE frame and is meaningless against any other. Sending it
+separately would let a consumer pair a map with a neighbouring frame's scale.
+
+**No metres conversion in TouchDesigner, deliberately.** `Z = 1/(alpha*d + beta)` is
+two published numbers and a reciprocal — a GLSL TOP, or an expression on whatever is
+reading it. Doing it in the Script TOP would mean choosing a clamp and a colour window
+on the user's behalf, on the main thread, for every project whether it wants metres or
+not.
+
 ## 3. Traps — all of these cost real time in the spike
 
 **GIL starvation from a polling main thread.** A tight
