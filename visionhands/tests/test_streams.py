@@ -14,7 +14,11 @@ import pytest
 
 from visionhands.streams import (
     BASE_PORT,
+    DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
+    REQUEST_NAMES,
+    REQUEST_SEGMENT,
+    SEGMENT_QUALITIES,
     STREAM_FACE,
     STREAM_HANDS,
     STREAM_NAMES,
@@ -106,15 +110,50 @@ def test_format_and_parse_round_trip() -> None:
     """The TouchDesigner side formats, the sidecar parses. If these disagree, the
     process starts with streams nobody asked for."""
     for streams in ((STREAM_HANDS,), (STREAM_POSE,), (STREAM_FACE,),
-                    (STREAM_HANDS, STREAM_POSE), STREAM_NAMES):
+                    (STREAM_HANDS, STREAM_POSE), STREAM_NAMES,
+                    (REQUEST_SEGMENT,), (STREAM_HANDS, REQUEST_SEGMENT),
+                    REQUEST_NAMES):
         assert parse_streams(format_streams(streams)) == streams
+
+
+def test_segment_is_a_request_with_no_port() -> None:
+    """It runs on the same camera and the same serial queue as the others, so it
+    needs a launch flag - but a 197 KB mask has nowhere to go on a UDP socket, so it
+    goes through the shared buffer instead. `port_for` refuses it BY NAME rather than
+    returning a plausible number: a wrong port is silent at the far end."""
+    assert REQUEST_SEGMENT in REQUEST_NAMES
+    assert REQUEST_SEGMENT not in STREAM_NAMES
+    assert parse_streams("hands,segment") == (STREAM_HANDS, REQUEST_SEGMENT)
+    with pytest.raises(ValueError, match="has no UDP port"):
+        port_for(REQUEST_SEGMENT)
+
+
+def test_the_portless_requests_sort_after_the_ported_ones() -> None:
+    """The status channel order is REQUEST_NAMES order, so a reordering here would
+    rename live channels. Also the order the requests run in on the capture queue:
+    hands first, because that is what a live project is reading."""
+    assert REQUEST_NAMES[:len(STREAM_NAMES)] == STREAM_NAMES
+    assert REQUEST_NAMES[len(STREAM_NAMES):] == (REQUEST_SEGMENT,)
+
+
+def test_the_quality_levels_are_in_cost_order_and_the_default_is_the_cheapest() -> None:
+    """MEASURED: fast 2.21 ms, balanced 8.54, accurate 30.73 (DESIGN.md 2.18). The
+    default is `fast` and NOT Vision's own `accurate`, because on the live path this
+    shares a 16 ms frame with hands' 3.41 ms."""
+    assert SEGMENT_QUALITIES == ("fast", "balanced", "accurate")
+    assert DEFAULT_SEGMENT_QUALITY == SEGMENT_QUALITIES[0]
 
 
 # ---------------------------------------------------------------------------
 # The status contract
 # ---------------------------------------------------------------------------
 def test_the_status_channels_are_named_and_ordered() -> None:
-    assert status_channel_names() == ("sc_uptime_s", "sc_hands", "sc_pose", "sc_face")
+    """`sc_segment` joined on 2026-08-22. It has no PORT - a mask goes through the
+    shared buffer - but it is exactly as capable of being requested and failing to
+    start, which is what these channels are for. The ORDER is the port order followed
+    by the portless requests, and reordering it would rename live channels."""
+    assert status_channel_names() == ("sc_uptime_s", "sc_hands", "sc_pose", "sc_face",
+                                     "sc_segment")
 
 
 def test_status_values_line_up_with_status_names() -> None:
@@ -128,6 +167,7 @@ def test_status_values_line_up_with_status_names() -> None:
     assert reading["sc_pose"] == 1.0
     assert reading["sc_hands"] == 0.0
     assert reading["sc_face"] == 0.0
+    assert reading["sc_segment"] == 0.0
 
 
 def test_a_stream_that_did_not_start_reads_zero() -> None:

@@ -816,6 +816,8 @@ moved to Advanced.
 | `Streamhands` | on | run `VNDetectHumanHandPoseRequest` |
 | `Streampose` | **off** | run `VNDetectHumanBodyPoseRequest` |
 | `Streamface` | **off** | run `VNDetectFaceLandmarksRequest` |
+| `Streamsegment` | **off** | run `VNGeneratePersonSegmentationRequest`, and read its mask into `outmask` |
+| `Segquality` | `fast` | the mask's quality, and therefore its size and its cost |
 | `Slotassign` | on | h0 is the right hand, h1 the left (DESIGN.md 6.3) |
 | `Resw` `Resh` | 1280x720 | the SOURCE image, for pixel space |
 | `Renderw` `Renderh` | 1280x720 | the RENDER, for the world-space aspect |
@@ -1142,25 +1144,41 @@ inside the Script CHOP as well as outside it.
 
 ## The segmentation mask - a TOP, not channels
 
-### Page: Segmentation
+**`Streamsegment` is the fourth stream toggle, on the Vision page with the other
+three.** It is one control, not two: it puts `segment` on the sidecar's command line
+AND gates the Script TOP that reads the buffer. The read side and the write side are
+always wanted together, and two toggles a letter apart would be a trap. Switching it
+off releases the mapping, so a project not using the mask holds no file handle open.
+
+`Segquality` is beside it, and it is a **launch flag** - the request is built when the
+sidecar starts, so it says "restart to apply" like the stream toggles do:
+
+| level | per frame | mask | edge |
+|---|---|---|---|
+| `fast` | **2.21 ms** | 256 x 192 | HARD - only 0 and 255, no soft edge |
+| `balanced` | 8.54 ms | 512 x 384 | feathered |
+| `accurate` | 30.73 ms | 2016 x 1512 | feathered, and it cannot hold 30 fps |
+
+All of that lands on the same serial queue as hands' 3.41 ms, which is why the default
+is `fast` and not Vision's own default of `accurate`. `fast` is not simply a smaller
+`balanced`: it has no soft edge at all, so a feathered matte costs 8.54 ms.
+
+### Page: Segmentation - the read side
 
 | parameter | default | what it does |
 |---|---|---|
-| `Segment` | **off** | read the shared buffer and publish the mask |
 | `Maskfit` | on | undo the anisotropic stretch, so the mask lines up with the camera frame |
 | `Masksourcew` `Masksourceh` | 1280 x 720 | READ-ONLY. The source geometry, read out of the buffer's header |
 
 `Maskbuffer` is on **Advanced**, with the other internals: it is a file path that has
-to match whatever writes the buffer, not something a consumer of this COMP chooses.
+to match on both sides, not something a consumer of this COMP chooses. The sidecar
+writes there and the Script TOP reads there - the same arrangement `Oscport` has.
 
-**`Segment` ships OFF because nothing publishes yet.** `visionhands/sidecar.py` does
-not run segmentation, so switching it on today gives you black. To see the whole path
-work, run a writer yourself and then switch it on:
+**To see the mask with no camera**, which is also how it was verified:
 
     ~/.venvs/visionhands/bin/python tools/segmentation_probe.py --write-only
 
-That is the shape the sidecar will have. Switching `Segment` off releases the mapping,
-so a project not using the mask does not hold the buffer's file handle open.
+then switch `Streamsegment` on. That is exactly the shape the sidecar has.
 
 **Why `Maskfit` exists at all.** Vision's mask does NOT share its input's aspect
 ratio: a 1280x720 frame gives a 256x192 mask, and the shape is chosen by orientation
@@ -1170,11 +1188,6 @@ non-uniform scale, and `Maskfit` is what applies it, on the GPU, from the source
 geometry the buffer's header carries. Turn it off to get the mask at its native
 resolution - which is the right choice if you are going to composite it against
 something else that is also mask-shaped.
-
-**There is no quality parameter, deliberately.** The quality level - and therefore the
-mask's resolution and cost - is chosen by whatever WRITES the buffer. This side only
-reads. A control here would be a knob that cannot be honoured, which `DESIGN.md` and
-`engine.py` both argue is worse than no control at all.
 
 **What it costs.** About 0.12 ms: `seg_mask` 0.0915 and `seg_fit` 0.0312. A miss - the
 writer publishing while the Script TOP is reading - holds the previous frame rather

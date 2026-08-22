@@ -75,12 +75,14 @@ import sys
 import time
 from collections.abc import Callable
 from types import FrameType
+from typing import TYPE_CHECKING
 
 from visionhands.face_types import (
     blank_face_frame,
     face_channel_names,
     face_channel_values,
 )
+from visionhands.maskbuf import MaskWriter
 from visionhands.osc import datagram_socket, encode_channels
 from visionhands.pose_types import blank_pose_frame, pose_channel_names, pose_channel_values
 from visionhands.slots import SLOT_MODE_CHIRALITY, SLOT_MODES
@@ -92,10 +94,13 @@ from visionhands.source import (
     PoseSource,
 )
 from visionhands.streams import (
+    DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
+    REQUEST_NAMES,
+    REQUEST_SEGMENT,
+    SEGMENT_QUALITIES,
     STREAM_FACE,
     STREAM_HANDS,
-    STREAM_NAMES,
     STREAM_POSE,
     format_streams,
     parse_streams,
@@ -105,6 +110,13 @@ from visionhands.streams import (
 )
 from visionhands.types import channel_names, channel_values
 
+if TYPE_CHECKING:
+    # Type-checking only: `segmentation.py` imports Vision, and this module has to
+    # stay importable for `--list-cameras` and for the tests on a machine where the
+    # request is not being used. The mask arrives as an argument, never constructed
+    # here.
+    from visionhands.segmentation import MaskImage
+
 # Where TouchDesigner's OSC In CHOP listens. Loopback only: this stream is
 # landmarks from a camera in someone's room, and it has no business on a network
 # interface unless somebody deliberately asks for that.
@@ -113,6 +125,15 @@ DEFAULT_HOST = "127.0.0.1"
 # 10000, pose 10001 - so a stream's channels cannot land in another stream's OSC
 # In CHOP (DESIGN.md 6.4). `--port` moves the whole block.
 DEFAULT_PORT = 10000
+
+# Where the segmentation mask is published. A file rather than TouchDesigner's shared
+# memory, for the reasons in docs/BUILD_PLAN.md step 9; /tmp because it is
+# machine-local scratch that should not survive a reboot, and 0600 because a mask of
+# somebody in a room is not world-readable (visionhands/maskbuf.py sets the mode).
+#
+# It has to MATCH `Maskbuffer` on the TouchDesigner side. One default in each place
+# and a parameter on both, which is the same arrangement the OSC port has.
+DEFAULT_MASK_PATH = "/tmp/visionhands_mask.buf"
 
 # How often to send, independent of camera delivery.
 #
@@ -155,7 +176,9 @@ class Sidecar:
                  parent_pid: int | None = None,
                  source: HandSource | None = None,
                  slot_mode: str = SLOT_MODE_CHIRALITY,
-                 streams: tuple[str, ...] = DEFAULT_STREAMS) -> None:
+                 streams: tuple[str, ...] = DEFAULT_STREAMS,
+                 mask_path: str = DEFAULT_MASK_PATH,
+                 mask_quality: str = DEFAULT_SEGMENT_QUALITY) -> None:
         """`source` is injectable so the send path can be tested with no camera.
 
         Defaulting to InProcessSource keeps the production path a one-liner; a
@@ -171,8 +194,21 @@ class Sidecar:
         self.streams = streams
         self.send_interval_s = 1.0 / send_fps
         self.parent_pid = parent_pid
+        # The MASK BUFFER, owned here alongside the socket, because both are
+        # process-level resources that outlive any one frame and have to be released
+        # on the way out. Created LAZILY on the first mask, from that mask's own
+        # geometry - which is exactly right and needs no table: the size depends on
+        # the quality level AND the camera's orientation (a portrait frame gets a 3:4
+        # mask, DESIGN.md 2.18), and guessing either would mean a buffer that is too
+        # small and refuses every write.
+        self.mask_path = mask_path
+        self.mask_quality = mask_quality
+        self._mask_writer: MaskWriter | None = None
+        self.n_masks_written = 0
         self.source = source if source is not None else InProcessSource(
-            camera_name=camera_name, slot_mode=slot_mode, streams=streams)
+            camera_name=camera_name, slot_mode=slot_mode, streams=streams,
+            on_mask=self._write_mask if REQUEST_SEGMENT in streams else None,
+            mask_quality=mask_quality)
         # A source can implement one stream and not the other. Asked once, here,
         # rather than per send: with no pose support the pose bundle is sent from
         # a blank frame, which is the same zeros a disabled stream sends.
@@ -209,6 +245,55 @@ class Sidecar:
         # per stream, and with hands disabled the hands seq never moves.
         self._last_optional_seq: dict[str, int] = {}
 
+    # -- the mask -----------------------------------------------------------
+    def _write_mask(self, mask: MaskImage) -> None:
+        """Publish one mask into the shared buffer.
+
+        Thread: THE CAPTURE QUEUE, called from the engine's `_publish_mask`. That is
+                what `MaskWriter` is written for - one writer, one thread - and it is
+                why nothing here takes a lock: the only other toucher is `stop()`,
+                and `stop()` stops the capture session BEFORE it closes the writer.
+        Contract: may raise OSError or ValueError. The engine catches both, counts
+                the frame as dropped and records why, so a full disk costs the mask
+                and not the hands stream.
+        """
+        writer = self._mask_writer
+        if writer is None:
+            # First mask: size the buffer from what actually arrived. One open,
+            # ftruncate and mmap on the capture queue, once - a few hundred
+            # microseconds, and the alternative is a table of geometries per quality
+            # level per orientation that would be wrong the day Vision changes one.
+            writer = MaskWriter(self.mask_path, mask.width, mask.height)
+            self._mask_writer = writer
+            print("mask buffer %s: %dx%d, %d bytes, quality %s"
+                  % (self.mask_path, mask.width, mask.height, writer.capacity,
+                     self.mask_quality), flush=True)
+        writer.write(mask.pixels, width=mask.width, height=mask.height,
+                     timestamp=mask.captured_at,
+                     # The SOURCE geometry, so the far side can undo the anisotropic
+                     # stretch. Nothing in the mask itself says what it was scaled
+                     # from (DESIGN.md 2.18), and without this the consumer has to
+                     # guess - and would be right only on a 4:3 camera.
+                     source=self._source_px())
+        self.n_masks_written += 1
+
+    def _source_px(self) -> tuple[int, int]:
+        """What the camera actually delivered, or (0, 0) for "not stated".
+
+        DELIVERED and not requested: the session preset silently reverts
+        `setActiveFormat_` and two spike runs produced 1080p while the log said 720p
+        (DESIGN.md 3). A mask scaled against the requested size would be off by the
+        difference, invisibly.
+        """
+        engine = getattr(self.source, "_engine", None)
+        delivered = getattr(engine, "delivered_px", None) if engine else None
+        if delivered is None:
+            # Honest zero rather than a plausible default. `MaskFrame.source_scale`
+            # returns (1.0, 1.0) for it, which leaves the consumer exactly as wrong
+            # as having no field at all - and not misled.
+            return (0, 0)
+        return (int(delivered[0]), int(delivered[1]))
+
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
         """Open the camera. Does NOT set `running` - see run().
@@ -234,12 +319,27 @@ class Sidecar:
         """
         self.running = False
         try:
+            # FIRST, and the order is load-bearing: `source.stop()` stops the capture
+            # session and drains the queue with a real barrier, so when it returns no
+            # more masks can arrive. Closing the writer before that would leave
+            # `_write_mask` touching a closed mmap from a thread still running -
+            # which is a ValueError at best and a segfault at worst.
             self.source.stop()
         finally:
-            # In a finally: if stopping the camera raises, the socket must still
-            # be closed, and the original exception must still be the one that
-            # propagates rather than being masked by a second failure here.
-            self.socket.close()
+            # Both in a finally, and each in its own: if stopping the camera raises,
+            # the socket and the buffer must still be released, and the original
+            # exception must still be the one that propagates.
+            try:
+                writer = self._mask_writer
+                if writer is not None:
+                    self._mask_writer = None
+                    # `close`, NOT `unlink`. A reader inside TouchDesigner may still
+                    # hold the mapping, and on POSIX that keeps working after the
+                    # file goes - so leaving the file is what lets TD show the last
+                    # mask instead of going black the instant the sidecar exits.
+                    writer.close()
+            finally:
+                self.socket.close()
 
     def _parent_is_gone(self) -> bool:
         """True if the process that launched us has exited.
@@ -594,10 +694,23 @@ def main(argv: list[str] | None = None) -> int:
                              "run: %s. Read once at startup, so a toggle in "
                              "TouchDesigner takes effect on the next Start. Each "
                              "stream is sent to its OWN port (--port is the base: "
-                             "hands +0, pose +1, face +2), and a stream that is off still "
-                             "sends its channels as zeros so nothing downstream "
-                             "loses a reference. (default: %%(default)s)"
-                             % ", ".join(STREAM_NAMES))
+                             "hands +0, pose +1, face +2), and a stream that is off "
+                             "still sends its channels as zeros so nothing "
+                             "downstream loses a reference. `segment` is the "
+                             "exception: it has no port and publishes its mask to "
+                             "--mask-path instead. (default: %%(default)s)"
+                             % ", ".join(REQUEST_NAMES))
+    parser.add_argument("--mask-path", default=DEFAULT_MASK_PATH,
+                        help="where `segment` publishes its mask, as a shared mmap. "
+                             "Must match `Maskbuffer` on the TouchDesigner side. "
+                             "(default: %(default)s)")
+    parser.add_argument("--mask-quality", default=DEFAULT_SEGMENT_QUALITY,
+                        choices=list(SEGMENT_QUALITIES),
+                        help="Vision's segmentation quality. MEASURED per frame: "
+                             "fast 2.21 ms at 256x192, balanced 8.54 at 512x384, "
+                             "accurate 30.73 at 2016x1512 - and all of it lands on "
+                             "the same serial queue as hands' 3.41 ms. `accurate` "
+                             "cannot hold 30 fps. (default: %(default)s)")
     parser.add_argument("--parent-pid", type=int, default=None,
                         help="exit when this pid does. Pass os.getpid() from a "
                              "TouchDesigner launcher so a TD crash cannot leave "
@@ -622,7 +735,8 @@ def main(argv: list[str] | None = None) -> int:
 
     sidecar = Sidecar(host=args.host, port=args.port, send_fps=args.fps,
                       camera_name=args.camera, parent_pid=args.parent_pid,
-                      slot_mode=args.slots, streams=streams)
+                      slot_mode=args.slots, streams=streams,
+                      mask_path=args.mask_path, mask_quality=args.mask_quality)
 
     def handle_signal(signum: int, frame: FrameType | None) -> None:
         # Only sets a flag. Doing the teardown here would run camera shutdown

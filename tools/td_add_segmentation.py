@@ -30,18 +30,22 @@ several families, and a mask is not a channel. `out1` stays the single CHOP outp
 that everything else in the project reads; `outmask` is a second connector of a
 different type, so nothing about the CHOP contract moves.
 
-WHAT DOES NOT WORK YET, and the toggle says so rather than pretending: nothing
-publishes to the buffer. `visionhands/sidecar.py` does not run segmentation yet, so
-`Segment` ships OFF and the mask is black until something writes. To see it work now:
+WHICH PARAMETERS THIS OWNS, AND WHICH IT DOES NOT. This builder owns the READ side:
+`Maskfit`, and the two read-only `Masksourcew`/`Masksourceh` fields the Script TOP
+fills in from the buffer's header. It does NOT own `Streamsegment`, `Segquality` or
+`Maskbuffer` - `tools/td_build_vision.py` does, because those three go on the
+SIDECAR's command line and one of them has to exist before its `start()` can read it.
+
+ONE toggle for the mask, not two. `Streamsegment` puts `segment` on the sidecar's
+command line AND gates this Script TOP. The read side and the write side are always
+wanted together, and two toggles a letter apart would have been a trap of my own
+making. Off releases the mmap, so a project not using the mask holds no file handle.
+
+TO SEE IT WITH NO CAMERA, which is also how it was verified:
 
     ~/.venvs/visionhands/bin/python tools/segmentation_probe.py --write-only
 
-then switch `Segment` on. That is the shape the sidecar will have.
-
-NO QUALITY PARAMETER. It would be a knob that cannot be honoured - the quality level
-is chosen by whatever writes the buffer, and this side only reads. `engine.py` makes
-the same argument about `max_hands`, and STANDARDS.md 2 is why: a control that does
-nothing is worse than no control.
+then switch `Streamsegment` on. That is exactly the shape the sidecar has.
 
 Ref: visionhands/maskbuf.py, visionhands/segmentation.py, design/DESIGN.md 2.18-2.19,
      docs/BUILD_PLAN.md step 16.
@@ -51,10 +55,6 @@ import sys
 
 REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
 MASTER_PATH = "/project1/vision"
-
-# Where the sidecar will publish. On Advanced with the other internals, because a
-# consumer of this COMP does not choose it - it has to match what the writer uses.
-DEFAULT_BUFFER = "/tmp/visionhands_mask.buf"
 
 PAGE = "Segmentation"
 
@@ -107,16 +107,21 @@ def _reader(path):
 def onCook(scriptOp):
     comp = op.Vision or scriptOp.parent()
 
-    # The master toggle is checked HERE and not by freezing the operator. MEASURED
-    # 2026-08-22: `allowCooking = False` raises "This flag can only be disabled for
-    # COMPs" on a Script TOP, so the gating pattern the CHOP groups use is simply not
+    # `Streamsegment`, the SAME toggle that puts `segment` on the sidecar's command
+    # line - one control for "am I using the mask", not two. The read side and the
+    # write side are always wanted together, and two toggles a letter apart
+    # (`Segment` and `Streamsegment`) would have been a trap of my own making.
+    #
+    # Checked HERE and not by freezing the operator. MEASURED 2026-08-22:
+    # `allowCooking = False` raises "This flag can only be disabled for COMPs" on a
+    # Script TOP, so the gating pattern the CHOP groups use is simply not
     # available to a bare operator. Wrapping these three in a base COMP just to get
     # the flag would buy a COMP boundary and a second output connector to explain,
     # for an operator that only cooks when something is looking at it anyway.
     #
     # The toggle still DOES something: off releases the mmap, so the buffer's file
     # handle is not held open by a project that is not using it.
-    if hasattr(comp.par, "Segment") and not bool(comp.par.Segment.eval()):
+    if hasattr(comp.par, "Streamsegment") and not bool(comp.par.Streamsegment.eval()):
         reader = _READERS.pop(str(comp.par.Maskbuffer.eval()), None)
         if reader is not None:
             reader.close()
@@ -216,13 +221,15 @@ def main():
     page = _page(master, PAGE)
     existing = {par.name: par for par in master.customPars}
 
-    on = existing.get("Segment")
+    # `Streamsegment`, `Segquality` and `Maskbuffer` are NOT created here.
+    # tools/td_build_vision.py owns them: the first two are launch flags that go on
+    # the sidecar's command line beside the other three stream toggles, and the third
+    # has to exist before `start()` can read it. This builder owns only the read
+    # side. If they are missing, that script has not run yet.
+    on = existing.get("Streamsegment")
     if on is None:
-        on = page.appendToggle("Segment", label="Segment")[0]
-        # OFF, and that is honest rather than cautious: nothing publishes to the
-        # buffer yet, so ON would be a control that appears broken.
-        on.val = False
-    on.default = False
+        print("   NOTE: no `Streamsegment` parameter - run "
+              "tools/td_build_vision.py, which owns it, or the mask stays off.")
 
     fit = existing.get("Maskfit")
     if fit is None:
@@ -242,20 +249,16 @@ def main():
         par.default = default
         par.readOnly = True
 
-    # The path goes on ADVANCED, with the other internals: a consumer of this COMP
-    # does not choose it, it has to match whatever writes the buffer.
-    advanced = _page(master, "Advanced")
     buffer_par = existing.get("Maskbuffer")
-    if buffer_par is None:
-        buffer_par = advanced.appendStr("Maskbuffer",
-                                       label="Mask Buffer Path")[0]
-        buffer_par.val = DEFAULT_BUFFER
-    buffer_par.default = DEFAULT_BUFFER
-
-    print("1. `%s` page: Segment=%s, Maskfit=%s, source %dx%d"
-          % (PAGE, bool(on.eval()), bool(fit.eval()),
+    print("1. `%s` page: Maskfit=%s, source %dx%d"
+          % (PAGE, bool(fit.eval()),
              int(master.par.Masksourcew.eval()), int(master.par.Masksourceh.eval())))
-    print("   Advanced: Maskbuffer=%r" % buffer_par.eval())
+    print("   from td_build_vision.py: Streamsegment=%s, Segquality=%s, "
+          "Maskbuffer=%r"
+          % ("ABSENT" if on is None else bool(on.eval()),
+             getattr(master.par, "Segquality", None)
+             and master.par.Segquality.eval(),
+             "ABSENT" if buffer_par is None else buffer_par.eval()))
 
     # -- the callbacks DAT -------------------------------------------------
     callbacks = master.op("seg_callbacks") or master.create(td.textDAT,
@@ -335,8 +338,8 @@ def main():
         "# expression and is written on change instead - the same pattern the\n"
         "# filter's bypass and the group gating use.\n"
         "#\n"
-        "# `Segment` is NOT handled here: `allowCooking` cannot be disabled on a\n"
-        "# bare operator (measured - it raises), so the Script TOP checks that\n"
+        "# `Streamsegment` is NOT handled here: `allowCooking` cannot be disabled\n"
+        "# on a bare operator (measured - it raises), so the Script TOP checks that\n"
         "# toggle itself. It is still listed below so that switching it forces a\n"
         "# cook, or the mask would keep its last frame until something else\n"
         "# invalidated the operator.\n"
@@ -350,19 +353,18 @@ def main():
         "    if script is not None:\n"
         "        script.cook(force=True)\n")
     par_exec.par.op = master.path
-    par_exec.par.pars = "Segment Maskfit"
+    par_exec.par.pars = "Streamsegment Maskfit"
     par_exec.par.valuechange = True
-    print("3. Segment and Maskfit wired through %s" % par_exec.name)
+    print("3. Streamsegment and Maskfit wired through %s" % par_exec.name)
 
     # -- report ------------------------------------------------------------
     print()
-    if not bool(on.eval()):
-        print("   `Segment` is OFF, so `seg_mask` publishes black. Nothing writes to")
-        print("   the buffer yet - visionhands/sidecar.py does not run segmentation.")
-        print("   To see it work:")
+    if on is None or not bool(on.eval()):
+        print("   `Streamsegment` is OFF, so `seg_mask` publishes black. Switch it")
+        print("   on and press Active to have the sidecar publish masks, or drive")
+        print("   the buffer yourself with no camera:")
         print("     ~/.venvs/visionhands/bin/python tools/segmentation_probe.py "
               "--write-only")
-        print("   then switch Segment on.")
     else:
         script.cook(force=True)
         out.cook(force=True)

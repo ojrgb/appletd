@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     from visionhands.face_types import FaceFrame
     from visionhands.pose import PoseDetector
     from visionhands.pose_types import PoseFrame
+    from visionhands.segmentation import MaskImage, SegmentationDetector
 
 # ---------------------------------------------------------------------------
 # Constants. Every value has a reason; see the referenced measurement.
@@ -704,7 +705,9 @@ class HandEngine:
                  pose_detector: PoseDetector | None = None,
                  on_pose: Callable[[PoseFrame], None] | None = None,
                  face_detector: FaceDetector | None = None,
-                 on_face: Callable[[FaceFrame], None] | None = None) -> None:
+                 on_face: Callable[[FaceFrame], None] | None = None,
+                 segmentation_detector: SegmentationDetector | None = None,
+                 on_mask: Callable[[MaskImage], None] | None = None) -> None:
         """seq_start continues an existing frame sequence rather than restarting it.
 
         Why it exists: this engine keeps `_seq` monotonic across its OWN
@@ -726,6 +729,12 @@ class HandEngine:
         self._on_pose = on_pose if pose_detector is not None else None
         self._face_detector = face_detector if on_face is not None else None
         self._on_face = on_face if face_detector is not None else None
+        # SEGMENTATION, on the same terms as pose and face: passed in, so this module
+        # never imports segmentation.py and a project that has not asked for a mask
+        # never builds the request. Both or neither, for the same reason - a detector
+        # with nowhere to publish would burn 2.21 ms a frame and drop the result.
+        self._seg_detector = segmentation_detector if on_mask is not None else None
+        self._on_mask = on_mask if segmentation_detector is not None else None
         self._camera_name = camera_name
         self._requested_px = (width_px, height_px)
         self._max_hands = max_hands
@@ -744,7 +753,7 @@ class HandEngine:
         # the blank frame's zeros (DESIGN.md 6.4).
         self._detector = HandDetector(max_hands=max_hands) if hands else None
         if (self._detector is None and self._pose_detector is None
-                and self._face_detector is None):
+                and self._face_detector is None and self._seg_detector is None):
             # A camera with no requests: it would open the device, hold it, warm
             # up, deliver frames and do nothing with any of them - while every
             # channel read zero and nothing said why. Refused on the caller's
@@ -783,6 +792,9 @@ class HandEngine:
         self.n_pose_published = 0   # pose frames that reached on_pose
         self.n_pose_dropped = 0     # buffers where the pose request failed
         self.n_face_published = 0   # face frames that reached on_face
+        self.n_mask_published = 0   # masks that reached on_mask
+        self.n_mask_dropped = 0     # masks lost to a Vision or a buffer failure
+        self.n_mask_empty = 0       # frames Vision found nobody in
         self.n_face_dropped = 0     # buffers where the face request failed
         self.delivered_px: tuple[int, int] | None = None
         self.errors: list[str] = []
@@ -863,6 +875,14 @@ class HandEngine:
         # which shows up as n_delivered falling rather than as anything failing.
         self._publish_pose(sample_buffer, captured_at)
         self._publish_face(sample_buffer, captured_at)
+        # LAST, and by some distance the most expensive of the four: 2.21 ms at
+        # `fast` and 30.73 at `accurate` (DESIGN.md 2.18), against hands' 3.41. On
+        # this one serial queue that is added to everything else's latency, so it
+        # goes behind the streams a live project is actually reading. With
+        # `accurate` selected the camera's frame interval cannot cover the total and
+        # AVFoundation starts dropping buffers, which shows up as n_delivered
+        # falling rather than as anything failing - the same trade pose has.
+        self._publish_mask(sample_buffer, captured_at)
 
     def _publish_hands(self, sample_buffer: ObjCObject, captured_at: float) -> None:
         """Run the hand request and publish the result. Never raises.
@@ -978,10 +998,60 @@ class HandEngine:
         self._mark_first_frame()
         publish(face_frame)
 
+    def _publish_mask(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+        """Run the segmentation request on the buffer the other streams have seen.
+
+        Thread: capture queue only, from `_on_sample_buffer`.
+        Contract: shares `_seq` and `captured_at` with the other streams' frames from
+                  the same buffer, so a consumer can align a mask with the hands in
+                  it. The mask does NOT travel over OSC - `on_mask` is where it goes
+                  into the shared buffer (visionhands/maskbuf.py).
+        Never raises: a segmentation fault costs the mask and nothing else. Its own
+                  try/except rather than the delegate's blanket guard, and its own
+                  method rather than more of `_on_sample_buffer`, so it cannot return
+                  out of the callback.
+        """
+        detector, publish = self._seg_detector, self._on_mask
+        if detector is None or publish is None:
+            return
+        try:
+            mask = detector.detect_sample_buffer(sample_buffer, self._seq, captured_at)
+        except EngineError as exc:
+            self.n_mask_dropped += 1
+            self._record_error("segment: %s" % exc)
+            return
+        if mask is None:
+            # Vision found nobody. Not an error, and NOT published: the previous mask
+            # stays in the buffer, which is the same "hold the last frame" policy the
+            # reader uses on a miss. Publishing an empty mask would make an
+            # unoccupied room indistinguishable from a stopped sidecar.
+            self.n_mask_empty += 1
+            return
+        try:
+            publish(mask)
+        except (OSError, ValueError) as exc:
+            # The shared buffer can fail in ways an inference cannot: a full disk, a
+            # path that vanished, a frame that does not fit the capacity. Counted and
+            # recorded rather than raised, because the hands stream is still fine and
+            # this is the callback that must not take it down.
+            self.n_mask_dropped += 1
+            self._record_error("segment publish: %s" % exc)
+            return
+        self.n_mask_published += 1
+        self._mark_first_frame()
+
     # -- calling-thread side ------------------------------------------------
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def mask_inference_ms(self) -> float:
+        """Cost of the most recent SEGMENTATION inference, or 0.0 with it off. A
+        gauge, not a measurement - DESIGN.md 3 forbids quoting live-camera timings,
+        because the cost tracks what is in shot. Benchmark by replaying the fixture."""
+        detector = self._seg_detector
+        return detector.last_inference_ms if detector is not None else 0.0
 
     @property
     def inference_ms(self) -> float:

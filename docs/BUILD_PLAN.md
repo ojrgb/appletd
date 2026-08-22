@@ -1394,3 +1394,78 @@ for ever, which looks exactly like a sidecar that failed to start.
 `visionhands/sidecar.py` does not run segmentation, so `Segment` ships OFF and there
 is nothing to read until something writes. `detect_sample_buffer` is there and
 unexercised. That is the next piece, and it needs the camera.
+
+## Step 18 — segmentation on the live capture queue — DONE 2026-08-22
+
+Wiring, not new machinery: `segmentation.py` and `maskbuf.py` already existed and the
+Script TOP already read the buffer. What was missing was the sidecar actually running
+the request.
+
+### `segment` is a request, not a stream
+
+`visionhands/streams.py` now has two tuples. `STREAM_NAMES` is what has a UDP port;
+`REQUEST_NAMES` is that plus the portless requests, and it is what `--streams` accepts
+and what the status channels are built from. A 197 KB mask has nowhere to go on a
+datagram, so `port_for("segment")` **raises by name**, saying where the mask actually
+goes rather than returning a plausible number.
+
+`sc_segment` is the fifth status channel, for the reason the other four exist: a panel
+showing segmentation on, after somebody flipped it without restarting, is lying. The
+ORDER is the port order followed by the portless requests, and `_self_check` asserts
+that `REQUEST_NAMES` starts with `STREAM_NAMES` - reordering it would rename live
+channels.
+
+### Where each piece lives
+
+    engine.py     `segmentation_detector` + `on_mask`, and `_publish_mask` LAST on
+                  the queue - behind hands, pose and face, because at 2.21-30.73 ms
+                  it is the most expensive of the four (DESIGN.md 2.18)
+    source.py     builds the detector when the flag is on AND there is somewhere to
+                  publish. Both or neither: a detector with nowhere to go would burn
+                  2.21 ms a frame and drop the result, and `errors` records the flag
+                  that did nothing
+    sidecar.py    owns the MaskWriter, the way it owns the socket. `_write_mask` runs
+                  on the capture queue - which is what MaskWriter is written for
+
+**The buffer is created lazily, from the first mask's own geometry.** Not from a
+table: the size depends on the quality level AND the camera's orientation (a portrait
+frame gets a 3:4 mask), so anything guessed in advance is a buffer that refuses every
+write the day Vision changes a number.
+
+**The source geometry is what the camera DELIVERED, not what was requested.** The
+session preset silently reverts `setActiveFormat_` and two spike runs produced 1080p
+while the log said 720p (DESIGN.md 3) - a mask scaled against the requested size would
+be off by the difference, invisibly. Unknown is stated as `(0, 0)`, which
+`source_scale` turns into `(1.0, 1.0)`: as wrong as having no field, and not misleading.
+
+**`stop()` stops the source BEFORE closing the buffer**, and that order has its own
+test. `_write_mask` runs on the capture queue; closing first would leave a frame in
+flight writing into a closed mmap from a thread still running. It `close`s and does
+NOT `unlink` - a reader inside TouchDesigner may still hold the mapping, and leaving
+the file is what lets TD show the last mask instead of going black the moment the
+sidecar exits.
+
+### One toggle, not two
+
+`Streamsegment` on the Vision page puts `segment` on the sidecar's command line AND
+gates the Script TOP. `tools/td_add_segmentation.py` lost its own `Segment` toggle:
+the read side and the write side are always wanted together, and two toggles a letter
+apart would have been a trap of my own making. `Segquality` and `Maskbuffer` moved to
+`td_build_vision.py` for the same reason - they are launch flags, and `start()` has to
+be able to read the path before anything has read a mask.
+
+### And one check that cried wolf immediately
+
+Adding `sc_segment` made the contract 142 channels while the OSC In CHOP still held
+the previous session's 141, so `td_add_filter.py` reported "the filter's scope covers
+83 channels, expected 84" on a filter that was correct. A contract that has grown but
+has not yet been SENT is the normal state between a code change and the next Start.
+Both sides of that check now count from what actually ARRIVED, and it prints a note
+when the contract is ahead of the wire.
+
+### Not verified yet
+
+The live path. Everything here is tested with a fake source and a stand-in mask -
+506 tests, no camera - and the whole chain builds with zero failures. What has NOT
+been run is a real sidecar publishing real masks into TouchDesigner, because that
+needs the camera.

@@ -63,11 +63,17 @@ import Quartz
 import Vision
 
 from visionhands.engine import EngineError, ObjCObject
+from visionhands.streams import SEGMENT_QUALITIES
 
-# The three quality levels, by their Vision constant names. Looked up by name at
-# construction rather than hardcoded to an integer, so a framework that does not
-# have one says so instead of silently selecting a different level.
-QUALITY_LEVELS: Final[tuple[str, ...]] = ("accurate", "balanced", "fast")
+# The quality levels come from `streams.py`, which is pyobjc-free: `sidecar.py` needs
+# the same list for its command line and must stay importable with no frameworks
+# present, and `tools/td_build_vision.py` needs it for a menu inside TouchDesigner.
+# One list, imported by everything that needs it.
+QUALITY_LEVELS: Final[tuple[str, ...]] = SEGMENT_QUALITIES
+
+# Their Vision constant NAMES, which are Vision's business and stay here. Looked up
+# by name at construction rather than hardcoded to an integer, so a framework that
+# does not have one says so instead of silently selecting a different level.
 _QUALITY_CONSTANTS: Final[dict[str, str]] = {
     "accurate": "VNGeneratePersonSegmentationRequestQualityLevelAccurate",
     "balanced": "VNGeneratePersonSegmentationRequestQualityLevelBalanced",

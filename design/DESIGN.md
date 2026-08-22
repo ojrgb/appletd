@@ -1521,7 +1521,7 @@ frame to frame, and what it reports during occlusion or when a hand is edge-on.
 Both determine how often the proximity fallback is actually reached. That needs a
 two-hand fixture, and it validates the assumptions rather than gating the code.
 
-### 6.4 Several streams — one process, one port each
+### 6.4 Several streams — one process, one port each, and one with no port
 
 Hands were the only stream until 2026-08-21. Pose and face are the same shape of
 problem — a Vision request over the same camera frames — and this section is the
@@ -1535,6 +1535,31 @@ each (§2.7: ~1.5 s), and three Start buttons. Frames also stop being comparable
 across streams, because each process would see a different one. Fault isolation is
 recovered cheaply instead: a request that fails is counted and recorded per stream,
 and one failing stream does not stop the others or the loop.
+
+**A FOURTH request, and it is not a stream.** Segmentation joined 2026-08-22, and it
+breaks the "one port each" symmetry deliberately: a mask is 197 KB of pixels per frame
+at `balanced`, which no UDP datagram will carry (§2.13 measured the send-buffer
+ceiling), so it goes through a shared `mmap` instead (§2.19). What it DOES share is
+everything else that makes a stream a stream — one launch flag, the same camera, the
+same serial queue, the same `seq` and `captured_at` as the hands frame from the same
+buffer, and a status channel.
+
+So `visionhands/streams.py` now has two tuples. `STREAM_NAMES` is what has a port;
+`REQUEST_NAMES` is `STREAM_NAMES` plus the portless requests, and it is what
+`--streams` accepts and what the status channels are built from. `port_for("segment")`
+raises **by name**, saying where the mask actually goes, rather than returning a
+plausible number — a wrong port is silent at the far end.
+
+`sc_segment` is therefore the fifth status channel, and the ORDER is the port order
+followed by the portless requests. Reordering it would rename live channels, so
+`_self_check` asserts that `REQUEST_NAMES` starts with `STREAM_NAMES`.
+
+It runs LAST on the queue, behind hands, pose and face, because it is the most
+expensive of the four by some distance: 2.21 ms at `fast` and 30.73 at `accurate`
+against hands' 3.41 (§2.18). The consequence to know is the same one pose has — with
+`accurate` selected the camera's frame interval cannot cover the total and
+AVFoundation starts dropping buffers, which shows up as `n_delivered` falling rather
+than as anything failing.
 
 **One UDP port per stream.** Hands 10000, pose 10001, face 10002 — `BASE_PORT` plus
 a fixed offset, in `visionhands/streams.py`, which both the sidecar and the TD

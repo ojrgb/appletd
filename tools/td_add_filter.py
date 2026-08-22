@@ -487,11 +487,33 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures, scope
                         "passthrough - see the docstring" % (stream, PREFIX))
     # And the thing `scope` itself can get wrong: selecting the wrong SET. Read off
     # the live operator rather than trusting the string that was written to it.
-    in_scope = smooth.numChans - len(passthrough)
-    if arrived and in_scope != len(smoothed):
-        failures.append("%s: the filter's scope covers %d channels, expected %d - "
-                        "spaces.scope_pattern() and the live contract disagree"
-                        % (stream, in_scope, len(smoothed)))
+    #
+    # Both sides counted from WHAT ARRIVED, not from the contract. MEASURED 2026-08-22:
+    # adding `sc_segment` to the status channels made the contract 142 channels while
+    # the OSC In CHOP still held the previous session's 141, and this check reported
+    # 83 against 84 on a filter that was correct. A contract that has grown but has
+    # not yet been SENT is the normal state between a code change and the next Start,
+    # and it must not read as a fault - the sidecar is a separate process and its
+    # channel list arrives when it restarts (DESIGN.md 6.4).
+    #
+    # What this still catches, which is the point: `scope` selecting the wrong subset
+    # of the channels that DID arrive.
+    present = set(arrived)
+    in_scope = smooth.numChans - len(present.intersection(passthrough))
+    expected_in_scope = len(present.intersection(smoothed))
+    if arrived and in_scope != expected_in_scope:
+        failures.append("%s: the filter's scope covers %d of the channels that "
+                        "arrived, expected %d - spaces.scope_pattern() and the live "
+                        "contract disagree"
+                        % (stream, in_scope, expected_in_scope))
+    missing = sorted(set(smoothed) - present)
+    if missing:
+        # NOT a failure: the contract grew and the sidecar has not restarted. Said
+        # out loud, though, because "83 of 84" with no explanation is exactly the
+        # kind of quiet discrepancy that gets ignored until it matters.
+        print("   (%s: %d contract channel(s) have not arrived yet - the sidecar "
+              "sends them after a restart: %s)"
+              % (stream, len(missing), ", ".join(missing[:4])))
     if smooth.errors():
         failures.append("%s/%s: %s" % (stream, smooth.name, smooth.errors()))
 

@@ -52,6 +52,42 @@ STREAM_FACE: Final = "face"
 # reintroducing at that point and worth nothing while it is empty.
 STREAM_NAMES: Final[tuple[str, ...]] = (STREAM_HANDS, STREAM_POSE, STREAM_FACE)
 
+# SEGMENTATION is a request, not a stream, and the distinction is the whole reason it
+# is a separate name here. Everything in STREAM_NAMES sends CHANNELS over a UDP port;
+# a person-segmentation mask is 197 KB of pixels per frame and goes through a shared
+# mmap instead (visionhands/maskbuf.py, DESIGN.md 2.19). So it has:
+#
+#   * a launch flag, because it is one more Vision request on the same camera and the
+#     same serial queue, and it costs 2.21 ms at `fast` (DESIGN.md 2.18);
+#   * a STATUS channel, for exactly the reason the block below gives - a panel
+#     showing segmentation on, after somebody flipped it without restarting, is
+#     lying;
+#   * NO port. `port_for` refuses it by name rather than returning a plausible
+#     number, because a mask has nowhere to go on a UDP socket.
+REQUEST_SEGMENT: Final = "segment"
+
+# What `--streams` accepts. STREAM_NAMES plus the requests that have no port.
+REQUEST_NAMES: Final[tuple[str, ...]] = (*STREAM_NAMES, REQUEST_SEGMENT)
+
+# The segmentation quality levels, IN COST ORDER, and they live here rather than in
+# `segmentation.py` for the same reason the ports do: both sides of a boundary have
+# to agree on them. `sidecar.py` needs the list for its command line and has to stay
+# importable with no pyobjc present; `tools/td_build_vision.py` needs it for a menu
+# and runs inside TouchDesigner. Neither can import a module that does `import
+# Vision` at the top.
+#
+# MEASURED per frame over fixtures/hand_clip.mp4 (DESIGN.md 2.18), and the spread is
+# why this is a control and not a constant:
+#
+#     fast       2.21 ms   256x192     a HARD alpha - only 0 and 255, no soft edge
+#     balanced   8.54 ms   512x384     feathered
+#     accurate  30.73 ms  2016x1512    cannot hold 30 fps on its own
+#
+# Vision's own default is `accurate`, which is almost certainly why an existing C++
+# plugin pinned a frame rate at 50 fps. Ours is `fast`.
+SEGMENT_QUALITIES: Final[tuple[str, ...]] = ("fast", "balanced", "accurate")
+DEFAULT_SEGMENT_QUALITY: Final = "fast"
+
 # What runs when nobody says otherwise: exactly what ran before there was a
 # choice. A default that turned pose on would make every existing project pay
 # for an inference it does not read.
@@ -83,6 +119,10 @@ def port_for(stream: str, base_port: int = BASE_PORT) -> int:
               with no channels and no error.
     """
     if stream not in PORT_OFFSETS:
+        if stream == REQUEST_SEGMENT:
+            raise ValueError(
+                "%r has no UDP port - a segmentation mask goes through the shared "
+                "buffer, not over OSC (visionhands/maskbuf.py)" % (stream,))
         raise ValueError("unknown stream %r; known: %s"
                          % (stream, ", ".join(STREAM_NAMES)))
     return base_port + PORT_OFFSETS[stream]
@@ -112,17 +152,19 @@ def parse_streams(text: str) -> tuple[str, ...]:
     wanted = [part.strip().lower() for part in text.split(",") if part.strip()]
     if not wanted:
         raise ValueError("no streams selected; ask for at least one of: %s"
-                         % ", ".join(STREAM_NAMES))
-    unknown = sorted({name for name in wanted if name not in STREAM_NAMES})
+                         % ", ".join(REQUEST_NAMES))
+    unknown = sorted({name for name in wanted if name not in REQUEST_NAMES})
     if unknown:
         raise ValueError("unknown stream(s): %s. Available: %s"
-                         % (", ".join(unknown), ", ".join(STREAM_NAMES)))
-    return tuple(name for name in STREAM_NAMES if name in wanted)
+                         % (", ".join(unknown), ", ".join(REQUEST_NAMES)))
+    # REQUEST_NAMES order, so `segment` sorts last - which is also the order it runs
+    # in on the capture queue, hands first (DESIGN.md 6.4).
+    return tuple(name for name in REQUEST_NAMES if name in wanted)
 
 
 def format_streams(streams: Iterable[str]) -> str:
     """The inverse of `parse_streams`, for building a command line."""
-    return ",".join(name for name in STREAM_NAMES if name in set(streams))
+    return ",".join(name for name in REQUEST_NAMES if name in set(streams))
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +186,13 @@ STATUS_UPTIME: Final = STATUS_PREFIX + "uptime_s"
 
 
 def status_channel_names() -> tuple[str, ...]:
-    """The status channel list. Fixed, like every other channel list here."""
-    return (STATUS_UPTIME, *(STATUS_PREFIX + name for name in STREAM_NAMES))
+    """The status channel list. Fixed, like every other channel list here.
+
+    REQUEST_NAMES and not STREAM_NAMES, so `sc_segment` is here too: it has no port
+    but it is exactly as capable of being requested and failing to start, which is
+    what these channels are for.
+    """
+    return (STATUS_UPTIME, *(STATUS_PREFIX + name for name in REQUEST_NAMES))
 
 
 def status_channel_values(uptime_s: float,
@@ -158,10 +205,11 @@ def status_channel_values(uptime_s: float,
               or the panel reports the request rather than the state.
     """
     live = set(started)
-    return [float(uptime_s)] + [1.0 if name in live else 0.0 for name in STREAM_NAMES]
+    return [float(uptime_s)] + [1.0 if name in live else 0.0
+                                for name in REQUEST_NAMES]
 
 
-N_STATUS_CHANNELS: Final = 1 + len(STREAM_NAMES)
+N_STATUS_CHANNELS: Final = 1 + len(REQUEST_NAMES)
 
 
 # ---------------------------------------------------------------------------
@@ -179,8 +227,18 @@ def _self_check() -> None:
         raise RuntimeError("hands must stay on the base port: an existing project "
                            "and every note in this repo says 10000")
     for name in DEFAULT_STREAMS:
-        if name not in STREAM_NAMES:
-            raise RuntimeError("%r is not in STREAM_NAMES" % (name,))
+        if name not in REQUEST_NAMES:
+            raise RuntimeError("%r is not in REQUEST_NAMES" % (name,))
+    if set(REQUEST_NAMES) - set(STREAM_NAMES) - {REQUEST_SEGMENT}:
+        raise RuntimeError("a request without a port was added to REQUEST_NAMES "
+                           "without teaching `port_for` to refuse it by name")
+    if DEFAULT_SEGMENT_QUALITY not in SEGMENT_QUALITIES:
+        raise RuntimeError("the default segmentation quality %r is not one of %s"
+                           % (DEFAULT_SEGMENT_QUALITY, SEGMENT_QUALITIES))
+    if REQUEST_NAMES[:len(STREAM_NAMES)] != STREAM_NAMES:
+        raise RuntimeError("REQUEST_NAMES must START with STREAM_NAMES: the status "
+                           "channel order is the port order plus the portless "
+                           "requests, and reordering it renames live channels")
     names: Sequence[str] = status_channel_names()
     if len(names) != N_STATUS_CHANNELS or len(set(names)) != N_STATUS_CHANNELS:
         raise RuntimeError("the status channel list is the wrong length or has "

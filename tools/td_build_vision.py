@@ -178,7 +178,11 @@ def start():
     # zeros - what the toggle saves is the inference (DESIGN.md 6.4).
     streams = []
     for name, par_name in (("hands", "Streamhands"), ("pose", "Streampose"),
-                           ("face", "Streamface")):
+                           ("face", "Streamface"),
+                           # SEGMENT is a request, not a stream: it has no port and
+                           # publishes its mask to the shared buffer instead. Same
+                           # launch-flag mechanism, different transport.
+                           ("segment", "Streamsegment")):
         if comp is None or bool(getattr(comp.par, par_name).eval()):
             streams.append(name)
     if not streams:
@@ -196,6 +200,13 @@ def start():
             "--streams", ",".join(streams)]
     if camera:
         argv += ["--camera", camera]
+    if "segment" in streams:
+        # Both read off the COMP, so the sidecar writes where the Script TOP reads
+        # and at the quality the panel says. `Maskbuffer` has to match on both sides
+        # - the same arrangement `Oscport` has - and the quality is a LAUNCH FLAG
+        # like everything else here, so changing it needs a restart.
+        argv += ["--mask-path", str(comp.par.Maskbuffer.eval()),
+                 "--mask-quality", str(comp.par.Segquality.eval())]
     process = subprocess.Popen(
         argv, cwd=REPO_ROOT,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -208,6 +219,9 @@ def start():
     # the first question when the pose COMP shows no channels.
     print("[visionhands]   hands -> %%d   pose -> %%d   face -> %%d  (base + 0/1/2)"
           %% (port, port + 1, port + 2))
+    if "segment" in streams:
+        print("[visionhands]   segment -> %%s  (a shared mmap, no port), quality %%s"
+              %% (comp.par.Maskbuffer.eval(), comp.par.Segquality.eval()))
     return process.pid
 
 
@@ -425,7 +439,8 @@ RETIRED_PAGES = ("Sidecar",)
 # destroys its parameters and every tuned value with them.
 VISION_PAGE_ORDER = (
     "Active", "Camera", "Listcameras",
-    "Streamhands", "Streampose", "Streamface", "Slotassign",
+    "Streamhands", "Streampose", "Streamface", "Streamsegment", "Segquality",
+    "Slotassign",
     "Resw", "Resh", "Renderw", "Renderh", "Orthowidth",
     "Screenspaceonly", "Deleteempty", "Keeplayout",
 )
@@ -470,7 +485,13 @@ def main():
     # `td_layout` is every coordinate a MASTER-level operator gets. One table,
     # because seven builders place operators in here and two of them once chose the
     # same spot with nothing able to notice.
-    from visionhands.streams import STATUS_PREFIX, port_for
+    from visionhands.sidecar import DEFAULT_MASK_PATH
+    from visionhands.streams import (
+        DEFAULT_SEGMENT_QUALITY,
+        SEGMENT_QUALITIES,
+        STATUS_PREFIX,
+        port_for,
+    )
     from visionhands.td_layout import COL_W, master_xy, stream_row
 
     parent = op(PARENT_PATH)
@@ -614,11 +635,45 @@ def main():
     stream_pars = {}
     for stream, label, default in (("hands", "Hands", True),
                                    ("pose", "Body Pose", False),
-                                   ("face", "Face", False)):
+                                   ("face", "Face", False),
+                                   # SEGMENT is the fourth request and the odd one
+                                   # out: it has no OSC port and publishes a mask to
+                                   # a shared mmap instead. Same launch-flag
+                                   # mechanism, so it belongs beside its three
+                                   # siblings rather than on a page of its own -
+                                   # "which Vision requests am I paying for" is one
+                                   # question. What it gates on the TD side is the
+                                   # Script TOP that reads the buffer, not an
+                                   # `allowCooking` on a stream COMP, because
+                                   # `allowCooking` cannot be disabled on anything
+                                   # that is not a COMP (DESIGN.md 2.20).
+                                   ("segment", "Segmentation Mask", False)):
         par = stream_pars.setdefault(stream, page.appendToggle(
             "Stream" + stream,
             label="%s (off freezes it; restart to apply)" % label)[0])
         par.default = default
+
+    # The mask's quality: a LAUNCH FLAG, like the toggles above, because the request
+    # is built when the sidecar starts. MEASURED per frame (DESIGN.md 2.18), and the
+    # spread is why this is a control at all:
+    #
+    #     fast       2.21 ms   256x192     a HARD alpha - only 0 and 255
+    #     balanced   8.54 ms   512x384     feathered
+    #     accurate  30.73 ms  2016x1512    cannot hold 30 fps on its own
+    #
+    # All of it lands on the same serial queue as hands' 3.41 ms. Vision's OWN
+    # default is `accurate`; ours is `fast`, and the menu comes from
+    # visionhands/streams.py so the sidecar's command line and this menu cannot
+    # disagree about what a level is called.
+    par_quality = page.appendMenu(
+        "Segquality", label="Mask Quality (restart to apply)")[0]
+    par_quality.menuNames = list(SEGMENT_QUALITIES)
+    par_quality.menuLabels = [
+        "%s  (%s)" % (name.capitalize(), note) for name, note in zip(
+            SEGMENT_QUALITIES,
+            ("2.2 ms, 256x192, hard edge", "8.5 ms, 512x384, feathered",
+             "31 ms, 2016x1512 - drops frames"), strict=True)]
+    par_quality.default = DEFAULT_SEGMENT_QUALITY
 
     par_w = page.appendInt("Resw", label="Source Width")[0]
     par_h = page.appendInt("Resh", label="Source Height")[0]
@@ -690,6 +745,14 @@ def main():
 
     advanced.appendPulse("Printstatus", label="Print Status")
     par_pid = advanced.appendInt("Capturepid", label="Capture Process PID")[0]
+    # WHERE the mask is published, and it has to match on both sides: the sidecar
+    # writes here and the Script TOP reads here. On Advanced with the other
+    # internals, because a consumer of this COMP does not choose it - the same
+    # arrangement `Oscport` has. Owned HERE rather than by
+    # tools/td_add_segmentation.py, because `start()` above needs it to exist before
+    # anything has read a mask.
+    par_mask = advanced.appendStr("Maskbuffer", label="Mask Buffer Path")[0]
+    par_mask.default = DEFAULT_MASK_PATH
     par_pid.readOnly = True
 
     filter_page = _page(comp, "Filter")
@@ -713,6 +776,7 @@ def main():
              ("Renderw", par_rw), ("Renderh", par_rh),
              ("Orthowidth", par_ortho), ("Screenspaceonly", par_screen),
              ("Keeplayout", par_keep), ("Deleteempty", par_empty),
+             ("Segquality", par_quality), ("Maskbuffer", par_mask),
              ("Oscport", par_port),
              ("Smoothing", par_smooth), ("Mincutoff", par_mincut),
              ("Beta", par_beta)]

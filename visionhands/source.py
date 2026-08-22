@@ -42,7 +42,9 @@ from visionhands.face_types import FaceFrame, blank_face_frame
 from visionhands.pose_types import PoseFrame, blank_pose_frame
 from visionhands.slots import SLOT_MODE_CHIRALITY
 from visionhands.streams import (
+    DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
+    REQUEST_SEGMENT,
     STREAM_FACE,
     STREAM_HANDS,
     STREAM_POSE,
@@ -54,6 +56,7 @@ if TYPE_CHECKING:
     # keeps its property of being importable with no pyobjc present, while mypy
     # still gets the real types instead of a pile of `# type: ignore`.
     from visionhands.engine import HandEngine
+    from visionhands.segmentation import MaskImage
 
 # Frames whose seq is 0 have never been published: `blank_frame()` uses 0 and the
 # engine's counter starts at 1. Named because "if frame.seq" reads like a
@@ -322,7 +325,9 @@ class InProcessSource:
                  width_px: int | None = None,
                  height_px: int | None = None,
                  slot_mode: str = SLOT_MODE_CHIRALITY,
-                 streams: tuple[str, ...] = DEFAULT_STREAMS) -> None:
+                 streams: tuple[str, ...] = DEFAULT_STREAMS,
+                 on_mask: Callable[[MaskImage], None] | None = None,
+                 mask_quality: str = DEFAULT_SEGMENT_QUALITY) -> None:
         """`streams` is which Vision requests to run - see visionhands/streams.py.
 
         Read once, here, because it is a launch flag: the sidecar is started with
@@ -332,6 +337,18 @@ class InProcessSource:
         """
         self._slot_mode = slot_mode
         self._streams = streams
+        # The MASK's destination, injected. This module does not own it and does not
+        # import `maskbuf` - a mask goes to a shared buffer rather than into a
+        # LatestBox, because a box is for something TouchDesigner PULLS on its own
+        # cook and the mask is PUSHED into memory TD maps. The sidecar owns the
+        # buffer, the way it owns the socket. See visionhands/sidecar.py.
+        self._on_mask = on_mask
+        # `fast`, not segmentation.py's own `balanced` default: MEASURED at 2.21 ms
+        # against 8.54 (DESIGN.md 2.18), and this is the LIVE path where it shares a
+        # 16 ms frame with hands' 3.41. A project that wants the feathered edge
+        # `balanced` gives can ask for it; the default should not spend a third of
+        # the frame budget without being asked.
+        self._mask_quality = mask_quality
         self.box = LatestFrameBox()
         # Always constructed, even with pose disabled, so `latest_pose()` has the
         # full fixed shape to publish from the first tick. A disabled stream sends
@@ -390,6 +407,20 @@ class InProcessSource:
             if STREAM_FACE in self._streams:
                 from visionhands.face import FaceDetector
                 face_detector = FaceDetector()
+            # Built only when it has somewhere to publish. `REQUEST_SEGMENT` in the
+            # streams with no `on_mask` would be a request that costs 2.21 ms a frame
+            # and throws the result away, so it is treated as off - and `errors`
+            # records it, because a launch flag that quietly did nothing is worse
+            # than one that refuses.
+            seg_detector = None
+            if REQUEST_SEGMENT in self._streams:
+                if self._on_mask is None:
+                    self._retained_errors.append(
+                        "segment was requested but no mask destination was given, "
+                        "so the request was not built")
+                else:
+                    from visionhands.segmentation import SegmentationDetector
+                    seg_detector = SegmentationDetector(self._mask_quality)
 
             engine = HandEngine(
                 on_frame=self.box.publish,
@@ -398,6 +429,8 @@ class InProcessSource:
                 on_pose=self.pose_box.publish if pose_detector is not None else None,
                 face_detector=face_detector,
                 on_face=self.face_box.publish if face_detector is not None else None,
+                segmentation_detector=seg_detector,
+                on_mask=self._on_mask if seg_detector is not None else None,
                 camera_name=self._camera_name or DEFAULT_CAMERA_NAME,
                 width_px=self._width_px or DEFAULT_WIDTH_PX,
                 height_px=self._height_px or DEFAULT_HEIGHT_PX,

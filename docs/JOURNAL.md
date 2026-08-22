@@ -2950,3 +2950,71 @@ killed, buffer unlinked, and the TOP kept showing its last frame with no error.
 `sidecar.py` still does not run segmentation, so `Segment` ships off and there is
 nothing to read until something writes. That is the next piece and it needs the
 camera.
+
+## Segmentation on the live queue, and the fourth stream that is not a stream
+
+Wiring rather than machinery: the request, the transport and the Script TOP all
+existed. What was missing was the sidecar running it.
+
+The interesting decision was taxonomic. Everything in `STREAM_NAMES` sends CHANNELS
+over its own UDP port, and a 197 KB mask has nowhere to go on a datagram - §2.13
+measured that ceiling months ago. But segmentation shares everything else that makes
+a stream a stream: one launch flag, the same camera, the same serial queue, the same
+`seq` and `captured_at` as the hands frame from the same buffer, and it is exactly as
+capable of being requested and failing to start.
+
+So two tuples. `STREAM_NAMES` is what has a port; `REQUEST_NAMES` is that plus the
+portless requests. `port_for("segment")` raises **by name** and says where the mask
+actually goes, rather than returning a plausible number - a wrong port is silent at
+the far end, which is the failure mode this project keeps meeting. And `sc_segment`
+joins the status channels, because the argument for the other four applies unchanged.
+
+Three decisions inside the sidecar that I would not have got right by guessing:
+
+**The buffer is created lazily, from the first mask's own geometry.** I started to
+write a table of sizes per quality level, then realised it would need a second axis
+for orientation - a portrait frame gets a 3:4 mask - and would be wrong the day Vision
+changes a number. The mask knows how big it is. Size the file from it.
+
+**The source geometry is what the camera DELIVERED.** DESIGN.md 3 records that the
+session preset silently reverts `setActiveFormat_`, and that two spike runs produced
+1080p while the log said 720p. A mask scaled against the *requested* size would be off
+by exactly that difference, invisibly. And when nothing has been delivered yet it
+states `(0, 0)` rather than a plausible default, which `source_scale` turns into
+`(1.0, 1.0)` - as wrong as having no field at all, and deliberately not misleading.
+
+**`stop()` stops the source before closing the buffer**, and that ordering has its own
+test because it is invisible in either method alone. `_write_mask` runs on the capture
+queue; closing first would leave a frame in flight writing into a closed mmap from a
+thread still running. It also `close`s rather than `unlink`s, so a reader inside
+TouchDesigner keeps its last mask instead of going black the instant the sidecar exits.
+
+### One toggle, because two would have been a trap I set myself
+
+`td_add_segmentation.py` had a `Segment` toggle for the read side, and the sidecar
+needed a `Streamsegment` launch flag. Two controls a letter apart, for a thing nobody
+wants half of. I deleted mine and had the Script TOP read `Streamsegment`, and moved
+`Segquality` and `Maskbuffer` to the builder that owns the command line. That also
+retires a comment I had written the same day claiming there was deliberately no
+quality parameter because "this side only reads" - true of the read side, and it
+stopped being the whole picture the moment the sidecar owned the request.
+
+### The check that cried wolf within a minute
+
+Adding one status channel made the contract 142 channels while the OSC In CHOP still
+held the previous session's 141, and `td_add_filter.py` reported "the filter's scope
+covers 83 channels, expected 84" on a filter that was correct. A contract that has
+grown but has not yet been SENT is the *normal* state between a code change and the
+next Start - the sidecar is a separate process. Both sides of that check now count
+from what actually arrived, and it says so out loud when the contract is ahead of the
+wire.
+
+Two fixed today, one yesterday. The pattern is always the same: a check comparing a
+live reading against a compile-time constant, correct on the day it was written and
+noisy the first time the two legitimately differ.
+
+### What is NOT verified
+
+The live path. 506 tests, a fake source, a stand-in mask, and the whole builder chain
+green - but no real sidecar has published a real mask into TouchDesigner, because that
+needs the camera and the camera needs asking for.
