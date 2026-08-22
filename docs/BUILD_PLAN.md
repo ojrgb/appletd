@@ -729,13 +729,22 @@ than from the documentation, which does not carry the detail:
 - Cost: one Script TOP cook on TD's main thread. `copyNumpyArray` outside `onCook`
   needs the operator locked (docs/BUILD_PLAN "TouchDesigner facts").
 
-### Still unmeasured, and it needs a camera
+### MEASURED 2026-08-22, and it did not need a camera
 
-The per-frame cost of segmentation at each quality level. The user's datum - an
-existing C++ plugin pinning the frame rate at 50 fps - was presumably `Accurate`.
-If `Fast` is cheap the whole question gets easier; if `Accurate` is what looks
-right, 10 fps may be the honest answer whatever the transport. Measure before
-building.
+That question is closed. `DESIGN.md` 2.18 has the table; the headline is that
+`fast` is **2.21 ms** and `accurate` is **30.73 ms**, and Vision's own DEFAULT is
+`accurate` - which is very likely the C++ plugin's 50 fps ceiling. `fast` sits
+happily beside the hands stream inside a 16 ms frame. Measured over
+`fixtures/hand_clip.mp4`, so the figures are reproducible and no camera was used.
+
+Two things that measurement turned up which the research had not:
+
+- **`fast` returns a HARD alpha** - only 0 and 255, no soft edge. It is not a
+  smaller `balanced`, so a feathered matte costs 8.54 ms, not 2.21.
+- **the mask does not share its input's aspect ratio.** Landscape in gives 4:3 out,
+  portrait gives 3:4, chosen by orientation alone and stretched anisotropically to
+  fit. A 1280x720 frame yields a 256x192 mask. This one would have shipped broken:
+  a consumer scaling by a single factor is exactly right on a 4:3 camera.
 
 ## Step 10 — the optimisation and tidy pass — DONE 2026-08-21
 
@@ -1275,3 +1284,64 @@ does not need rewriting mid-session. See `STANDARDS.md` 4.
 and a menu resets to index 0. `Verbosity` reverting to `Minimal` turned every derive
 group off and took the output from 505 channels to 366, silently, only when two
 builders ran in the same frame. `DESIGN.md` 2.17. Fixed by never re-appending.
+
+## Step 16 — the segmentation transport, built and measured — DONE 2026-08-22
+
+Step 9 researched the transport and parked it with a decision. This is that decision
+built: `visionhands/maskbuf.py` and `visionhands/segmentation.py`, 54 tests, no
+TouchDesigner side yet.
+
+### `maskbuf.py` - a file-backed mmap with a seqlock
+
+One slot, not a ring: a mask is only ever wanted at its newest, so a queue would add
+latency to deliver frames nobody will draw. The file is sized ONCE for the largest
+frame it will carry and the header says how much is live, so a quality change is a
+header write rather than a remap - the reader is TouchDesigner's main thread and not
+somewhere to discover that a file just got shorter.
+
+Three layers of coherence, each earning its place: an ODD sequence number says a
+write is in progress; a trailing counter catches a whole write that started and
+finished inside the reader's copy; and a fence - an uncontended `threading.Lock`
+acquire/release - because the CPU may otherwise make the tail visible before the
+pixels. That last one is honest rather than proven: `DESIGN.md` 2.19 says what it is
+and is not, and the residual risk is one bad mask frame on a stream that replaces it
+in 16 ms.
+
+Measured: **0.02 ms a read**, 0 to 4 retries per 108 reads at realistic writer rates,
+and **zero torn frames across 56,591 accepted** from a writer in a separate process
+running flat out. That last test is the only one that proves anything - a
+single-process test shares an address space and cannot expose a visibility problem.
+
+### `segmentation.py` - one Vision request, and bytes out
+
+Same boundary rules as `face.py` and `pose.py`: no TouchDesigner import, and no
+pyobjc object escapes the capture thread, which is why the mask is COPIED out of the
+CVPixelBuffer here rather than passed along.
+
+Two traps handled rather than discovered:
+
+- **row padding.** `CVPixelBufferGetBytesPerRow` is not `width * bytesPerPixel`.
+  Handing the padded bytes on as an image shears it progressively down the frame,
+  which reads as a bad mask rather than as a bug. Un-padded here, asserted in tests.
+- **construction.** `init` and `new` are both NS_UNAVAILABLE on this request class,
+  alone among the Vision requests in this project. `initWithCompletionHandler_(None)`
+  is the way in, and it took a probe to find.
+
+### What is NOT done
+
+The TouchDesigner side. A Script TOP with `numpy.memmap` and `copyNumpyArray`, and
+the flip - Vision's mask is top-down and TD's TOP arrays are bottom-up. Deliberately
+not started here: `maskbuf.py` moves bytes and does not reorient its payload, because
+a transport that silently flips its contents cannot be tested against a known
+pattern. The flip belongs in the Script TOP, and so does undoing the anisotropic
+stretch, for which `MaskFrame.source_scale` hands over both factors.
+
+Also not done: wiring segmentation into `sidecar.py` so it runs on the live capture
+queue beside hands, pose and face. `detect_sample_buffer` is there and unexercised -
+the fixture path uses `detect_pixel_buffer`.
+
+    ~/.venvs/visionhands/bin/python tools/segmentation_probe.py --png /tmp/masks
+
+runs the whole pipeline in two real processes and writes the mask both as published
+and stretched back to its source, which is the shortest available explanation of why
+the header carries the source geometry.

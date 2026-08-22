@@ -2795,3 +2795,79 @@ One judgement call, flagged: `*_conf_median` STAYS on the output. "All conf chan
 would take it, but it is the summary rather than a per-joint confidence, and
 `DESIGN.md` 6.2 tells people to gate on it. Removing the channel the documentation
 recommends would be a trap.
+
+## The segmentation transport, and a mask that is the wrong shape
+
+Step 9 researched this in August and parked it with a decision: a file-backed `mmap`
+with a seqlock, not TouchDesigner's shared memory. Built now, plus the Vision request
+that feeds it, and then tested against Apple's person segmentation over the fixture.
+
+The transport went as designed. **0.02 ms a read, zero torn frames across 56,591
+accepted** from a writer in a separate process running flat out. The only test that
+proves anything is that one — a single-process test shares an address space and
+cannot expose a visibility problem — so it is the one in the suite, with a payload
+where every byte of a frame carries that frame's own number, making a torn frame one
+that holds two values.
+
+I was honest about the fence rather than confident. It is an uncontended
+`threading.Lock` acquire/release, which is a real acquire/release barrier and not a
+C11 `atomic_thread_fence`. 56,591 clean frames is evidence, not proof, and the
+residual risk is one bad mask frame on a stream that replaces it in 16 ms. That trade
+is stated in the module and in `DESIGN.md` 2.19 rather than glossed.
+
+### A harness found a bug that reasoning had not
+
+Writing a measurement script for the miss rate, the second iteration crashed:
+`magic 0x0 is not 0x56484d42`. My first instinct was that the harness had raced —
+which it had. But the harness was doing exactly what a Script TOP does: opening the
+buffer as soon as it exists. `ftruncate` gives a full-size file of ZEROS, so between
+creating the buffer and stamping its header the writer leaves a window where the
+magic is 0, and my reader raised on it. TouchDesigner starting at the same moment as
+the sidecar lands in that window every time.
+
+Fixed both ends: the writer stamps the magic on the descriptor before the mapping
+exists, and an all-zero header now reads as "nothing published yet". A non-zero wrong
+magic still raises, because that one really is a mistake. The distinction is the
+whole fix — "not ready" and "wrong file" look identical if you only check for
+inequality.
+
+### And then the thing that would have shipped broken
+
+Segmentation measured cleanly: `fast` 2.21 ms, `balanced` 8.54, `accurate` 30.73.
+Vision's own default is `accurate`, which is very likely the user's C++ plugin
+pinning the frame rate at 50 fps — a question step 9 had left open as "needs a
+camera", answered from a fixture.
+
+Then I looked at the mask sizes: 256x192 for a 1280x720 input. **16:9 in, 4:3 out.**
+
+I nearly wrote that down as a resolution and moved on. What made me stop was that
+`accurate` returned 2016x1512 — also 4:3, at a completely different scale. So I fed
+the same frame at four aspect ratios, and the shape is chosen by ORIENTATION alone:
+landscape gets 4:3, portrait gets 3:4, and a SQUARE input gets a portrait mask. The
+image is stretched anisotropically to fit, with no letterboxing — the subject spans
+the full height, which I checked by row occupancy rather than by eye.
+
+Undoing that needs two different scale factors and nothing in the pixels says what
+they are. A consumer scaling by one factor would be **exactly right on a 4:3 camera
+and quietly wrong on every other one**. This project keeps meeting that failure: not
+a crash, a plausible picture. Two hours earlier a Delete CHOP was costing 12x what a
+Select does and looking fine.
+
+So the header carries the source geometry beside the mask's, and `source_scale`
+returns the pair. Zero means "not stated" and yields `(1.0, 1.0)` — as wrong as
+having no field at all, and deliberately not a guess. It is a wire-format change I
+would rather have made today than after something depended on it.
+
+One more difference worth having: **`fast` is not a smaller `balanced`.** It returns
+only 0 and 255 — a hard alpha with no soft edge, where `balanced` has real
+intermediate values. The levels differ in kind, so a feathered matte costs 8.54 ms
+and not 2.21.
+
+### What I deliberately did not build
+
+The TouchDesigner side. `maskbuf.py` moves bytes and does not reorient its payload,
+because a transport that silently flips its contents cannot be tested against a known
+pattern — so the y-flip and the un-stretch both belong in the Script TOP, and it is
+not written yet. Segmentation is also not wired into the live capture queue:
+`detect_sample_buffer` exists and is unexercised, because the fixture path uses
+`detect_pixel_buffer` and the camera needs asking for.

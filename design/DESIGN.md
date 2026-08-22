@@ -1039,6 +1039,93 @@ Two general lessons, both cheap to state and expensive to learn:
   builder that writes a parameter another builder's callback reads is order- and
   frame-dependent.
 
+### 2.18 Person segmentation, measured — and the mask is the wrong shape
+
+Measured 2026-08-22 over `fixtures/hand_clip.mp4`, 120 frames per level, frame 0
+excluded because it carries Vision's model load. **No camera** — the question §9's
+research left open as "needs a camera" did not need one.
+
+| quality | mask size | inference median | p95 | max | payload |
+|---|---|---|---|---|---|
+| `fast` | 256 × 192 | **2.21 ms** | 2.78 | 13.65 | 49 KB |
+| `balanced` | 512 × 384 | **8.54 ms** | 9.41 | 9.96 | 197 KB |
+| `accurate` | 2016 × 1512 | **30.73 ms** | 32.29 | 34.06 | 3.0 MB |
+
+**`fast` is affordable and `accurate` is not.** 2.21 ms sits beside the hands
+stream's 3.41 ms inside a 16 ms frame; 30.73 ms is a 32 fps ceiling for segmentation
+alone. And Vision's OWN default is `accurate` — the constant is 0 and a fresh request
+reports it — which is the most likely explanation for the user's datum of a C++
+plugin pinning the frame rate at 50 fps. `SegmentationDetector` defaults to
+`balanced` instead, deliberately, and that is now a choice made on numbers.
+
+**`fast` is not a smaller `balanced`.** It returns ONLY 0 and 255 — a hard alpha with
+no soft edge. `balanced` has real intermediate values (measured: 14,923 pixels in
+1..127 and 15,579 in 128..254 on one frame). So the levels differ in kind, not just
+in resolution, and a compositor that wants a feathered edge cannot have the cheap one.
+
+**THE MASK DOES NOT SHARE ITS SOURCE'S ASPECT RATIO**, and this is the finding that
+would have shipped broken:
+
+| input | mask | input aspect | mask aspect |
+|---|---|---|---|
+| 1280 × 720 | 256 × 192 | 1.778 | 1.333 |
+| 720 × 720 | 192 × 256 | 1.000 | 0.750 |
+| 640 × 480 | 256 × 192 | 1.333 | 1.333 |
+| 480 × 640 | 192 × 256 | 0.750 | 0.750 |
+
+The shape is chosen by ORIENTATION alone — landscape gets 4:3, portrait gets 3:4 —
+and the image is anisotropically stretched to fit it. There is no letterboxing: the
+subject spans the full height, verified by row occupancy. So undoing the stretch
+needs two different scale factors, and nothing in the pixels says what they are.
+
+A consumer scaling by one factor would be **exactly right on a 4:3 camera and quietly
+wrong on every other one**, which is the failure mode this project keeps meeting: not
+a crash, a plausible picture. So the transport's header carries the SOURCE geometry
+alongside the mask's, and `MaskFrame.source_scale` returns the pair. Zero means "not
+stated" and yields `(1.0, 1.0)` — as wrong as having no field, and not misleading.
+
+**Two API facts worth having.** `init` and `new` are both **NS_UNAVAILABLE** on
+`VNGeneratePersonSegmentationRequest`, unlike every other Vision request here; the
+designated initialiser is `initWithCompletionHandler_`, and nil is right because a
+`VNSequenceRequestHandler` puts the results on the request synchronously. And
+`outputPixelFormat` is readable — it reports `0x4c303038`, `L008` — so the
+one-byte-per-pixel claim the transport depends on is checked at construction rather
+than commented. `supportedRevisions()` is `[1]`.
+
+### 2.19 The transport, measured — 0.02 ms a read and no tearing in 56,591 frames
+
+`visionhands/maskbuf.py`: a file-backed `mmap` with a seqlock, chosen over
+TouchDesigner's shared memory for the reasons in `docs/BUILD_PLAN.md` step 9.
+
+| what | figure |
+|---|---|
+| reader cost, 256 × 144, writer at 30 fps | median **0.0204 ms**, p95 0.0278, max 0.0487 |
+| reader cost, writer at 60 fps | median 0.0158 ms, p95 0.0321, max 0.0801 |
+| retries, 108 reads against a 30 fps writer | 4 |
+| retries, 108 reads against a 60 fps writer | 0 |
+| torn frames, two processes, 56,591 accepted | **0** |
+
+The tearing figure comes from a writer in a SEPARATE PROCESS running flat out —
+1.28 M frames in 1.5 s — while the reader accepted 56,591 of them, each filled with
+a single byte value derived from its own frame number so that a torn frame is one
+holding two values. A single-process test shares an address space and proves nothing
+about visibility, which is why that shape is the one in the suite.
+
+What it does not prove: that the fence is sufficient under the ARM64 memory model.
+The fence is an uncontended `threading.Lock` acquire/release, which is a real
+acquire/release barrier and not a C11 `atomic_thread_fence`. Absence of tearing over
+56,591 frames is evidence, not proof, and the residual risk is one bad mask frame on
+a stream that replaces it in 16 ms.
+
+**One real bug, found by a measurement harness rather than by reasoning.**
+`ftruncate` gives a full-size file of zeros, so between creating the buffer and
+stamping its header the writer leaves a window where the magic is 0 — and a reader
+opening in it got an exception. A Script TOP starting at the same moment as the
+sidecar lands in exactly that window. Fixed on both sides: the writer stamps the
+magic on the descriptor before the mapping exists, and an all-zero header now reads
+as "nothing published yet" rather than as a wiring mistake. A NON-zero wrong magic
+still raises, because that one really is a mistake.
+
 ## 3. Traps — all of these cost real time in the spike
 
 **GIL starvation from a polling main thread.** A tight
