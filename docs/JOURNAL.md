@@ -2553,3 +2553,61 @@ The `store()` suspicion was wrong about the symptom and right about the practice
 the fix stayed: `absTime.stepSeconds` is how a Script CHOP should learn its own `dt`,
 and operator storage is not a per-cook scratchpad. `derive_chop` gets away with it
 only because it writes when the channel set changes, which is almost never.
+
+## Depth and tilt from a projection that has neither, and a 62-degree dead zone
+
+*2026-08-21. Asked for hand and finger Z from hand size, and for hand XY angles
+alongside the existing Z angle, both behind toggles.*
+
+The observation behind the second request was exactly right: every angle this system
+published was in-plane. `h{i}_rotation`, `h{i}_point_angle`, `h{i}_pinch_angle`,
+`hands_angle` — all `atan2` on two image coordinates, all rotations about the camera's
+Z axis. `ATTRIBUTES.md` had even labelled one of them "In-plane roll".
+
+What I could not do honestly was give back pitch and yaw. A projection destroys which
+side of the image plane a point is on, so a palm tilted 30 degrees toward the camera
+and one tilted 30 away project identically. Unsigned numbers published under those
+names would be a lie about what they are, so the channels are `tilt` (magnitude) and
+`tilt_axis` — which is what the projection actually determines. Same for the
+per-finger depth: foreshortening is real and its sign is not recoverable, and there is
+a test asserting the two cases produce the same number so nobody later "fixes" it.
+
+### The dead zone
+
+`Palmarea` is the face-on area of the palm triangle over size squared, and `tilt` is
+`acos(measured / Palmarea)`, so it is the zero point of the whole channel. I guessed
+**0.14**. Measured against `synth.py`: **0.3059**.
+
+The guess put the ratio above 1.0, where the clamp I had written for safety pinned
+it — so `tilt` read exactly **0 for the first 62 degrees of rotation** and then
+started moving. Every test passed. `test_a_palm_facing_the_camera_has_zero_tilt`
+passed *because* of the bug: a face-on hand read 0, which is what it asserted.
+
+What caught it was noticing the value was **exactly** 0.0000 rather than nearly zero.
+A clamp reaching its limit and a quantity genuinely at zero look identical in a
+number, and only one of them should be exact. Then measuring the thing I had guessed
+took thirty seconds.
+
+The lesson I want to keep: **a guessed constant that a clamp can hide is worse than a
+guessed constant that cannot**, because the clamp converts a wrong value into a dead
+zone, and a dead zone in the middle of a channel's range is invisible from either
+end. The test now asserts which failure mode `Palmarea` should have when it is wrong,
+so the default cannot quietly drift to the side that reports tilt on a flat hand.
+
+### And the gap underneath
+
+Adding two tuning constants meant finding out where the others lived, and they did
+not. `derive()`'s `_params()` reads eight thresholds by name with a getattr fallback,
+and **nothing in the repo ever created them.** `Confthreshold`, `Curlmin`,
+`Spreadmax`, the lot — stuck at their dataclass defaults since they were written,
+with a panel that gave no sign and a helper whose fallback made it work perfectly.
+
+Worse in a small way: the hand-written `_params()` listed eight of the nine fields
+that existed, so `Overlapthreshold` was unreachable twice over. It is built from
+`dataclasses.fields(Params)` now, which is the only arrangement where adding a field
+cannot silently fail to arrive.
+
+Eleven parameters on the Tuning page that a user would reasonably have assumed were
+already there. Everything in both new groups is unmeasured on a real hand — the
+arithmetic is exact and tested, the usefulness is not established, and `Zreference`
+and `Palmarea` are the two to move.

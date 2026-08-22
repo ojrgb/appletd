@@ -1054,3 +1054,70 @@ clean runs above are all at 60.0.
 That second one is the more dangerous, because every figure in the run is
 self-consistently wrong. Any figure in this repo not accompanied by an fps should be
 treated as suspect.
+
+## Step 13 — depth and out-of-plane angles — DONE 2026-08-21
+
+The user's items 5b and 6: *hand and finger Z from hand size, and hand XY angles in
+addition to the current Z angle,* both behind toggles. Two new `derive()` groups,
+`Depth` and `Tilt`, both shipping **off**. 16 channels across two hands.
+
+### They asked about the right thing
+
+Every angle this system published was in-plane. `h{i}_rotation`,
+`h{i}_point_angle`, `h{i}_pinch_angle`, `hands_angle` — all `atan2` on two image
+coordinates, all rotations about the camera's Z axis. `ATTRIBUTES.md` even labelled
+`h{i}_rotation` "In-plane roll". So the observation was exactly right.
+
+### What could be built honestly, and what could not
+
+| asked for | delivered | why |
+|---|---|---|
+| hand Z from hand size | `h{i}_z` | apparent size goes as 1/distance. Monotonic, uncalibrated, and not comparable between two different hands |
+| finger Z | `h{i}_z_<finger>` | foreshortening: how much the finger points along the axis rather than across it. **Cannot tell toward from away** |
+| hand XY angles | `h{i}_tilt`, `h{i}_tilt_axis` | NOT pitch and yaw — see below |
+
+**Pitch and yaw cannot be signed from a 2D projection.** A palm tilted 30 degrees
+toward the camera and one tilted 30 away project identically, because a projection
+destroys which side of the image plane a point is on. Publishing unsigned values
+under those names would misrepresent them, so the channels are magnitude plus axis:
+`acos` of the palm triangle's apparent area over its face-on area, and the direction
+of the longest surviving edge. Two honest numbers instead of two dishonest ones. The
+ambiguity is asserted as a test so nobody later "fixes" it.
+
+### The calibration constant that was a 62-degree dead zone
+
+`Palmarea` is the face-on area of the palm triangle as a fraction of size squared,
+and `tilt` is `acos` of the measured ratio over it — so it is the channel's zero
+point. I first guessed **0.14**. MEASURED against `synth.py`: **0.3059**. The guess
+put the ratio above 1.0, where the clamp pinned it, so `tilt` read exactly **0 for
+the first 62 degrees of real rotation** — a channel that looked like it worked and
+was useless.
+
+It is now set at the measured value rather than above it, deliberately: too low gives
+a small dead zone near zero, too high reports tilt on a hand that has none, and there
+is no value of the channel that means "flat" in the second case. A test asserts which
+failure mode it should have.
+
+**The confound, measured and not corrected for:** the triangle's corners include two
+MCP knuckles, and the area ratio moves with finger SPREAD — 0.1835 at spread 0.6,
+0.4282 at 1.4. Spreading the fingers reads partly as un-tilting the palm. A real
+hand's knuckles move far less than the synthesiser's, so the true confound is
+smaller, but it is not zero.
+
+### And a gap this uncovered: eleven parameters that never existed
+
+`derive()`'s `_params()` has always read its thresholds by name with a getattr
+fallback — and **nothing ever created them.** `Confthreshold`, `Sizefloor`,
+`Curlmin`, `Curlmax`, `Extendedbelow`, `Curledabove`, `Spreadmin`, `Spreadmax` and
+`Overlapthreshold` have been stuck at their dataclass defaults since the day they
+were written, with the panel giving no sign. Every "adjustable" threshold in the
+stateless attribute layer was a constant.
+
+They are on the Tuning page now, built by iterating `dataclasses.fields(Params)` so
+the page and the dataclass cannot drift. The hand-written `_params()` they replaced
+had already drifted: it named eight of the nine fields that existed, so
+`Overlapthreshold` was doubly unreachable.
+
+**Everything here is unmeasured on a real hand.** The arithmetic is exact and tested
+(17 tests); whether the numbers feel right at a real distance is not established, and
+`Zreference` and `Palmarea` are what to move.

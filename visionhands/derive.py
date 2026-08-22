@@ -73,12 +73,50 @@ class Params:
     spreadmin: float = 0.40
     spreadmax: float = 1.60
     overlapthreshold: float = 0.15
+    # The hand size that reads z = 0. Apparent size goes as 1/distance, so
+    # `zreference / size` is a depth PROXY: 1.0 at the reference distance, 2.0 at
+    # twice it, 0.5 at half. UNCALIBRATED and unitless by construction - there is no
+    # depth in a 2D constellation, only its consequence.
+    #
+    # 0.12, which is `synth.HandPose.size`'s own default - documented there as a
+    # hand at conversational distance from a 1280x720 camera, and the closest thing
+    # this project has to a reference distance. So z reads 1.0 there, 2.0 at twice the
+    # distance, 0.5 at half. To recalibrate: hold a hand where you want z = 1 and read
+    # `h0_size`.
+    zreference: float = 0.12
+    # The palm triangle's area as a fraction of size squared, with the palm face on.
+    # `tilt` is `acos` of the measured ratio over this, so it is the zero point of
+    # the whole channel.
+    #
+    # MEASURED at 0.3059 against `synth.py`'s hand geometry - not against a real
+    # hand, and the difference matters. The first value here was a guess of 0.14,
+    # which put the ratio over 1.0 and clamped it: `tilt` read exactly 0 for the
+    # first 62 degrees of real rotation, a dead zone big enough to make the channel
+    # useless while looking like it worked.
+    #
+    # SET IT SLIGHTLY LOW ON PURPOSE. Too high and a face-on hand reads a few degrees
+    # of tilt it does not have; too low and there is a small dead zone near zero. The
+    # dead zone is the better failure, so this sits at the measured value rather than
+    # above it. If a real face-on hand reads non-zero `tilt`, raise this.
+    #
+    # THE CONFOUND, and it is real: the triangle's corners are the wrist and two MCP
+    # knuckles, and MEASURED on `synth.py` the ratio moves with finger SPREAD -
+    # 0.1835 at spread 0.6, 0.4282 at 1.4. So spreading the fingers reads partly as
+    # un-tilting the palm. A real hand's knuckles move far less than the
+    # synthesiser's, so the true confound is smaller than that range suggests, but it
+    # is not zero and nothing here corrects for it.
+    palmarea: float = 0.3059
 
 
 # Group names, matching the toggles in docs/ATTRIBUTES.md. `derive` computes only
 # what is asked for, so a disabled group costs nothing here either.
 ALL_GROUPS: Final = ("core", "presence", "contacts", "pose", "twohands",
-                     "gestures", "descriptor")
+                     "gestures", "descriptor", "depth", "tilt")
+
+# The three joints whose triangle is the palm's plane. Wrist, index MCP and little
+# MCP: the widest spread available, so its apparent area is the most sensitive
+# measure of how far the palm has turned away from the camera.
+PALM_TRIANGLE: Final = ("wrist", "index_mcp", "little_mcp")
 
 
 def _clamp01(value: float) -> float:
@@ -208,6 +246,31 @@ def _hand_channels(view: _HandView, hand: int, params: Params,
         put("point_y", math.sin(math.radians(point_angle)))
         put("point_angle", point_angle)
 
+    if "depth" in groups:
+        # z from apparent SIZE, and that is the whole mechanism: a hand twice as far
+        # away subtends half the angle, so `reference / size` rises with distance.
+        #
+        # WHAT IT IS NOT. Not metres, not calibrated, and not comparable between two
+        # different hands - a child's hand at 40 cm and an adult's at 60 read alike.
+        # It is monotonic in distance for ONE hand, which is what a "lean in to zoom"
+        # interaction actually needs.
+        put("z", params.zreference / view.size)
+        # Per FINGER, and read the docstring on `_foreshorten` before using it: this
+        # is how much a finger is pointing ALONG the camera axis rather than across
+        # it, and it CANNOT tell toward from away.
+        for finger in FINGER_NAMES:
+            put("z_" + finger, _foreshorten(view, finger))
+
+    if "tilt" in groups:
+        # How far the palm has turned out of the image plane, and about which axis.
+        # NOT pitch and yaw: a 2D projection cannot give those, because it cannot
+        # tell a palm tilted toward the camera from one tilted away. Magnitude plus
+        # axis is what the projection does determine, and it is two honest numbers
+        # instead of two dishonest ones. See `_tilt`.
+        magnitude, axis = _tilt(view, params)
+        put("tilt", magnitude)
+        put("tilt_axis", axis)
+
     if "gestures" in groups:
         extended = {f: curls[f] < params.extendedbelow for f in FINGER_NAMES}
         curled = {f: curls[f] > params.curledabove for f in FINGER_NAMES}
@@ -303,6 +366,82 @@ def _twohand_channels(views: list[_HandView], curls: list[dict[str, float]],
     open_a = 1.0 - sum(curls[0][f] for f in LONG_FINGERS) / len(LONG_FINGERS)
     open_b = 1.0 - sum(curls[1][f] for f in LONG_FINGERS) / len(LONG_FINGERS)
     put("hands_symmetry", 1.0 - abs(open_a - open_b))
+
+
+def _foreshorten(view: _HandView, finger: str) -> float:
+    """How much `finger` points ALONG the camera axis rather than across it. 0..1.
+
+    Contract: 0 means the finger lies in the image plane - fully across the camera,
+              its apparent length equal to its true length. 1 means it points
+              straight down the axis, its apparent length collapsed to nothing.
+    THE AMBIGUITY, and it is in the projection rather than in this code: it CANNOT
+              tell toward from away. A finger pointing at the camera and one pointing
+              directly away project to the same foreshortened length. Anything gated
+              on this has to accept both, or disambiguate some other way.
+    Why:      a straight finger's tip-to-base distance divided by the sum of its bone
+              lengths is 1 when it lies flat in the image and less when it turns out
+              of the plane - the same ratio `curl` uses. So a CURLED finger reads
+              foreshortened too, which is the second thing to know: this is only
+              meaningful for a finger that is straight, and `curl_<finger>` is how a
+              consumer tells the difference.
+    UNMEASURED. The arithmetic is exact; whether the number is useful on a real hand
+              at a real distance is not established, and nothing here is calibrated.
+    """
+    base, chain = FINGERS[finger]
+    bones = sum(view._raw_distance(chain[i], chain[i + 1])
+                for i in range(len(chain) - 1))
+    if bones <= 0.0:
+        return 0.0
+    apparent = view._raw_distance(base, chain[-1])
+    # 1 - (apparent / true) rises as the finger turns away from the image plane.
+    return _clamp01(1.0 - apparent / bones)
+
+
+def _tilt(view: _HandView, params: Params) -> tuple[float, float]:
+    """The palm's rotation OUT of the image plane, as (degrees, axis degrees).
+
+    Contract: the first value is 0 when the palm faces the camera square on and
+              approaches 90 as it turns edge-on. The second is the direction of the
+              axis it is leaning about, in the same convention as every other angle
+              here - degrees, 0 = +x, counter-clockwise - and is meaningless when the
+              magnitude is near zero, exactly as a direction is meaningless when speed
+              is near zero.
+    WHY NOT PITCH AND YAW, which is what was asked for. Every existing angle in this
+              module comes from `atan2` on two image coordinates, so all of them are
+              rotations about the camera's Z axis - in-plane. Recovering the other two
+              from a 2D projection needs the one thing a projection destroys: which
+              side of the image plane a point is on. A palm tilted 30 degrees toward
+              the camera and one tilted 30 away project IDENTICALLY. So pitch and yaw
+              cannot be signed, and publishing them unsigned under those names would
+              be a lie about what they are. Magnitude and axis is what the projection
+              actually determines.
+    HOW. The palm triangle's apparent AREA shrinks as the cosine of the tilt, so
+              `acos(area / area_face_on)` is the magnitude. The axis it is leaning
+              about is the triangle's LONGEST remaining extent - the direction that
+              did not foreshorten - so the axis is perpendicular to the direction that
+              did.
+    UNMEASURED, and `params.palmarea` is a GUESS. What should set it is one hand held
+              square on to the camera with `h0_size` and the raw triangle area read
+              off together. Until then `tilt` is monotonic in the right direction with
+              an arbitrary zero.
+    """
+    a, b, c = PALM_TRIANGLE
+    # Twice the signed triangle area, by the shoelace formula. Normalised by size
+    # squared so it is scale-free and therefore depth-free, like every ratio here.
+    area = abs((view.x[b] - view.x[a]) * (view.y[c] - view.y[a])
+               - (view.x[c] - view.x[a]) * (view.y[b] - view.y[a])) / 2.0
+    reference = params.palmarea * view.size * view.size
+    if reference <= 0.0:
+        return (0.0, 0.0)
+    # acos of the area ratio. Clamped: a palm larger than the reference means the
+    # reference is mis-calibrated, not that the tilt is imaginary.
+    magnitude = math.degrees(math.acos(_clamp01(area / reference)))
+    # The axis. The palm foreshortens ALONG the direction it is tilting, so the axis
+    # it rotates about is the perpendicular - and the longest edge of the projected
+    # triangle is the direction that did not foreshorten, which IS that axis.
+    edges = ((a, b), (b, c), (a, c))
+    longest = max(edges, key=lambda pair: view._raw_distance(*pair))
+    return (magnitude, view.angle(*longest))
 
 
 def derive(values: dict[str, float], params: Params | None = None,

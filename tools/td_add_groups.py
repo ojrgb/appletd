@@ -106,6 +106,12 @@ GROUPS = (
     ("Gestures",    True,  "derive"),
     ("Events",      True,  "native"),
     ("Descriptor",  False, "derive"),
+    # 3D inferred from a 2D projection, added 2026-08-21. Both OFF: the numbers are
+    # honest but uncalibrated, and `Palmarea`/`Zreference` on the Tuning page are what
+    # calibrate them. See docs/ATTRIBUTES.md for what each one can and cannot claim -
+    # in particular that neither can tell toward from away.
+    ("Depth",       False, "derive"),
+    ("Tilt",        False, "derive"),
 )
 
 # Which group COMP each toggle keeps alive, and therefore which toggles have to be

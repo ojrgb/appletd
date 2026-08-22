@@ -41,6 +41,7 @@ the Script CHOP's own framework overhead, which is not ours to remove.
 """
 
 import sys
+from dataclasses import fields
 
 REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
 # The master COMP holds every parameter; the hands STREAM holds this
@@ -60,28 +61,28 @@ REPO_ROOT = %(repo)r
 if REPO_ROOT not in sys.path:
     sys.path.append(REPO_ROOT)          # append, never insert
 
+from dataclasses import fields
+
 from visionhands.derive import ALL_GROUPS, Params, derive
 
 
 def _params(comp):
-    """Read the COMP's parameters, falling back to the spec defaults.
+    """Read the COMP's parameters, falling back to the dataclass defaults.
 
-    getattr rather than direct access so a COMP built before a parameter existed
-    still cooks, rather than erroring on every frame.
+    Built by iterating `dataclasses.fields(Params)` rather than by naming each one.
+    The hand-written version had drifted: it listed eight of the nine fields that
+    existed, so `overlapthreshold` was silently stuck at its default however the
+    panel was set - and adding a field to `Params` would have made two more.
+
+    getattr rather than direct access, so a COMP built before a parameter existed
+    still cooks rather than erroring on every frame.
     """
-    def par(name, default):
-        p = getattr(comp.par, name, None)
-        return default if p is None else float(p.eval())
-    return Params(
-        confthreshold=par("Confthreshold", 0.30),
-        sizefloor=par("Sizefloor", 0.01),
-        curlmin=par("Curlmin", 0.35),
-        curlmax=par("Curlmax", 0.95),
-        extendedbelow=par("Extendedbelow", 0.30),
-        curledabove=par("Curledabove", 0.60),
-        spreadmin=par("Spreadmin", 0.40),
-        spreadmax=par("Spreadmax", 1.60),
-    )
+    values = {}
+    for spec in fields(Params):
+        par = getattr(comp.par, spec.name.capitalize(), None)
+        if par is not None:
+            values[spec.name] = float(par.eval())
+    return Params(**values)
 
 
 def _groups(comp):
@@ -182,6 +183,51 @@ def onCook(scriptOp):
 '''
 
 
+def _tuning_page(master, Params):
+    """Put every `derive.Params` field on the Tuning page. Returns (new, names).
+
+    WHY THIS EXISTS AT ALL, and it is a gap rather than a feature: `_params()` has
+    always read these by name with a getattr fallback, and NOTHING EVER CREATED THEM.
+    So every threshold in `derive()` - the confidence gate, the curl range, the spread
+    range, the overlap test - has been stuck at its dataclass default since the day it
+    was written, and the panel gave no sign. Eight tuning values that looked adjustable
+    and were not.
+
+    Built from `dataclasses.fields`, so the page and the dataclass cannot disagree and
+    a new field arrives on the panel without a second edit.
+
+    SHARED PAGE: `tools/td_add_latches.py` owns the fifteen latch threshold pairs on
+    Tuning as well. Safe because each builder appends only its own names and restores
+    only its own stored values - the hazard is two scripts appending the SAME
+    parameter, where whichever runs second resets it.
+    """
+    page = None
+    for existing in master.customPages:
+        if existing.name == "Tuning":
+            page = existing
+            break
+    if page is None:
+        page = master.appendCustomPage("Tuning")
+
+    known = {spec.name.capitalize() for spec in fields(Params)}
+    was = {par.name: par.eval() for par in master.customPars if par.name in known}
+    made = []
+    for spec in fields(Params):
+        name = spec.name.capitalize()
+        par = page.appendFloat(name, label=name)[0]
+        par.default = float(spec.default)
+        # `.val` only when the parameter is NEW: append* resets attributes, and a
+        # newly appended parameter reads 0 whatever its default says (DESIGN.md 2.11).
+        # A threshold silently at 0 is worse than one at its default - a
+        # `Confthreshold` of 0 passes every hand, however bad.
+        if name in was:
+            par.val = was[name]
+        else:
+            par.val = par.default
+            made.append(name)
+    return len(made), made
+
+
 def _keep_layout(master):
     """Has the user asked the builders to leave their node arrangement alone?"""
     par = getattr(master.par, "Keeplayout", None)
@@ -271,12 +317,22 @@ def main():
         del sys.modules[stale]
     # One layout table for every builder - two of them once placed their group on the
     # same coordinate, and nothing could notice.
+    from visionhands.derive import Params
     from visionhands.td_layout import stream_xy
 
     comp = op(COMP_PATH)
-    if comp is None:
-        print("FAIL no COMP at %s - run tools/td_build_vision.py first" % COMP_PATH)
+    master = op(MASTER_PATH)
+    if comp is None or master is None:
+        print("FAIL no COMP at %s - run tools/td_build_vision.py first"
+              % (COMP_PATH if comp is None else MASTER_PATH))
         return
+
+    # -- the tuning `derive()` has always had and never exposed ------------
+    made, existing = _tuning_page(master, Params)
+    print("0. Tuning: %d parameters for derive(), %d new"
+          % (len(fields(Params)), made))
+    if made:
+        print("   %s" % ", ".join(existing))
 
     keep = _keep_layout(op(MASTER_PATH) or comp)
     existing = comp.op("derive_callbacks")

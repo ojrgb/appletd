@@ -349,6 +349,76 @@ and needs to land inside 10 ms rather than inside 33 ms, gate an audio transient
 with `h0_snapping` and trigger from the audio. For event triggering, which is
 what these channels are for, the vision path is sufficient on its own.
 
+## Group: Depth — off by default, and inferred rather than measured
+
+Vision returns 21 points on a PLANE. There is no depth in the input, so everything
+here is a consequence of the projection rather than a measurement, and the channels
+are named to admit it.
+
+| channel | what it is |
+|---|---|
+| `h{i}_z` | `Zreference / h{i}_size`. 1.0 at the reference distance, 2.0 at twice it, 0.5 at half |
+| `h{i}_z_<finger>` | 0..1, how much the finger points ALONG the camera axis rather than across it |
+
+**`h{i}_z` is monotonic in distance and nothing else.** Apparent size goes as
+1/distance, so this rises as the hand retreats — which is all a "lean in to zoom"
+interaction needs. It is **not** metres, and it is **not comparable between two
+different hands**: a child's hand at 40 cm and an adult's at 60 read alike, because
+apparent size confounds hand size with distance. `Zreference` defaults to 0.12,
+which is `synth.HandPose.size`'s own default and the closest thing this project has
+to a reference distance. To recalibrate, hold a hand where you want z = 1 and read
+`h0_size`.
+
+**`h{i}_z_<finger>` CANNOT TELL TOWARD FROM AWAY.** A finger pointing at the camera
+and one pointing directly away project to the same foreshortened length, and that
+ambiguity is in the projection, not in the arithmetic. It is asserted as a test, so
+nobody later "fixes" it. Two more things about it:
+
+- it is only meaningful for a STRAIGHT finger, because a curled one foreshortens too.
+  `h{i}_curl_<finger>` is how a consumer tells those apart;
+- it is UNMEASURED on a real hand. The arithmetic is exact and the usefulness is not
+  established.
+
+## Group: Tilt — off by default, and deliberately not pitch and yaw
+
+| channel | what it is |
+|---|---|
+| `h{i}_tilt` | 0..90 degrees. 0 is the palm square on to the camera, 90 edge-on |
+| `h{i}_tilt_axis` | degrees, which way it is leaning. Meaningless when `tilt` is near 0 |
+
+**Every other angle in this system is in-plane.** `h{i}_rotation`,
+`h{i}_point_angle`, `h{i}_pinch_angle` and `hands_angle` all come from `atan2` on two
+image coordinates, so all of them are rotations about the camera's Z axis. These two
+are the out-of-plane part.
+
+**Why not pitch and yaw, which is the natural request.** Recovering those from a 2D
+projection needs the one thing a projection destroys: which side of the image plane a
+point is on. A palm tilted 30 degrees toward the camera and one tilted 30 degrees
+away project *identically*, so pitch and yaw cannot be signed — and publishing them
+unsigned under those names would misrepresent what they are. Magnitude plus axis is
+what the projection actually determines: two honest numbers instead of two dishonest
+ones.
+
+**How.** The palm triangle — wrist, index MCP, little MCP — has an apparent area that
+shrinks with the cosine of the tilt, so `acos(area / Palmarea)` is the magnitude. The
+palm foreshortens *along* the direction it leans, so the axis it turns about is the
+longest surviving edge.
+
+**`Palmarea` is the zero point of the channel and it needs calibrating.** MEASURED at
+**0.3059** against `synth.py`'s geometry — not against a real hand. The first value
+was a guess of 0.14, which put the ratio over 1.0 and clamped it: `tilt` read exactly
+0 for the first **62 degrees** of real rotation, a dead zone big enough to make the
+channel useless while looking like it worked. It is deliberately set at the measured
+value rather than above it, because a small dead zone near zero is a better failure
+than reporting tilt on a hand that has none. **If a real face-on hand reads non-zero
+`tilt`, raise `Palmarea`.**
+
+**The confound:** the triangle's corners include two MCP knuckles, and MEASURED on
+`synth.py` the area ratio moves with finger SPREAD — 0.1835 at spread 0.6, 0.4282 at
+1.4. So spreading the fingers reads partly as un-tilting the palm. A real hand's
+knuckles move far less than the synthesiser's, so the true confound is smaller than
+that range suggests, but it is not zero and nothing here corrects for it.
+
 ## Group: Pose descriptor — off by default
 
 All 21 joints per hand, expressed relative to the palm centre, divided by size,
@@ -376,6 +446,8 @@ signature of the pose, for gesture matching or as features for a model.
 | `Gestures` — held states | 18 | on |
 | `Events` — momentary pulses | 34 | on |
 | `Descriptor` | 84 | off |
+| `Depth` — `h{i}_z` and five per-finger | 12 | **off** |
+| `Tilt` — `h{i}_tilt` and `h{i}_tilt_axis` | 4 | **off** |
 
 Presets on the `Verbosity` menu: **Minimal** = Landmarks + Coordstx (221),
 **Interaction** = everything except the pixel spaces and Descriptor (421),
@@ -484,6 +556,20 @@ freezing it would freeze every position rather than bypass the filter. Its
 `Smoothing` toggle gates its cost through the bypass flag instead.
 
 ### Page: Tuning — the ones you will actually adjust
+
+**Eleven of these did not exist until 2026-08-21, and that was a real gap rather
+than a new feature.** `derive()`'s `_params()` has always read them by name with a
+getattr fallback, and nothing ever created them — so every threshold in `derive()`
+was stuck at its dataclass default and the panel gave no sign. `Confthreshold`,
+`Sizefloor`, `Curlmin`, `Curlmax`, `Extendedbelow`, `Curledabove`, `Spreadmin`,
+`Spreadmax` and `Overlapthreshold` are all reachable now, along with `Zreference`
+and `Palmarea` for the two new groups.
+
+They are built by iterating `dataclasses.fields(Params)`, so the page and the
+dataclass cannot disagree and a new field arrives on the panel without a second
+edit. The hand-written version they replaced had already drifted: it listed eight of
+the nine fields that existed, so `Overlapthreshold` was silently unreachable even
+where the others would have worked.
 
 | parameter | type | default | what it does |
 |---|---|---|---|
