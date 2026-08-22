@@ -561,6 +561,14 @@ script, both the registry and the builders can import it.
   freezes. `td.noiseTOP` and friends ARE on the `td` module; `CookLevel` is not.
 - `appendChan()` outside `onCook` "causes random behavior" unless the operator is
   locked. Same for `copyNumpyArray`.
+- **Removing the code that creates a parameter does not remove the parameter.** It
+  keeps its value, keeps its place on the page, and drives nothing. `Segment` sat on
+  the Segmentation page reading True for two commits after `Streamsegment` took over
+  both its jobs, and it took the user asking "what is the difference?" to find it. The
+  same shape as operator storage outliving the code that wrote it (DESIGN.md 2.11):
+  TouchDesigner keeps what you made until you unmake it. Every builder that has ever
+  dropped a parameter needs a retire table - `td_build_vision.py` has `RETIRED_PARS`,
+  and `td_add_segmentation.py` has one now too.
 - **An operator with NO INPUT is never dirtied, so it cooks once and then serves its
   last result for ever.** True of a Script CHOP (below, via `CookLevel`) AND of a
   Script TOP - which has no Cook Type parameter at all to fix it with. The cure is a
