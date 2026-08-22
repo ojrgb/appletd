@@ -79,6 +79,10 @@ SIDECAR_PYTHON = %(python)r
 # used to go to /dev/null, which made "why did depth not start" a question nobody could
 # answer. See `start()`.
 SIDECAR_LOG = "/tmp/visionhands_sidecar.log"
+# The `Camera` menu's "use whatever the engine defaults to" entry. A real token rather
+# than an empty string, because TouchDesigner refuses "" as a menu NAME at the C level -
+# a SystemError with no Python exception behind it. Mapped back to blank below.
+CAMERA_DEFAULT = "__default__"
 
 # Interpolated from the module-level REQUEST_TOGGLES below, NOT written out here.
 # One definition, so the launcher's loop and the builder's check cannot disagree -
@@ -178,6 +182,10 @@ def start():
     # The camera as a NAME SUBSTRING, straight through to `--camera`. Blank means
     # "whatever the engine defaults to", so clearing the field is not an error.
     camera = "" if comp is None else str(comp.par.Camera.eval()).strip()
+    if camera == CAMERA_DEFAULT:
+        # "(default)" means don't pass --camera at all, so engine.py's measured default
+        # decides - which is exactly what an empty text field used to mean.
+        camera = ""
     # The base port. Read from the COMP rather than baked in, so the OSC In CHOPs -
     # which bind it through an expression on the same parameter - and the process we
     # start cannot disagree about where the data goes.
@@ -262,6 +270,13 @@ def start():
               ",".join(streams)))
     print("[visionhands]   log: %%s   (previous run: %%s.prev)"
           %% (SIDECAR_LOG, SIDECAR_LOG))
+    # The signature of what was ACTUALLY launched, so `set_state` can tell a running
+    # process that matches the panel from one that does not. A plain string in operator
+    # storage: TouchDesigner pickles storage into the .toe and only primitives are safe
+    # there (DESIGN.md 2.11), which a string is.
+    if comp is not None:
+        comp.store("launch_signature", launch_signature(comp))
+        set_state(comp)
     # The ports each stream lands on, printed because "which port is pose on" is
     # the first question when the pose COMP shows no channels.
     print("[visionhands]   hands -> %%d   pose -> %%d   face -> %%d  (base + 0/1/2)"
@@ -270,7 +285,12 @@ def start():
         print("[visionhands]   segment -> %%s  (a shared mmap, no port), quality %%s"
               %% (comp.par.Maskbuffer.eval(), comp.par.Segquality.eval()))
     if "depth" in streams:
-        pins = str(comp.par.Depthpins.eval()).strip()
+        # `depth_pins(comp)`, NOT the retired `Depthpins` text field. This line kept a
+        # reference to it after the pins became a list of rows, so `start()` raised
+        # AttributeError inside a callback - where it surfaced as the sidecar simply
+        # not starting, with no message anywhere. A reporting line that can break the
+        # thing it reports on.
+        pins = depth_pins(comp)
         print("[visionhands]   depth   -> %%s  (a shared mmap, no port), %%s"
               %% (comp.par.Depthbuffer.eval(),
                   "pins %%s" %% pins if pins else
@@ -360,6 +380,151 @@ def list_cameras():
     return names
 
 
+def refresh_cameras(comp=None, want=None):
+    """Re-enumerate the devices and put them in the `Camera` menu.
+
+    Contract: the CURRENT value survives even if the device has gone - it is kept as
+              an entry rather than silently swapped for whatever is first. A camera
+              unplugged should read as a camera unplugged, not as a different camera.
+    Why a menu is safe NOW when it was not before: the original `Camera` was a text
+              field precisely because a baked list goes wrong the moment a device is
+              unplugged. A refreshable list answers that - this function is the
+              refresh, and the pulse beside the menu is how you reach it.
+    """
+    comp = comp or op(%(comp)r)
+    names = list_cameras()
+    if comp is None:
+        return names
+    # `want` overrides the live value, and the builder needs it: when `Camera` changes
+    # from a text field to a menu the parameter is destroyed and re-appended, so by the
+    # time this runs the old value is gone from the par and only the builder still has
+    # it. Without this the migration below has nothing to migrate.
+    current = str(want if want is not None else comp.par.Camera.eval())
+    # `CAMERA_DEFAULT` FIRST, meaning "whatever the engine defaults to" - the same
+    # thing an empty text field used to mean, kept so the old behaviour is reachable.
+    entries = [CAMERA_DEFAULT] + names
+    if current and current not in entries:
+        # MIGRATION, and it earns its place: `Camera` was a text field matched as a
+        # SUBSTRING for weeks, so a saved project holds "MacBook" where the device is
+        # "MacBook Pro Camera". Resolving that to the real device is what the user
+        # meant; leaving it as a dead entry would silently stop finding the camera.
+        matched = [n for n in names if current.lower() in n.lower()]
+        if len(matched) == 1:
+            print("[visionhands] `%%s` was a substring - selecting `%%s`"
+                  %% (current, matched[0]))
+            current = matched[0]
+        else:
+            # Zero matches, or an ambiguous one. Kept as an entry rather than guessed
+            # at: a camera that has been unplugged should read as itself.
+            entries.append(current)
+            print("[visionhands] `%%s` matches %%d devices - kept as an entry, but it "
+                  "will not be found until that is resolved" %% (current, len(matched)))
+    comp.par.Camera.menuNames = entries
+    comp.par.Camera.menuLabels = ["(default)" if e == CAMERA_DEFAULT else e
+                                  for e in entries]
+    comp.par.Camera.val = current
+    set_state(comp)
+    return names
+
+
+# Every parameter the sidecar reads ONCE at launch. Changing any of them means the
+# running process no longer matches the panel, which is what "Requires Restart" says.
+# Built from REQUEST_TOGGLES so a new request cannot be added to one list and not the
+# other - the mistake that launched the sidecar without `depth` while the panel said
+# otherwise.
+def launch_pars(comp):
+    names = ["Camera", "Slotassign", "Oscport", "Segquality",
+             "Maskbuffer", "Depthbuffer", "Depthpinson", "Depthpincount"]
+    names += [par_name for _n, par_name in REQUEST_TOGGLES]
+    for index in range(1, 9):
+        names += ["Depthpin%%d%%s" %% (index, suffix) for suffix in ("x", "y", "m")]
+    return [n for n in names if hasattr(comp.par, n)]
+
+
+def launch_signature(comp):
+    """A string of every launch flag's value. Compared, not parsed."""
+    return "|".join("%%s=%%s" %% (n, getattr(comp.par, n).eval())
+                    for n in launch_pars(comp))
+
+
+# The three states, as (text, r, g, b). An RGB parameter renders as a colour swatch,
+# which is the only way to get colour into a parameter page from Python - a Par has
+# `style`, `enable` and `readOnly` and no colour of its own.
+STATE_COLOURS = {
+    "Running": (0.20, 0.75, 0.30),
+    "Stopped": (0.80, 0.22, 0.22),
+    "Requires Restart": (0.90, 0.72, 0.15),
+}
+
+
+def set_state(comp=None):
+    """Write `Capturestate` and its colour swatch. Returns the state.
+
+    HOW EACH STATE IS DECIDED, and the honesty matters because a status light that
+    lies is worse than no light:
+
+      Stopped           no process matching the sidecar is running. Checked with
+                        pgrep, so this is the real thing and not the toggle's opinion.
+      Requires Restart  a process IS running, but a launch flag has changed since it
+                        started - so the panel and the process disagree. This is the
+                        state that used to be invisible and cost a user twenty minutes
+                        wondering why `Streamdepth` did nothing.
+      Running           a process is running and its launch flags still match.
+
+    Called on every launch-flag change and on every button. NOT on a timer: pgrep
+    costs milliseconds, which is nothing on a change and rude every frame. So a
+    process that dies on its own will read `Running` until something asks - and
+    `sc_uptime_s` freezing is the signal that catches that.
+    """
+    comp = comp or op(%(comp)r)
+    if comp is None:
+        return "Stopped"
+    if not running_pids():
+        state = "Stopped"
+    elif comp.fetch("launch_signature", None) != launch_signature(comp):
+        state = "Requires Restart"
+    else:
+        state = "Running"
+    if hasattr(comp.par, "Capturestate"):
+        comp.par.Capturestate = state
+        red, green, blue = STATE_COLOURS[state]
+        comp.par.Capturelightr = red
+        comp.par.Capturelightg = green
+        comp.par.Capturelightb = blue
+    return state
+
+
+def restart():
+    """Stop and start, and report the state. What the Restart pulse calls.
+
+    `start()` already stops first, so this is start() plus the reporting - but having
+    it named is the point: "Restart" on a button is unambiguous where pressing Active
+    twice is a thing somebody has to be told to do.
+
+    IT DOES NOT WRITE `Active`, and that is a bug fix rather than an omission. Writing
+    it re-enters the very callback that starts the process - Parameter Execute callbacks
+    are DEFERRED to the end of the frame, so `restart()` spawned one process directly
+    and the queued `Active` callback spawned another, and a later `Active = False`
+    could resolve before the stale True and leave a process running with the toggle
+    off. MEASURED 2026-08-22: pid 31291 outlived being switched off.
+    #
+    # So there is exactly ONE path that starts the process, and it is the `Active`
+    # callback. When Active is already on, restart does the work directly; when it is
+    # off, it turns Active on and lets that one path do it.
+    """
+    comp = op(%(comp)r)
+    pid = start()
+    if comp is not None:
+        comp.par.Capturepid = pid
+        # Written so the toggle agrees with reality. Whether this re-fires the DAT's
+        # own value-change callback is TouchDesigner's business and not something to
+        # depend on either way - `onValueChange` for `Active` is idempotent, so a
+        # second visit finds a matching process and returns without spawning.
+        comp.par.Active = bool(pid)
+        set_state(comp)
+    return pid
+
+
 def status():
     pids = running_pids()
     return "capture: %%s" %% (("running, pid %%s" %% pids) if pids else "not running")
@@ -382,24 +547,37 @@ SIDECAR_CALLBACK_SOURCE = '''# Generated by tools/td_build_vision.py
 
 def onValueChange(par, prev):
     control = op("sidecar_control").module
-    if par.name != "Active":
+    if par.name == "Active":
+        if par.eval():
+            # IDEMPOTENT: if a process is already running and its launch flags still
+            # match, there is nothing to do. Without this, anything that writes
+            # `Active` - the Restart pulse, a project load, a preset - spawns a second
+            # camera open on top of a perfectly good one. `start()` stops first so it
+            # would still end with one process, but a needless 1.5 s warm-up shows.
+            if control.set_state(par.owner) == "Running":
+                return
+            par.owner.par.Capturepid = control.start()
+        else:
+            stopped = control.stop()
+            par.owner.par.Capturepid = 0
+            print("[visionhands] stopped %d process(es)" % stopped)
+        control.set_state(par.owner)
         return
-    if par.eval():
-        # `start()` stops any existing process first, so pressing this twice cannot
-        # leave two processes holding one camera (DESIGN.md 8).
-        par.owner.par.Capturepid = control.start()
-    else:
-        stopped = control.stop()
-        par.owner.par.Capturepid = 0
-        print("[visionhands] stopped %d process(es)" % stopped)
+    # ANY OTHER parameter in `pars` is a launch flag, and changing one means the
+    # running process no longer matches the panel. `set_state` is what turns that into
+    # "Requires Restart" on the light - which is the whole point of listing them here.
+    control.set_state(par.owner)
 
 
 def onPulse(par):
     control = op("sidecar_control").module
+    if par.name == "Restartcapture":
+        control.restart()
+        return
     if par.name == "Printstatus":
         print("[visionhands] " + control.status())
     elif par.name == "Listcameras":
-        control.list_cameras()
+        control.refresh_cameras(par.owner)
 '''
 
 # Stops the sidecar when the project closes. Belt and braces with the sidecar's
@@ -467,6 +645,10 @@ COMP_NAME = "vision"
 REQUEST_TOGGLES = (("hands", "Streamhands"), ("pose", "Streampose"),
                    ("face", "Streamface"), ("segment", "Streamsegment"),
                    ("depth", "Streamdepth"))
+
+# Mirrors the same constant inside SIDECAR_CONTROL_SOURCE - the builder needs it to
+# seed the menu and the DAT needs it to read the menu back.
+CAMERA_DEFAULT = "__default__"
 
 OP_SHORTCUT = "Vision"
 
@@ -537,7 +719,14 @@ RETIRED_PARS = ("Startsidecar", "Stopsidecar", "Sidecarstatus", "Sidecarpid",
 # Vision below, and `previous` (captured before any of this) puts the tuned value
 # back. They have to be destroyed FIRST: TouchDesigner will not hold one custom
 # parameter name on two pages, so the append would fail while the old one exists.
-MOVED_PARS = ("Slotassign", "Streamhands", "Streampose", "Streamface")
+MOVED_PARS = ("Slotassign", "Streamhands", "Streampose", "Streamface",
+              # `Camera` became a MENU on 2026-08-22 and a parameter cannot change
+              # style in place - so it is destroyed and re-appended, with `previous`
+              # carrying the chosen device across.
+              "Camera",
+              # `Keeplayout` moved from Vision to Advanced: it is a build-time
+              # preference, not something anybody touches while running.
+              "Keeplayout")
 RETIRED_PAGES = ("Sidecar",)
 
 # The order the Vision page reads in: is it running, what is it looking at, what is
@@ -545,11 +734,12 @@ RETIRED_PAGES = ("Sidecar",)
 # with `Page.sort`, which reorders without destroying - and destroying a page
 # destroys its parameters and every tuned value with them.
 VISION_PAGE_ORDER = (
-    "Active", "Camera", "Listcameras",
+    "Active", "Restartcapture", "Capturestate", "Capturelight",
+    "Camera", "Listcameras",
     "Streamhands", "Streampose", "Streamface", "Streamsegment", "Segquality",
     "Streamdepth", "Slotassign",
     "Resw", "Resh", "Renderw", "Renderh", "Orthowidth",
-    "Screenspaceonly", "Deleteempty", "Keeplayout",
+    "Screenspaceonly", "Deleteempty",
 )
 
 # Defaults for the aspect and pixel conversions. MEASURED: the sidecar requests and
@@ -716,9 +906,51 @@ def main():
     # iPhone alongside the built-in one: a baked list goes wrong the moment a device
     # is unplugged, and a menu whose entries no longer exist is worse than a field
     # that simply does not match. `Listcameras` prints what is actually there.
-    par_camera = page.appendStr("Camera", label="Camera (name contains)")[0]
-    par_camera.default = DEFAULT_CAMERA
-    page.appendPulse("Listcameras", label="List Cameras")
+    # RESTART, beside Active. Pressing Active twice does the same thing - `start()`
+    # stops first - but nobody knows that from looking at a toggle, and "restart to
+    # apply" appears on nine labels on this page.
+    page.appendPulse("Restartcapture", label="Restart")
+
+    # THE STATUS LIGHT. A word and a colour swatch, because a Par carries `style`,
+    # `enable` and `readOnly` and no colour of its own - an RGB parameter renders as a
+    # swatch, which is the only way to get colour into a parameter page from Python.
+    #
+    # Three states, and the middle one is why this exists: `Requires Restart` means a
+    # process IS running but a launch flag has changed since it started, so the panel
+    # and the process disagree. That state used to be invisible, and it cost somebody
+    # twenty minutes wondering why `Streamdepth` did nothing (JOURNAL, 2026-08-22).
+    par_state = page.appendStr("Capturestate", label="Status")[0]
+    par_state.readOnly = True
+    par_light = page.appendRGB("Capturelight", label="")
+    for component in par_light:
+        component.readOnly = True
+
+    # A MENU as of 2026-08-22, and the reason the old comment gave for it being a text
+    # field is now answered rather than ignored. It said a baked list goes wrong the
+    # moment a device is unplugged - true, and the fix is that the list REFRESHES:
+    # `Refresh Camera List` re-enumerates, and a device that has gone is kept as an
+    # entry rather than silently swapped for whatever is first.
+    #
+    # The blank entry is "(default)", which is what an empty text field used to mean -
+    # whatever `engine.py`'s measured default picks. Kept reachable.
+    #
+    # Exact names now, not substrings. `--camera` still matches on a substring, so the
+    # old behaviour is intact for anyone driving the sidecar by hand.
+    # `CAMERA_DEFAULT` and not an empty string: TouchDesigner rejects "" as a menu
+    # NAME at the C level - `SystemError: error return without exception set`, with no
+    # Python exception to catch. So the "use the engine's own default" entry needs a
+    # real token, and `start()` maps it back to blank.
+    par_camera = page.appendMenu("Camera", label="Camera")[0]
+    # Seeded with ONLY the default entry, and defaulting to it. `DEFAULT_CAMERA` is
+    # "MacBook" - a SUBSTRING, which was right for a text field matched with `in` and
+    # is wrong as a menu entry, because no device is called that. The real names arrive
+    # from `refresh_cameras` at the end of the build; until then "(default)" is the
+    # honest option, and it behaves exactly as the old blank field did: no `--camera`
+    # is passed and engine.py's own default decides.
+    par_camera.menuNames = [CAMERA_DEFAULT]
+    par_camera.menuLabels = ["(default)"]
+    par_camera.default = CAMERA_DEFAULT
+    page.appendPulse("Listcameras", label="Refresh Camera List")
 
     # Slot assignment: h0 = the right hand, h1 = the left, whichever order Vision
     # reports them in (visionhands/slots.py). NOTE the consequence: with this on, a
@@ -832,10 +1064,6 @@ def main():
     # rule and what it cannot protect - the short version is that it holds the group
     # COMPs, the stream shell and the OSC In CHOPs, and cannot hold operators INSIDE
     # a group, because those are destroyed and regenerated on every run.
-    par_keep = page.appendToggle(
-        "Keeplayout", label="Keep Layout (builders leave existing nodes)")[0]
-    par_keep.default = False
-
     # The page reads in the order a user meets it: is it running, what is it
     # looking at, what is it computing, what geometry, what comes out. `sort` rather
     # than destroy-and-rebuild, because destroying a page destroys its parameters
@@ -866,6 +1094,14 @@ def main():
     # arrangement `Oscport` has. Owned HERE rather than by
     # tools/td_add_segmentation.py, because `start()` above needs it to exist before
     # anything has read a mask.
+    # KEEP LAYOUT, moved here from Vision on 2026-08-22. It is a build-time
+    # preference - whether the builders may move nodes - not something anybody touches
+    # while the thing is running, and it was the odd one out among the operational
+    # controls.
+    par_keep = advanced.appendToggle(
+        "Keeplayout", label="Keep Layout (builders leave existing nodes)")[0]
+    par_keep.default = False
+
     par_mask = advanced.appendStr("Maskbuffer", label="Mask Buffer Path")[0]
     par_mask.default = DEFAULT_MASK_PATH
     par_depthbuf = advanced.appendStr("Depthbuffer",
@@ -1146,7 +1382,20 @@ def main():
     callbacks.nodeX, callbacks.nodeY = master_xy("sidecar_callbacks")
     callbacks.text = SIDECAR_CALLBACK_SOURCE
     callbacks.par.op = comp.path
-    callbacks.par.pars = "Active Printstatus Listcameras"
+    # Active and the two pulses, PLUS every launch flag - because a launch flag
+    # changing is exactly what "Requires Restart" reports, and a parameter this DAT is
+    # not watching cannot report anything. Built from the same table the launcher uses.
+    watched = ["Active", "Restartcapture", "Printstatus", "Listcameras",
+               "Camera", "Slotassign", "Oscport", "Segquality",
+               "Maskbuffer", "Depthbuffer"]
+    watched += [par_name for _n, par_name in REQUEST_TOGGLES]
+    # The depth pins live on a page tools/td_add_depth.py owns, so they may not exist
+    # yet on a first build - listed by NAME regardless, because a Parameter Execute
+    # DAT's `pars` is a pattern list and naming one that does not exist is harmless.
+    watched += ["Depthpinson", "Depthpincount"]
+    watched += ["Depthpin%d%s" % (index, suffix)
+                for index in range(1, 9) for suffix in ("x", "y", "m")]
+    callbacks.par.pars = " ".join(dict.fromkeys(watched))
     callbacks.par.active = True
     callbacks.par.onpulse = True
     callbacks.par.valuechange = True
@@ -1226,6 +1475,23 @@ def main():
     print("   which is the only thing that knows which groups are frozen - so run")
     print("   it after this, or the trim keeps whatever list it had.")
     print()
+    # The device list and the status light, once, at the end - so a fresh build opens
+    # with a populated menu and an honest colour rather than an empty dropdown and a
+    # blank field. `refresh_cameras` enumerates in a subprocess and opens no device,
+    # so this takes the camera from nothing and raises no permission prompt.
+    try:
+        # `previous` carries what `Camera` held BEFORE it was destroyed and re-appended
+        # as a menu, which is the only place the old text-field value still exists.
+        devices = control.module.refresh_cameras(comp, want=previous.get("Camera"))
+        print("   Camera menu: %d device(s) - %s"
+              % (len(devices), ", ".join(devices) or "none found"))
+        print("   Status: %s" % control.module.set_state(comp))
+    except Exception as problem:                    # noqa: BLE001 - reported, not fatal
+        # A build that could not enumerate is still a working build: the menu keeps
+        # whatever it had and `Refresh Camera List` is one click away.
+        print("   (could not enumerate devices: %r - press Refresh Camera List)"
+              % (problem,))
+
     print("   Reference a fingertip as:  op('%s/hands')['h0_index_tip_tx']"
           % comp.path)
     print("   ...or off the single output:  op('%s')['h0_index_tip_tx']" % comp.path)

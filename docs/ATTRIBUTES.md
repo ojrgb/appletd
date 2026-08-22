@@ -813,8 +813,10 @@ moved to Advanced.
 | parameter | default | what it does |
 |---|---|---|
 | `Active` | off | is the capture process running. Replaces the Start and Stop pulses |
-| `Camera` | `MacBook` | which device, as a SUBSTRING of its name |
-| `Listcameras` | pulse | print the devices to the Textport |
+| `Restartcapture` | pulse | **Restart** — stop and start in one press |
+| `Capturestate` | READ-ONLY | `Running` / `Stopped` / `Requires Restart`, with a colour swatch beside it |
+| `Camera` | `(default)` | a MENU of the real devices. `(default)` lets the engine pick |
+| `Listcameras` | pulse | **Refresh Camera List** — re-enumerate and repopulate the menu |
 | `Streamhands` | on | run `VNDetectHumanHandPoseRequest` |
 | `Streampose` | **off** | run `VNDetectHumanBodyPoseRequest` |
 | `Streamface` | **off** | run `VNDetectFaceLandmarksRequest` |
@@ -845,6 +847,28 @@ disabled and you want it back without re-enabling the group.
 This toggle is the ONE place in the component that deliberately reverses
 `DESIGN.md` 6.2's "channels never vanish" rule, and it does so because the audience
 is people meeting a hand tracker for the first time.
+
+### The status light, and what each colour actually means
+
+| | when |
+|---|---|
+| **Running** (green) | a sidecar process is running AND its launch flags still match the panel |
+| **Stopped** (red) | no matching process. Checked with `pgrep`, so this is the real thing rather than the toggle's opinion |
+| **Requires Restart** (yellow) | a process IS running, but a launch flag has changed since it started |
+
+**The yellow one is why this exists.** Nine labels on this page say "restart to
+apply", and until now nothing told you when you had actually triggered that. It cost
+a real twenty minutes: `Streamdepth` was switched on while the sidecar was already
+running, so the panel said depth was on and the process had never been asked for it.
+
+It is a colour SWATCH beside the word because a TouchDesigner parameter carries
+`style`, `enable` and `readOnly` and no colour of its own — an RGB parameter renders
+as a swatch, which is the only way to get colour into a parameter page from Python.
+
+**It updates on changes and on button presses, not on a timer.** `pgrep` costs
+milliseconds — nothing on a click, rude every frame. So a process that dies on its own
+reads `Running` until something asks; `sc_uptime_s` freezing is the signal that catches
+that, and it is why that channel exists.
 
 **`Active` is a COMMAND, not a reading.** The process can die on its own — a camera
 unplugged, a crash, a kill from a terminal — and the toggle would still read on.

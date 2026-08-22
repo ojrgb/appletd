@@ -561,6 +561,14 @@ script, both the registry and the builders can import it.
   freezes. `td.noiseTOP` and friends ARE on the `td` module; `CookLevel` is not.
 - `appendChan()` outside `onCook` "causes random behavior" unless the operator is
   locked. Same for `copyNumpyArray`.
+- **A Parameter Execute DAT's pulse switch is called `onpulse`, not `pulse`**, and it
+  defaults to True. Looking for `par.pulse` finds nothing and suggests pulses are
+  disabled when they are not.
+- **A REPORTING line can break the thing it reports on.** `start()` kept a reference
+  to the retired `Depthpins` after the pins became a list of rows, in its own summary
+  print - AFTER the `Popen`. So it spawned the process, raised AttributeError inside a
+  callback, and surfaced as "the sidecar did not start" while leaving an orphan
+  running. Retiring a parameter means grepping for it, not just removing the control.
 - **Removing the code that creates a parameter does not remove the parameter.** It
   keeps its value, keeps its place on the page, and drives nothing. `Segment` sat on
   the Segmentation page reading True for two commits after `Streamsegment` took over
