@@ -494,6 +494,25 @@ geometry validates arithmetic and says nothing about how a hand sits.
 | `Mincutoff` | Hz | 1.5 | how heavily a SLOW-moving hand is smoothed |
 | `Beta` | 1/units | 2.0 | how far a FAST-moving hand is allowed through |
 
+### Page: Advanced — the internals
+
+| parameter | default | what it does |
+|---|---|---|
+| `Oscport` | 10000 | the BASE port. Streams take base + 0/1/2 (DESIGN.md 6.4) |
+| `Printstatus` | pulse | is a capture process running, and its pid |
+| `Capturepid` | read-only | what was last started. Not proof it is still alive |
+
+**`Oscport` splits in two directions and the label says restart.** The three OSC In
+CHOPs bind it through an EXPRESSION, so TouchDesigner starts listening on the new
+port immediately; the running process keeps sending to the old one until it is
+restarted. The visible symptom of that gap is `sc_uptime_s` freezing — the same
+signal as a dead process, which is worth knowing before you chase it.
+
+**This page is shared by two builders.** `tools/td_build_vision.py` owns the three
+above and `tools/td_add_temporal.py` owns the four below. That is safe only because
+each appends its own names and each restores its own stored values; the hazard is two
+scripts appending the SAME parameter, where whichever runs second resets it.
+
 ### Page: Advanced — presence and pose
 
 | parameter | type | default | what it does |
@@ -597,7 +616,7 @@ Restructured 2026-08-21. **Every parameter on this page and the ones below belon
 to `/project1/vision`**, the master COMP, and every stream reads it:
 
 ```
-/project1/vision          Vision, Sidecar, Filter, Advanced, Tuning, Attributes
+/project1/vision          Vision, Filter, Advanced, Tuning, Attributes
   hands_osc 10000  ->  hands  ->  out1
   pose_osc  10001  ->  pose   ->  out2
   face_osc  10002  ->  face   ->  out3
@@ -612,18 +631,45 @@ cannot wire to a nested one.
 
 **Paths changed:** `/project1/visionhands` is now `/project1/vision/hands`.
 
-### Page: Sidecar
+### Page: Vision — everything operational
 
-`Startsidecar`, `Stopsidecar`, `Sidecarstatus` pulses and a read-only
-`Sidecarpid`, as built, plus three toggles that are LAUNCH FLAGS - read once when
-the process starts, so each says "restart to apply":
+**The Sidecar page is gone as of 2026-08-21**, and so is the word. It named an
+implementation detail: a consumer of this COMP does not care that a separate process
+holds the camera, and the page made them read about it before they could pick a
+stream. What was operational moved here; the two genuinely diagnostic parameters
+moved to Advanced.
 
 | parameter | default | what it does |
 |---|---|---|
-| `Slotassign` | on | h0 is the right hand, h1 the left (DESIGN.md 6.3) |
+| `Active` | off | is the capture process running. Replaces the Start and Stop pulses |
+| `Camera` | `MacBook` | which device, as a SUBSTRING of its name |
+| `Listcameras` | pulse | print the devices to the Textport |
 | `Streamhands` | on | run `VNDetectHumanHandPoseRequest` |
 | `Streampose` | **off** | run `VNDetectHumanBodyPoseRequest` |
 | `Streamface` | **off** | run `VNDetectFaceLandmarksRequest` |
+| `Slotassign` | on | h0 is the right hand, h1 the left (DESIGN.md 6.3) |
+| `Resw` `Resh` | 1280x720 | the SOURCE image, for pixel space |
+| `Renderw` `Renderh` | 1280x720 | the RENDER, for the world-space aspect |
+| `Orthowidth` | 1.0 | the camera's ortho width |
+| `Screenspaceonly` | off | drop the raw normalised coords (above) |
+| `Keeplayout` | off | builders leave existing nodes where you put them |
+
+**`Active` is a COMMAND, not a reading.** The process can die on its own — a camera
+unplugged, a crash, a kill from a terminal — and the toggle would still read on.
+`sc_uptime_s` is the truth, because it arrives FROM the process; `Capturepid` on
+Advanced is only what was last started. Reconciling the toggle would mean `pgrep` on
+a timer, which costs milliseconds — fine on a button press, rude every frame.
+
+**`Camera` is a substring, and a string rather than a menu on purpose.** MEASURED on
+this machine, `Listcameras` returns four devices — the built-in camera, an OBS
+virtual camera, a Camo camera and an iPhone. A menu baked at build time goes wrong
+the moment something is unplugged, and a menu whose entries no longer exist is worse
+than a field that simply does not match. Enumeration opens no device and raises no
+permission prompt, so the button is safe to press at any time.
+
+The three stream toggles are LAUNCH FLAGS — read once when the process starts, so
+each says "restart to apply" — **and since 2026-08-21 they also gate cooking**, which
+takes effect at once. See the Attributes page notes.
 
 **What a stream toggle saves is INFERENCE, not channels.** A disabled stream keeps
 every one of its channels, reading zero: TouchDesigner's OSC In CHOP creates

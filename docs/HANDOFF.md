@@ -38,6 +38,22 @@ Inside each stream, and the ROW a node is on says whether it is in the data path
            temporal -----------+
            latches ------------+
 
+FIVE parameter pages, all on the master. **The Sidecar page is gone as of
+2026-08-21** and so is the word — it named an implementation detail nobody consuming
+this COMP cares about:
+
+    Vision      Active, Camera, Listcameras, the three stream toggles, Slotassign,
+                the resolutions, Orthowidth, Screenspaceonly, Keeplayout
+    Filter      Smoothing, Mincutoff, Beta
+    Advanced    Oscport, Printstatus, Capturepid, and the debounce/velocity tuning
+    Tuning      the fifteen latch threshold pairs
+    Attributes  the group toggles and Verbosity
+
+`Active` replaces the Start and Stop pulses, and it is a COMMAND rather than a
+reading: the process can die on its own and the toggle will still read on.
+`sc_uptime_s` is the truth. `Camera` is a name SUBSTRING — this machine has four
+devices, so a baked menu would go stale the moment one was unplugged.
+
 `coords` now holds up to six gateable halves: `world` and `pixels` for the wire
 contract, `dv_world`/`dv_pixels` for the positions and rates that `derive_chop` and
 `temporal` compute (hands only), and `lm_world`/`lm_pixels` for the face's landmark

@@ -537,6 +537,36 @@ class Sidecar:
         return 0
 
 
+def _print_cameras() -> int:
+    """Print every capture device, one per line, as `name<TAB>uniqueID`.
+
+    Why it lives in the SIDECAR rather than in a tool of its own: this is the
+    process that already imports pyobjc, and `--camera` takes a substring of the
+    name, so the list and the thing that consumes it come from one place and cannot
+    disagree. TouchDesigner shells out to it (`Listcameras` on the Vision page)
+    precisely so that no pyobjc import ever happens inside TD.
+
+    Contract: stdout is machine-readable - `name`, a tab, `uniqueID` - so the caller
+              can build a menu from it. Returns 0 even when the list is empty; no
+              cameras is a fact about the machine, not a failure of this command.
+    Traps:    enumeration does NOT open a device or start a session, so it raises no
+              TCC prompt and does not take the camera from whatever already has it.
+              VERIFIED on this machine: four devices listed with the camera in use
+              by another application.
+              The import is INSIDE the function. `engine` pulls in AVFoundation and
+              Vision, and `--list-cameras` must not be the reason a machine without
+              them cannot even print a usage message.
+    """
+    from visionhands.engine import discover_devices
+
+    devices = discover_devices()
+    for device in devices:
+        print("%s\t%s" % (device.localizedName(), device.uniqueID()))
+    if not devices:
+        print("(no video capture devices found)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -547,6 +577,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="send rate, independent of the camera's rate")
     parser.add_argument("--camera", default=None,
                         help="substring of the camera name; never an index")
+    parser.add_argument("--list-cameras", action="store_true",
+                        help="print the capture devices and exit. Enumeration "
+                             "only - it opens no device, starts no session and "
+                             "triggers no permission prompt, which is what makes "
+                             "it safe to call from a button in TouchDesigner")
     parser.add_argument("--slots", default=SLOT_MODE_CHIRALITY, choices=SLOT_MODES,
                         help="which physical hand goes in which slot. "
                              "'chirality' puts the right hand in h0 and the left "
@@ -568,6 +603,9 @@ def main(argv: list[str] | None = None) -> int:
                              "TouchDesigner launcher so a TD crash cannot leave "
                              "an orphan holding the camera.")
     args = parser.parse_args(argv)
+
+    if args.list_cameras:
+        return _print_cameras()
 
     if args.parent_pid is not None and args.parent_pid <= 0:
         # os.kill(0, 0) signals the entire PROCESS GROUP and always succeeds, so
