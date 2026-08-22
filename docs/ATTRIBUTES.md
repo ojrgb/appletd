@@ -1214,7 +1214,9 @@ every caveat. This is the parameter table.
 |---|---|---|---|
 | Vision | `Streamdepth` | **off** | run the model and read its map |
 | Advanced | `Depthbuffer` | `/tmp/visionhands_depth.buf` | the shared file. Must match on both sides |
-| Depth | `Depthpinson` | on | run the pin solve. Off = the map is relative, no metric claim |
+| Depth | `Depthpinson` | on | apply the fit to the PIXELS - the port of the example's `p`. Off = the model's own numbers |
+| Depth | `Depthwindownear` `Depthwindowfar` | 0.4, 3.0 | the fixed metre window the corrected map is drawn on |
+| Depth | `Depthunits` | READ-ONLY | which of the two you are looking at |
 | Depth | `Depthpincount` | 3 | how many pin rows are in use, 0 to 8. Rows past it are greyed out |
 | Depth | `Depthpin1x` … `Depthpin8m` | the example's | the pins. First three from `apple-vision-examples` |
 | Depth | `Depthpinsdraw` | off | draw the pins in red on the map. Output becomes RGB |

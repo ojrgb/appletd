@@ -1367,11 +1367,28 @@ The fit travels in the buffer's 32-byte AUX block, not on a parameter of its own
 because it is solved from ONE frame and is meaningless against any other. Sending it
 separately would let a consumer pair a map with a neighbouring frame's scale.
 
-**No metres conversion in TouchDesigner, deliberately.** `Z = 1/(alpha*d + beta)` is
-two published numbers and a reciprocal — a GLSL TOP, or an expression on whatever is
-reading it. Doing it in the Script TOP would mean choosing a clamp and a colour window
-on the user's behalf, on the main thread, for every project whether it wants metres or
-not.
+**`Depthpinson` switches the PIXELS, which is the port of the example's `p`** — and it
+did not, for one commit. Off, or with no usable fit, `outdepth` carries the model's own
+numbers. On, it carries metres mapped onto a fixed window (`Depthwindownear` → 1.0,
+`Depthwindowfar` → 0.0, defaults 0.4/3.0 from the example's own `--window`). Both keep
+NEAR BRIGHT, deliberately: that is the only way toggling shows a change in stability
+rather than a change in palette, which is the example's argument.
+
+The first version published the raw map in both states and only exported alpha/beta.
+The reasoning was that a colour window is the user's choice - true, and it missed that
+the *observable consequence* of pinning is the image ceasing to breathe, which cannot be
+seen at all without a fixed window. A control whose only effect is on numbers nobody is
+reading looks broken, and the user reported it as exactly that. `Depthfitalpha` and
+`Depthfitbeta` are still published for anyone wanting true metres.
+
+**And a measurement that shows what the three readouts are for.** On the fixture with
+the default pins: `Depthfitpins` was 2 in every one of 40 frames (pin 1 dropped 34
+times), `Depthfitchecked` was 0 throughout, and `alpha` swung 0.526 to 1.763 - a 3.3x
+range - with `beta` going negative. So the windowed map was no more stable than the raw
+one: 0.617 of swing on a stationary patch against 0.653. That is not the correction
+failing; it is the correction faithfully tracking a fit solved from two points that are
+partly a moving torso. The arithmetic is exact, the inputs were wrong, and the readouts
+said so before anybody looked at the picture.
 
 ## 3. Traps — all of these cost real time in the spike
 

@@ -145,6 +145,29 @@ converts one to the other — §"Pinning" above says why, and `Depthfitalpha` /
 `Depthfitbeta` are published so you can. If you have been reading `outdepth` expecting
 metres, that is the mismatch.
 
+### How to tell whether pinning is actually working
+
+Toggle `Depthpinson` and watch a patch of wall or floor that is not moving. Working
+correctly, it should **stop changing** when pins are on. If it keeps swinging, the fit
+itself is unstable, and these three readouts say why:
+
+| readout | what it means when it is wrong |
+|---|---|
+| `Depthfitpins` | fewer than the crosses you can see → pins are being dropped as occluded |
+| `Depthfitchecked` | 0 → fewer than three pins survived, so the residual checks nothing |
+| `Depthfitalpha` | swinging frame to frame → the fit is tracking the corruption instead of cancelling it |
+
+MEASURED on `fixtures/hand_clip.mp4` with the default pins, as an example of all three
+going wrong at once: `Depthfitpins` was **2 in every one of 40 frames** (pin 1 dropped
+34 times, pin 2 six times), `Depthfitchecked` was 0 throughout, and `alpha` swung from
+0.526 to 1.763 — a 3.3x range — with `beta` going negative. The windowed map was
+consequently no more stable than the raw one, 0.617 against 0.653 of swing on a
+stationary patch.
+
+That is not the correction failing. It is the correction faithfully tracking a fit
+solved from two points that are partly a moving torso. **The arithmetic is exact and
+the inputs were wrong**, and the three readouts above are what said so.
+
 ### And pinning is only as good as the pins
 
 Worth measuring before trusting it. On `fixtures/hand_clip.mp4` with the default pins,
@@ -212,11 +235,32 @@ The solve is **re-run every frame**, in the sidecar, against the raw fp16 map. C
 it would be exactly the stale-scale problem the correction exists to remove, wearing
 the costume of a fix.
 
-`alpha` and `beta` arrive in TouchDesigner as `Depthfitalpha` and `Depthfitbeta`.
-Converting the map to metres is a reciprocal and two numbers — a GLSL TOP or an
-expression on whatever is reading it. **This project deliberately does not do that
-conversion for you**: it would mean choosing a clamp and a colour window on your
-behalf, on the main thread, for every project whether it wants metres or not.
+### What `Depthpinson` actually changes — the port of the example's `p`
+
+`Depthpinson` switches **what the map contains**, which is the same thing pressing `p`
+does in `apple-vision-examples/examples/depth/depth.py`:
+
+| | `outdepth` carries | `Depthunits` reads |
+|---|---|---|
+| **off**, or no usable fit | the model's own numbers, 0..1, divided by this frame's maximum | `relative, per-frame range` |
+| **on** with a fit | metres mapped onto a FIXED window — `Depthwindownear` → 1.0, `Depthwindowfar` → 0.0 | `metres, fixed 0.40-3.00 m window` |
+
+Both states keep **near bright**, deliberately: that is the only way toggling shows a
+change in *stability* rather than a change in palette. And it has to be a *fixed*
+window, because a per-frame range is exactly the breathing that pinning removes.
+
+`Depthunits` is a read-only readout saying which you are looking at. A units change
+that nothing announces is the worst kind — the image still looks like a depth map.
+
+`alpha` and `beta` are published too, as `Depthfitalpha` / `Depthfitbeta`, so a project
+that wants true metres rather than the windowed map can compute
+`Z = 1 / (alpha*d + beta)` in a GLSL TOP or an expression. What the component does not
+do is pick a colour map for you.
+
+**This was missing until 2026-08-22**, and the symptom was exactly what you would
+expect: toggling `Depthpinson` changed nothing anybody could see. The solve was running
+and its numbers were being published, but the PIXELS were the raw map in both states,
+so the one observable consequence of pinning was absent.
 
 ### Use THREE pins, not two
 

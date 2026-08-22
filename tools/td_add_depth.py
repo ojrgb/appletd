@@ -164,9 +164,11 @@ def onCook(scriptOp):
     # data must be float32" (MEASURED). `[::-1]` is the y flip - the model's map has
     # its origin top-left and TouchDesigner's TOP arrays are bottom-up. The `astype`
     # already makes a new contiguous array, so no `ascontiguousarray` is needed on top.
-    array = frame.as_numpy()
-    scriptOp.copyNumpyArray(
-        array[::-1].astype(numpy.float32).reshape(frame.height, frame.width, 1))
+    fit = unpack(frame.aux)
+    raw = frame.as_numpy()[::-1].astype(numpy.float32)
+    published, units = _corrected(comp, raw, fit)
+    scriptOp.copyNumpyArray(published.reshape(frame.height, frame.width, 1))
+    _write_str(comp, "Depthunits", units)
 
     # THE PINS, drawn last so they sit on top of everything. Only when asked: this
     # turns the output from one component into three, which is the only way red is
@@ -188,11 +190,9 @@ def onCook(scriptOp):
         if int(comp.par.Depthsourceh.eval()) != frame.source_height:
             comp.par.Depthsourceh = frame.source_height
 
-    # THE FIT, unpacked out of the aux block that travelled with these pixels. Written
-    # onto read-only parameters rather than published as channels: they are four
-    # numbers per frame, and a CHOP for them would be a fifth transport for a project
-    # that may not want metres at all.
-    fit = unpack(frame.aux)
+    # THE FIT's numbers, onto read-only parameters. Published as well as APPLIED,
+    # because a consumer that wants true metres rather than the windowed map needs
+    # alpha and beta - `Z = 1 / (alpha*d + beta)`.
     _write(comp, "Depthfitalpha", fit.get("alpha", 0.0))
     _write(comp, "Depthfitbeta", fit.get("beta", 0.0))
     _write(comp, "Depthfitpins", fit.get("used", 0.0))
@@ -201,6 +201,60 @@ def onCook(scriptOp):
     # a residual of 0.000 from two pins reads as a perfect fit while checking nothing -
     # this is the flag that says which it is (visionhands/pins.py).
     _write(comp, "Depthfitchecked", fit.get("residual_is_a_check", 0.0))
+
+
+def _corrected(comp, raw, fit):
+    """-> `(what to publish, a word for what it is)`.
+
+    THIS IS THE PORT OF `p` FROM apple-vision-examples/examples/depth/depth.py, and
+    without it `Depthpinson` changed nothing anybody could see. The solve was running
+    and its numbers were published, but the PIXELS were the raw map in both states -
+    so the one observable consequence of pinning, that the image stops breathing, was
+    missing. The example switches what it draws; so does this now.
+
+    Two states, and both end with NEAR BRIGHT so that toggling shows a change in
+    STABILITY rather than a change in palette - which is the example's argument and
+    the reason the convention is kept identical:
+
+      pins off, or no usable fit
+          the model's own numbers. 0..1 already, because the graph divided by the
+          frame's maximum - which is exactly why it breathes: the divisor moves every
+          frame, so a stationary wall swings 54%% while nothing in the room moves.
+
+      pins on with a fit
+          metres, mapped onto a FIXED window. `Depthwindownear` reads 1.0 and
+          `Depthwindowfar` reads 0.0, so a wall at 2 m sits at the same value in every
+          frame no matter what walks in front of the lens. That stability IS the
+          point of pinning, and a fixed window is the only way to see it.
+
+    `Depthpinson` is checked HERE as well as on the command line, deliberately. On the
+    command line it decides whether the sidecar solves at all - a launch flag. Here it
+    decides whether the fit is applied, which takes effect at once. So the toggle feels
+    like the example's `p` rather than like something that needs a restart, and if
+    there is no fit in the buffer it correctly falls back whatever the toggle says.
+    """
+    on = not hasattr(comp.par, "Depthpinson") or bool(comp.par.Depthpinson.eval())
+    if not on or not fit or not fit.get("alpha"):
+        return raw, "relative, per-frame range"
+
+    near = float(comp.par.Depthwindownear.eval())
+    far = float(comp.par.Depthwindowfar.eval())
+    inverse = fit["alpha"] * raw + fit["beta"]
+    # Clamped before the reciprocal, or a `d` outside the range the pins covered drives
+    # alpha*d + beta through zero and one infinity poisons the whole map. The same
+    # clamp `visionhands/pins.py` uses, and for the same reason.
+    metres = 1.0 / numpy.clip(inverse, 1.0 / 60.0, 1.0 / 0.05)
+    span = max(far - near, 1e-6)
+    windowed = 1.0 - numpy.clip((metres - near) / span, 0.0, 1.0)
+    return (windowed.astype(numpy.float32),
+            "metres, fixed %%.2f-%%.2f m window" %% (near, far))
+
+
+def _write_str(comp, name, value):
+    """Set a string readout, only when it changed - see `_write`."""
+    par = getattr(comp.par, name, None)
+    if par is not None and par.eval() != value:
+        par.val = value
 
 
 def _active_pins(comp):
@@ -241,7 +295,12 @@ def _draw_pins(scriptOp, comp, frame):
     pins = _active_pins(comp)
     if not pins:
         return
-    grey = frame.as_numpy().astype(numpy.float32)[::-1]
+    # The PUBLISHED map, not the raw one - so the crosses sit on what is on screen. It
+    # is recomputed rather than passed in because `_draw_pins` is the exceptional path
+    # and threading a second array through the common one to serve it would cost every
+    # frame that never draws.
+    grey, _units = _corrected(comp, frame.as_numpy()[::-1].astype(numpy.float32),
+                              unpack(frame.aux))
     height, width = grey.shape[:2]
     rgb = numpy.repeat(grey[:, :, numpy.newaxis], 3, axis=2)
     for x, y, _metres in pins:
@@ -395,6 +454,29 @@ def main():
     count_par.min, count_par.max = 0, MAX_PINS
     count_par.clampMin = count_par.clampMax = True
 
+    # THE WINDOW the corrected map is drawn on. Defaults are the example's own
+    # `--window 0.4,3.0`. It has to be a FIXED range and not the frame's own, because
+    # a per-frame range is exactly the breathing that pinning removes - see
+    # `_corrected` in the callback.
+    for name, label, default in (("Depthwindownear", "Window Near (m)  -> 1.0", 0.4),
+                                 ("Depthwindowfar", "Window Far (m)  -> 0.0", 3.0)):
+        par = existing.get(name)
+        if par is None:
+            par = page.appendFloat(name, label=label)[0]
+            par.val = default
+        par.default = default
+        par.min, par.max = 0.05, 60.0
+        par.clampMin = par.clampMax = True
+
+    units_par = existing.get("Depthunits")
+    if units_par is None:
+        units_par = page.appendStr("Depthunits", label="Output Is")[0]
+        units_par.val = "relative, per-frame range"
+    # READ-ONLY, and it is the answer to "am I looking at metres or not". Written by
+    # the Script TOP every time the mode changes, because a units change that nothing
+    # announces is the worst kind: the image still looks like a depth map.
+    units_par.readOnly = True
+
     draw_par = existing.get("Depthpinsdraw")
     if draw_par is None:
         draw_par = page.appendToggle(
@@ -426,6 +508,11 @@ def main():
              bool(draw_par.eval())))
     print("    defaults are the example's: %s"
           % " ".join("%g,%g,%g" % row for row in EXAMPLE_PINS))
+    print("    Use Pins ON applies the fit to the PIXELS - metres on a fixed "
+          "%.2f-%.2f m window," % (float(master.par.Depthwindownear.eval()),
+                                   float(master.par.Depthwindowfar.eval())))
+    print("    which is the port of `p` from the example. OFF publishes the model's "
+          "own numbers.")
 
     # The READOUTS. Written by the Script TOP from the buffer's aux block, read-only
     # because they are a report and not a setting - a settable one would silently
