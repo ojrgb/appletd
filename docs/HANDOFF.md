@@ -24,12 +24,32 @@ entry is what went wrong on the way.
 
 ## What is running
 
-    /project1/vision            every parameter, five pages, the capture control
+    /project1/vision            every parameter, SEVEN pages, the capture control
+
       hands_osc 10000  ->  hands  --+                505 channels
-      pose_osc  10001  ->  pose   --+-> merge_streams -> trim_empty -> out1
+      pose_osc  10001  ->  pose   --+-> merge_streams -> trim_empty -> out1  (CHOP)
       face_osc  10002  ->  face   --+   1,863 chans  |  258 kept
                                                      +-> housekeeping  10 chans
       status                                   the sidecar's own sc_* channels
+
+      /tmp/..._mask.buf  ->  seg_mask   ->  seg_fit   ->  outmask   (TOP, 1280x720)
+      /tmp/..._depth.buf ->  depth_map  ->  depth_fit ->  outdepth  (TOP, 1280x720)
+
+**THREE outputs, of two families.** `out1` is the CHOP everything in ATTRIBUTES.md is
+about. `outmask` and `outdepth` are TOPs and arrive by shared `mmap`, not OSC - a
+different transport for a different kind of data. Pages: Vision, Filter, Advanced,
+Tuning, Attributes, Segmentation, Depth.
+
+**FIVE requests, and two of them have no port.** `hands`, `pose`, `face` send channels
+on 10000/10001/10002. `segment` and `depth` publish IMAGES through shared memory, so
+`port_for` refuses them by name. All five are launch flags on the Vision page, all five
+have an `sc_*` status channel, and `REQUEST_TOGGLES` in `td_build_vision.py` is the one
+table that maps a name to its toggle - added after `depth` reached the parameters, the
+argv extras and the report but NOT the loop that builds `--streams`. DESIGN.md 6.4.
+
+**The sidecar writes a log: `/tmp/visionhands_sidecar.log`**, truncated per launch with
+the previous run as `.prev`. Its first line is the streams it actually started. Before
+that existed, "why did depth not start" was unanswerable - it went to /dev/null.
 
 **ONE output as of 2026-08-22**, not three. `trim_empty` is a Select that keeps only
 the channels the Attributes page has switched on; `Delete Empty Channels` on the
@@ -96,6 +116,47 @@ Then, both read-only and both worth running after any build:
 
     td_profile.py        cook time and cook COUNT, sampled across frames
     td_verify_layout.py  overlaps, undocumented networks, ribbons, orphans
+
+## Where 2026-08-22 got to — eleven commits, and what is and is not verified
+
+In order: one merged CHOP output with a generated trim; `tools/td_rebuild.py` so a
+change rebuilds one layer instead of eight; the segmentation mask end to end; Depth
+Anything V2 through Core ML with the pin solve; and five separate defects found on the
+way. `docs/JOURNAL.md`'s last eleven entries are the account; this is the state.
+
+**VERIFIED LIVE, on the camera:** hands, the segmentation mask, and the depth map all
+arriving in TouchDesigner. `sc_depth = 1`, `outdepth` at 1280x720, the pin crosses
+drawn where they are configured.
+
+**VERIFIED ON FIXTURES ONLY:** every timing figure in DESIGN.md 2.18-2.22. That is
+deliberate - STANDARDS.md 3 only accepts numbers from deterministic replay.
+
+**NOT VERIFIED AT ALL:** pose and face from a live camera with the new single output
+(the streams are off in the user's file); `Screenspaceonly` against a real project;
+the metric depth against a real measured room. That last one is the biggest gap - see
+Next.
+
+**The five defects, because each has a shape worth recognising:**
+
+1. A frozen group's channels VANISH after a forced cook of an ancestor, an upstream
+   shape change, OR a project reload - three doors onto one failure (2.16). The rule
+   now: a builder unfreezes what it needs to verify and `td_add_groups.py` sets the
+   final state, because it runs last.
+2. `append*` on an existing parameter RESETS it, and the reset fires a DEFERRED
+   callback that outlives any write-it-back fix. `Verbosity` reverted to `Minimal` and
+   took every derive group off with it - only when two builders ran in the same frame
+   (2.17). Never re-append.
+3. An input-less Script TOP is never dirtied, so it cooks ONCE and serves that texture
+   for ever. No Cook Type parameter exists to fix it (2.21). Both Script TOPs are
+   driven by a `Tick` parameter bound to `absTime.frame`, gated on their enable toggle.
+4. Removing the code that CREATES a parameter does not remove the parameter. `Segment`
+   drove nothing for two commits. Every builder that has dropped a parameter needs a
+   `RETIRED_PARS` table.
+5. Four checks reported failures on correct networks - the filter's scope against a
+   contract the sidecar had not sent yet, latches against its full table with `Pose`
+   off, coords against a frozen stream, and the sidecar's own status line reporting the
+   hands stream as "camera fps". **Every one was a live reading compared against a
+   compile-time constant.** That is the pattern; look for it before believing a check.
 
 ## The instruments, and why to use them rather than reading a number
 
@@ -240,6 +301,27 @@ All measured here. 1–10 are older and still true; 11 onwards are this session'
 
 ## Next
 
+### 0. Depth's metric correction against a REAL room — the biggest open gap
+
+Everything about the pin solve is verified arithmetically and nothing about it is
+verified physically. On `fixtures/hand_clip.mp4` with the default pins, a stationary
+patch of wall still drifts **54 cm** in metric depth - because the clip is a person
+filling the frame, one default pin is occluded every frame, and the surviving two-pin
+fit is solved partly from a torso. The maths is exact; the inputs are wrong.
+
+What it needs is a person at the machine with a tape measure: three points that really
+are at known distances and really are not occluded, entered on the Depth page,
+`Depthpinsdraw` on to confirm where they landed, then a reading somewhere known. Until
+that happens, treat `Depthfitalpha`/`Depthfitbeta` as untested against reality and say
+so to anybody who asks. `Depthfitchecked` is the flag that keeps it honest - it is 0
+whenever fewer than three pins survived, and the residual reads 0.000 in that case
+because two points always fit a line exactly.
+
+The other half of the same gap: **the depth stream's live cost**. 23.00 ms is a fixture
+figure. The status line now carries `depth N @ M ms`, so one live run with the camera
+answers what it actually costs alongside hands - and the DEPTH.md claim that "depth at
+30 fps and hands at 30 fps are not both available" is a prediction until then.
+
 ### 1. The review gate — WRITTEN OFF up to `b06484b`, and it resumes from there
 
 **Do not put this back on the list.** The user declared bankruptcy on 2026-08-21 on
@@ -366,11 +448,27 @@ re-research it. The one thing still unmeasured needs a camera: the per-frame cos
 - **Threshold feel** generally. `Triggeron`/`Triggeroff` at 0.13/0.17 are the only
   measured thresholds in the system, and they replaced a guess that was three times
   too loose. Treat that as the cautionary case for every remaining one.
+- **Three measured pin distances**, for depth. See Next 0 - this is the one that
+  matters, because without it the metric depth is confident and unverified.
+- **Whether `Segquality = accurate` is really wanted.** It is 30.73 ms, and with depth
+  also on that is ~54 ms of inference per frame. `fast` or `balanced` is the realistic
+  choice; the file currently has `accurate`.
 
 ## Deferred by the user — decisions, not oversights
 
 README; per-joint jitter measurement; `Sidecar.run()` tests; two-hand behaviour of
 the tracker; the remaining phase-2 temporal channels.
+
+**A TouchDesigner parameter Sequence for the pins.** Asked for, attempted, and it does
+not work from Python in this build - `Page.appendSequence` creates the header and the
+`Sequence` object but nothing joins its block, across four different orderings
+(DESIGN.md 2.22 lists them). Shipped as `Depthpincount` plus eight rows with the unused
+ones greyed out, which behaves the same. Worth one retry if TD is updated; do not
+rediscover the four failures.
+
+**Metres in TouchDesigner.** Deliberately not done: `Z = 1/(alpha*d + beta)` is a GLSL
+TOP or an expression, and doing it in the Script TOP would mean choosing a clamp and a
+colour window for every project whether it wants metres or not.
 
 ## Standing constraints
 
