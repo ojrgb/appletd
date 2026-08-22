@@ -73,7 +73,10 @@ toggle is the worst possible place to discover a dependency.
 |---|---|---|
 | Vision | `Streamdepth` — "Depth Map (23 ms/frame)" | run the model, and read its map into `outdepth` |
 | Advanced | `Depthbuffer` | the shared file. Must match on both sides |
-| Advanced | `Depthpins` | the pins. Empty means no metric claim — see below |
+| Depth | `Depthpinson` | run the pin solve at all. Off = no metric claim |
+| Depth | `Depthpincount` | how many pin rows are in use, 0 to 8 |
+| Depth | `Depthpin1x` … `Depthpin8m` | the pins themselves. Rows past the count are greyed out |
+| Depth | `Depthpinsdraw` | draw the pins in red on the map |
 | Depth | `Depthfit` | stretch the map back to the camera's aspect |
 | Depth | `Depthfit*` (read-only) | the fit this frame, and whether to trust it |
 
@@ -128,14 +131,43 @@ in the room whose real distance you know, and every frame it solves
 then metres anywhere is `Z = 1 / (alpha*d + beta)`. Two unknowns, so **two pins
 minimum, at different distances**.
 
-Set them in `Depthpins` on the Advanced page, as `X,Y,METRES` triples separated by
-spaces, with x and y normalised over the frame:
+Set them on the **Depth page**. `Depthpincount` says how many rows are in use and the
+rest are greyed out, so it behaves like a list you extend; the first three default to
+the values from `apple-vision-examples/examples/depth/depth.py`:
 
-```
-0.06,0.30,2.5  0.94,0.30,2.4  0.50,0.96,1.1
-```
+| | x | y | metres |
+|---|---|---|---|
+| Pin 1 | 0.06 | 0.30 | 2.5 |
+| Pin 2 | 0.94 | 0.30 | 2.4 |
+| Pin 3 | 0.50 | 0.96 | 1.1 |
 
-or on the command line, `--depth-pins "0.06,0.30,2.5 0.94,0.30,2.4 0.50,0.96,1.1"`.
+Those are a **plausible room, not a measurement** — the example says so and so does
+this. They put two pins at the left and right edges and one at the bottom centre,
+which is where a person in front of a webcam usually is not. Dial the metres in once
+you can see where they landed, which is what `Depthpinsdraw` is for.
+
+`Depthpinson` turns the whole solve off — the map still arrives, it just makes no
+metric claim. On the command line it is
+`--depth-pins "0.06,0.30,2.5 0.94,0.30,2.4 0.50,0.96,1.1"`, and the launcher builds
+that string from the rows.
+
+x and y are normalised over the frame **as you see it**: y = 0 is the top.
+
+### Seeing where the pins landed
+
+`Depthpinsdraw` draws a red cross at each active pin, directly on the depth map. Two
+things to know about it:
+
+- **It turns the output into RGB.** A mono map has one channel and no amount of drawing
+  puts a colour in it, so the format switches to `rgba32float` while this is on. Depth
+  is still readable from the green or blue channel everywhere except under a marker.
+- **It draws where the pins are CONFIGURED, not where the solve used them.** The solve
+  is a launch flag, so moving a pin without restarting moves the cross and not the
+  maths. `Depthfitpins` is what says how many the solve actually used — if the cross
+  count and that number disagree, you have not restarted.
+
+The cross has a gap at the centre on purpose: the point of looking is to see what the
+pin is sitting on, and a filled dot would hide exactly the pixels the solve samples.
 
 The solve is **re-run every frame**, in the sidecar, against the raw fp16 map. Caching
 it would be exactly the stale-scale problem the correction exists to remove, wearing
@@ -184,12 +216,13 @@ stops poisoning the whole frame.
 2. **The residual is the part of the drift that is not affine**, and no amount of
    pinning removes it. It is the number that decides whether this is good enough for
    whatever you are driving.
-3. **`Depthpins` is a launch flag.** The solve runs in the sidecar, so moving a pin
-   needs a restart.
-4. **Empty pins is a legitimate setting, and it is the default.** It means "publish the
-   raw map, make no metric claim". A default pin list would be measurements of somebody
-   else's room producing confident metres for yours, which is the most convincing wrong
-   number this project could ship.
+3. **The pins are a launch flag.** The solve runs in the sidecar, so moving one - or
+   changing `Depthpincount`, or `Depthpinson` - needs a restart. `Depthpinsdraw`
+   updates immediately, which is the discrepancy to watch for.
+4. **The default pins are a plausible room, not your room.** They ship on because
+   having something to drag beats an empty page, but confident metres from unmeasured
+   pins is the most convincing wrong number this project can produce. Either measure
+   them or switch `Depthpinson` off and treat the map as relative.
 
 ---
 

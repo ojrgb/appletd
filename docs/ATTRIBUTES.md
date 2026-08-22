@@ -1214,7 +1214,10 @@ every caveat. This is the parameter table.
 |---|---|---|---|
 | Vision | `Streamdepth` | **off** | run the model and read its map |
 | Advanced | `Depthbuffer` | `/tmp/visionhands_depth.buf` | the shared file. Must match on both sides |
-| Advanced | `Depthpins` | **empty** | `X,Y,METRES` triples. Empty = no metric claim |
+| Depth | `Depthpinson` | on | run the pin solve. Off = the map is relative, no metric claim |
+| Depth | `Depthpincount` | 3 | how many pin rows are in use, 0 to 8. Rows past it are greyed out |
+| Depth | `Depthpin1x` … `Depthpin8m` | the example's | the pins. First three from `apple-vision-examples` |
+| Depth | `Depthpinsdraw` | off | draw the pins in red on the map. Output becomes RGB |
 | Depth | `Depthfit` | on | stretch the map back to the camera's aspect |
 | Depth | `Depthfitalpha` `Depthfitbeta` | READ-ONLY | this frame's fit: `Z = 1/(alpha*d + beta)` |
 | Depth | `Depthfitpins` | READ-ONLY | how many pins the fit used |
@@ -1234,6 +1237,13 @@ darkens everything else. Build nothing on the raw numbers without pins.
 **`Depthfitresidual` lies when `Depthfitchecked` is 0.** Two pins always fit a line
 exactly, so with two the residual is 0.000 and checks nothing - which reads as the best
 possible news. Gate on `Depthfitchecked` first, then on the residual. Use three pins.
+
+**The pins are a list, not a text field.** `Depthpincount` says how many rows are in
+use and the rest are greyed out. The first three default to the values from
+`apple-vision-examples/examples/depth/depth.py` - a plausible room rather than a
+measurement, and `Depthpinsdraw` is how you see where they landed before dialling the
+metres in. Moving a pin needs a restart (the solve is a launch flag); the drawing
+updates at once, which is the discrepancy to watch for.
 
 **Converting to metres is yours to do**, and on purpose: `Z = 1/(alpha*d + beta)` from
 the two published numbers, in a GLSL TOP or an expression. Doing it here would mean

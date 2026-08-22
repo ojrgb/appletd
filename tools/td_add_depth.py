@@ -42,6 +42,33 @@ MASTER_PATH = "/project1/vision"
 
 PAGE = "Depth"
 
+# How many pin rows exist on the page. Eight, because the reference implementation's
+# argument is "two minimum, three to survive an occlusion" and past about five the
+# extra conditioning is nil - so this is generous rather than a limit anybody will
+# meet, and every unused row is disabled rather than absent.
+#
+# WHY NOT A TOUCHDESIGNER SEQUENCE, which is what was asked for. `Page.appendSequence`
+# creates the header parameter and the `Sequence` object, but nothing appended
+# afterwards joins its block: `blockPars` stays empty and `numBlocks = 1` raises "Could
+# not set numBlocks... check for potential name conflicts". Tried 0-based names
+# (`Pin0m`), 1-based, appending before the header, appending after it, and
+# `insertBlock(0)` - all four fail the same way, so custom sequences appear not to be
+# constructible from Python in this build. Fixed rows with a count that greys out the
+# unused ones give the same behaviour through a mechanism that demonstrably works.
+MAX_PINS = 8
+
+# The defaults, from apple-vision-examples/examples/depth/depth.py. Placed at the edges
+# and the bottom because that is where a person in front of a webcam usually is NOT,
+# and the distances are a plausible room rather than a measurement - the example says
+# so and so does docs/DEPTH.md. They are a starting point to dial in.
+EXAMPLE_PINS = ((0.06, 0.30, 2.5), (0.94, 0.30, 2.4), (0.50, 0.96, 1.1))
+
+# Rows past the example's three. Spread across the frame so that raising the count
+# lands a pin somewhere useful rather than on top of another one, and switched off by
+# default because a pin nobody has measured is worse than no pin.
+SPARE_PINS = ((0.06, 0.70, 2.5), (0.94, 0.70, 2.4), (0.50, 0.50, 1.8),
+              (0.25, 0.10, 3.0), (0.75, 0.10, 3.0))
+
 # Parameters this builder used to own and no longer does. Empty today, and kept
 # because removing the code that creates a parameter does not remove the parameter -
 # `Segment` sat on a page driving nothing for two commits before anybody noticed
@@ -63,6 +90,12 @@ import numpy
 
 from visionhands.maskbuf import MaskReader
 from visionhands.pins import unpack
+
+# The red a pin is drawn in. Full red and nothing else, so it cannot be mistaken for a
+# depth value however the map is being coloured downstream.
+PIN_RGB = (1.0, 0.0, 0.0)
+ARM = 6                 # half-length of a cross arm, in map pixels
+GAP = 2                 # pixels left clear at the centre, so the pin's own value shows
 
 # The reader lives in MODULE GLOBALS and never in operator storage. TouchDesigner
 # PICKLES operator storage into the .toe on save, and an `mmap` cannot be pickled -
@@ -135,6 +168,19 @@ def onCook(scriptOp):
     scriptOp.copyNumpyArray(
         array[::-1].astype(numpy.float32).reshape(frame.height, frame.width, 1))
 
+    # THE PINS, drawn last so they sit on top of everything. Only when asked: this
+    # turns the output from one component into three, which is the only way red is
+    # expressible at all - a mono map has no channel to put it in. The format parameter
+    # is switched by the parameter callback rather than here, because changing a
+    # parameter from inside onCook to affect that same cook is a race.
+    #
+    # DRAWN FROM THE PARAMETERS, not from the solve. What they show is where the pins
+    # are CONFIGURED; `Depthfitpins` says how many the solve actually used, and the two
+    # differ whenever a pin has been moved without restarting the sidecar - because the
+    # solve is a launch flag. docs/DEPTH.md says so.
+    if bool(getattr(comp.par, "Depthpinsdraw", None) and comp.par.Depthpinsdraw.eval()):
+        _draw_pins(scriptOp, comp, frame)
+
     # The source geometry, for the Fit TOP.
     if hasattr(comp.par, "Depthsourcew") and frame.source_width:
         if int(comp.par.Depthsourcew.eval()) != frame.source_width:
@@ -157,6 +203,58 @@ def onCook(scriptOp):
     _write(comp, "Depthfitchecked", fit.get("residual_is_a_check", 0.0))
 
 
+def _active_pins(comp):
+    """The pins the panel currently describes, as `[(x, y, metres)]`.
+
+    Reads `Depthpincount` rows and no more, so a row left over from a higher count is
+    ignored rather than quietly included - the greyed-out rows on the page and the list
+    used here have to agree or the drawing lies about what is configured.
+    """
+    if not hasattr(comp.par, "Depthpincount"):
+        return []
+    if hasattr(comp.par, "Depthpinson") and not bool(comp.par.Depthpinson.eval()):
+        return []
+    out = []
+    for index in range(1, int(comp.par.Depthpincount.eval()) + 1):
+        try:
+            out.append((float(getattr(comp.par, "Depthpin%%dx" %% index).eval()),
+                        float(getattr(comp.par, "Depthpin%%dy" %% index).eval()),
+                        float(getattr(comp.par, "Depthpin%%dm" %% index).eval())))
+        except AttributeError:
+            break
+    return out
+
+
+def _draw_pins(scriptOp, comp, frame):
+    """Re-publish the map as RGB with a red cross at each configured pin.
+
+    A CROSS with a gap at the centre, not a filled dot: the point of looking at this is
+    to see what the pin is sitting on, and a dot hides exactly the pixels the solve
+    samples. The arms are drawn in map pixels rather than output pixels so a pin looks
+    the same size whatever the Fit TOP is scaling to.
+
+    Y IS FLIPPED HERE TOO, and it has to be: the array published above is already
+    bottom-up for TouchDesigner, so a pin at y = 0.96 - near the bottom of the frame as
+    you see it - is near the TOP of this array. Getting that wrong would put every pin
+    on the wrong side of the image and still look plausible.
+    """
+    pins = _active_pins(comp)
+    if not pins:
+        return
+    grey = frame.as_numpy().astype(numpy.float32)[::-1]
+    height, width = grey.shape[:2]
+    rgb = numpy.repeat(grey[:, :, numpy.newaxis], 3, axis=2)
+    for x, y, _metres in pins:
+        cx = int(min(max(x, 0.0), 1.0) * (width - 1))
+        cy = int((1.0 - min(max(y, 0.0), 1.0)) * (height - 1))
+        for offset in range(GAP, ARM + 1):
+            for px, py in ((cx - offset, cy), (cx + offset, cy),
+                           (cx, cy - offset), (cx, cy + offset)):
+                if 0 <= px < width and 0 <= py < height:
+                    rgb[py, px] = PIN_RGB
+    scriptOp.copyNumpyArray(numpy.ascontiguousarray(rgb))
+
+
 def _write(comp, name, value):
     """Set a readout parameter, only when it changed.
 
@@ -167,6 +265,52 @@ def _write(comp, name, value):
     par = getattr(comp.par, name, None)
     if par is not None and par.eval() != value:
         par.val = value
+'''
+
+
+PAR_CALLBACK_SOURCE = '''# Generated by tools/td_add_depth.py
+#
+# `bypass` and the row enables are ATTRIBUTES, not parameters, so they cannot be bound
+# to an expression and are written on change instead - the same pattern the filter's
+# bypass and the group gating use.
+#
+# `Streamdepth` is NOT handled here: `allowCooking` cannot be disabled on a bare
+# operator (measured - it raises), so the Script TOP checks that toggle itself. It is
+# listed in `pars` so that switching it forces a cook.
+MAX_PINS = %(max_pins)d
+
+
+def onValueChange(par, prev):
+    comp = par.owner
+    fit = comp.op('depth_fit')
+    if fit is not None:
+        fit.bypass = not bool(comp.par.Depthfit.eval())
+
+    # Grey out the rows past the count, and all of them when pins are off. This is what
+    # makes a fixed set of rows behave like an extendable list: the ones that are not
+    # in use cannot be edited, so the page never shows a pin the solve is ignoring.
+    on = bool(comp.par.Depthpinson.eval()) if hasattr(comp.par, 'Depthpinson') else True
+    count = int(comp.par.Depthpincount.eval())
+    for index in range(1, MAX_PINS + 1):
+        live = on and index <= count
+        for suffix in ('x', 'y', 'm'):
+            row = getattr(comp.par, 'Depthpin%%d%%s' %% (index, suffix), None)
+            if row is not None:
+                row.enable = live
+
+    script = comp.op('depth_map')
+    if script is not None:
+        # The FORMAT follows the visualisation, because red needs somewhere to live: a
+        # mono map has one channel and no amount of drawing puts a colour in it. Set
+        # here rather than inside onCook - changing a parameter from within the cook it
+        # would affect is a race.
+        want = 'rgba32float' if bool(comp.par.Depthpinsdraw.eval()) else 'mono32float'
+        if script.par.format.eval() != want:
+            script.par.format = want
+        fit_top = comp.op('depth_fit')
+        if fit_top is not None and fit_top.par.format.eval() != want:
+            fit_top.par.format = want
+        script.cook(force=True)
 '''
 
 
@@ -227,6 +371,61 @@ def main():
         fit_par = page.appendToggle("Depthfit", label="Fit Map To Source")[0]
         fit_par.val = True
     fit_par.default = True
+
+    # -- the pins -----------------------------------------------------------
+    # A COUNT plus fixed rows, with the unused ones greyed out - which behaves like an
+    # extendable list and is not one. See MAX_PINS for why: TouchDesigner's own
+    # Sequence could not be built from Python in this version, and four different
+    # orderings of `appendSequence` all left `blockPars` empty.
+    on_par = existing.get("Depthpinson")
+    if on_par is None:
+        on_par = page.appendToggle(
+            "Depthpinson", label="Use Pins  (metric depth; restart to apply)")[0]
+        on_par.val = True
+    on_par.default = True
+
+    count_par = existing.get("Depthpincount")
+    if count_par is None:
+        count_par = page.appendInt(
+            "Depthpincount", label="Pins  (2 min, 3+ for a real residual)")[0]
+        count_par.val = len(EXAMPLE_PINS)
+    count_par.default = len(EXAMPLE_PINS)
+    # Clamped rather than merely defaulted: a count past the rows that exist would
+    # silently drop pins the panel appears to be showing.
+    count_par.min, count_par.max = 0, MAX_PINS
+    count_par.clampMin = count_par.clampMax = True
+
+    draw_par = existing.get("Depthpinsdraw")
+    if draw_par is None:
+        draw_par = page.appendToggle(
+            "Depthpinsdraw", label="Visualize Pins  (draws in red, output becomes RGB)")[0]
+        draw_par.val = False
+    draw_par.default = False
+
+    rows = EXAMPLE_PINS + SPARE_PINS
+    for index in range(1, MAX_PINS + 1):
+        x_default, y_default, m_default = rows[index - 1]
+        for suffix, label, default, low, high in (
+                ("x", "Pin %d  x" % index, x_default, 0.0, 1.0),
+                ("y", "Pin %d  y" % index, y_default, 0.0, 1.0),
+                ("m", "Pin %d  metres" % index, m_default, 0.05, 60.0)):
+            name = "Depthpin%d%s" % (index, suffix)
+            par = existing.get(name)
+            if par is None:
+                par = page.appendFloat(name, label=label)[0]
+                par.val = default
+            par.default = default
+            # NORMALISED x and y, clamped, because `pins.parse_pins` refuses anything
+            # outside 0..1 - and a parameter that can hold a value the solve will
+            # reject is a control that fails at startup instead of at the slider.
+            par.min, par.max = low, high
+            par.clampMin = par.clampMax = True
+
+    print("1a. pins: %d rows, %d active, Use Pins=%s, Visualize=%s"
+          % (MAX_PINS, int(count_par.eval()), bool(on_par.eval()),
+             bool(draw_par.eval())))
+    print("    defaults are the example's: %s"
+          % " ".join("%g,%g,%g" % row for row in EXAMPLE_PINS))
 
     # The READOUTS. Written by the Script TOP from the buffer's aux block, read-only
     # because they are a report and not a setting - a settable one would silently
@@ -352,26 +551,10 @@ def main():
     par_exec = master.op("depth_par_callbacks") or master.create(
         td.parameterexecuteDAT, "depth_par_callbacks")
     par_exec.nodeX, par_exec.nodeY = master_xy("depth_par_callbacks")
-    par_exec.text = (
-        "# Generated by tools/td_add_depth.py\n"
-        "#\n"
-        "# `bypass` is an ATTRIBUTE, not a parameter, so it cannot be bound to an\n"
-        "# expression and is written on change instead.\n"
-        "#\n"
-        "# `Streamdepth` is NOT handled here: `allowCooking` cannot be disabled on a\n"
-        "# bare operator (measured - it raises), so the Script TOP checks that\n"
-        "# toggle itself. It is listed below so that switching it forces a cook.\n"
-        "\n"
-        "def onValueChange(par, prev):\n"
-        "    comp = par.owner\n"
-        "    fit = comp.op('depth_fit')\n"
-        "    if fit is not None:\n"
-        "        fit.bypass = not bool(comp.par.Depthfit.eval())\n"
-        "    script = comp.op('depth_map')\n"
-        "    if script is not None:\n"
-        "        script.cook(force=True)\n")
+    par_exec.text = PAR_CALLBACK_SOURCE % {"max_pins": MAX_PINS}
     par_exec.par.op = master.path
-    par_exec.par.pars = "Streamdepth Depthfit"
+    par_exec.par.pars = ("Streamdepth Depthfit Depthpincount Depthpinson "
+                         "Depthpinsdraw")
     par_exec.par.valuechange = True
     print("3. Streamdepth and Depthfit wired through %s" % par_exec.name)
 

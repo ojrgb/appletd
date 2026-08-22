@@ -219,7 +219,11 @@ def start():
                  "--mask-quality", str(comp.par.Segquality.eval())]
     if "depth" in streams:
         argv += ["--depth-path", str(comp.par.Depthbuffer.eval())]
-        pins = str(comp.par.Depthpins.eval()).strip()
+        # The pins, off the Depth page's rows. Built HERE rather than read from one
+        # text field, so the panel is a list somebody can drag instead of a string
+        # they have to get the commas right in. `Depthpinson` off means no metric
+        # claim at all, which is a legitimate setting - see docs/DEPTH.md.
+        pins = depth_pins(comp)
         if pins:
             argv += ["--depth-pins", pins]
     # A LOG FILE, not /dev/null. Changed 2026-08-22 after "the depth map did not
@@ -269,9 +273,38 @@ def start():
         pins = str(comp.par.Depthpins.eval()).strip()
         print("[visionhands]   depth   -> %%s  (a shared mmap, no port), %%s"
               %% (comp.par.Depthbuffer.eval(),
-                  "%%d pin(s)" %% len(pins.split()) if pins else
+                  "pins %%s" %% pins if pins else
                   "NO PINS - the map is relative, bigger means nearer"))
     return process.pid
+
+
+def depth_pins(comp):
+    """The Depth page's pin rows as "x,y,m x,y,m ...", or "" for none.
+
+    Contract: returns "" when pins are switched off OR when the count is 0, and NEVER
+              a partial list - a pin row that has gone missing means the Depth page has
+              not been built, and passing half a list would produce a fit from a
+              geometry nobody configured.
+    Why here and not in the sidecar: the sidecar takes one string because that is what
+              a command line is. This is where a panel becomes one.
+    """
+    if comp is None or not hasattr(comp.par, "Depthpincount"):
+        return ""
+    if hasattr(comp.par, "Depthpinson") and not bool(comp.par.Depthpinson.eval()):
+        return ""
+    out = []
+    for index in range(1, int(comp.par.Depthpincount.eval()) + 1):
+        try:
+            out.append("%%g,%%g,%%g" %% (
+                float(getattr(comp.par, "Depthpin%%dx" %% index).eval()),
+                float(getattr(comp.par, "Depthpin%%dy" %% index).eval()),
+                float(getattr(comp.par, "Depthpin%%dm" %% index).eval())))
+        except AttributeError:
+            print("[visionhands] pin row %%d is missing - run "
+                  "tools/td_add_depth.py. Starting with NO pins rather than a "
+                  "partial list." %% index)
+            return ""
+    return " ".join(out)
 
 
 def stop():
@@ -492,7 +525,14 @@ DEFAULT_CAMERA = "MacBook"
 # GONE for good. Nothing here had a value worth keeping: `Active` replaces the two
 # pulses, `Printstatus` and `Capturepid` replace the last two under names that do not
 # say "sidecar".
-RETIRED_PARS = ("Startsidecar", "Stopsidecar", "Sidecarstatus", "Sidecarpid")
+RETIRED_PARS = ("Startsidecar", "Stopsidecar", "Sidecarstatus", "Sidecarpid",
+                # `Depthpins` was one text field of "x,y,m x,y,m ..." for a day.
+                # tools/td_add_depth.py owns the pins now, as a count plus greyed rows
+                # on the Depth page - which is a list somebody can drag rather than a
+                # string they have to get the commas right in. Retired here because
+                # this script created it, and removing the code that creates a
+                # parameter does not remove the parameter.
+                "Depthpins")
 # MOVED. Same names, different page - so they are destroyed here and appended to
 # Vision below, and `previous` (captured before any of this) puts the tuned value
 # back. They have to be destroyed FIRST: TouchDesigner will not hold one custom
@@ -831,17 +871,6 @@ def main():
     par_depthbuf = advanced.appendStr("Depthbuffer",
                                      label="Depth Buffer Path")[0]
     par_depthbuf.default = DEFAULT_DEPTH_PATH
-    # THE PINS, and they are on Advanced with the paths rather than on the Depth page
-    # for one reason: they are a LAUNCH FLAG. The solve runs in the sidecar, on the
-    # capture thread, against the raw fp16 map - so changing them needs a restart, and
-    # a control that says "restart to apply" belongs beside the others that do.
-    #
-    # EMPTY BY DEFAULT, deliberately. Pins are measurements of a specific room; a
-    # default list would produce confident metres for somebody else's room, which is
-    # the most convincing wrong number this project could ship. docs/DEPTH.md.
-    par_pins = advanced.appendStr(
-        "Depthpins", label="Depth Pins  X,Y,M ... (restart to apply)")[0]
-    par_pins.default = ""
     par_pid.readOnly = True
 
     filter_page = _page(comp, "Filter")
@@ -866,7 +895,7 @@ def main():
              ("Orthowidth", par_ortho), ("Screenspaceonly", par_screen),
              ("Keeplayout", par_keep), ("Deleteempty", par_empty),
              ("Segquality", par_quality), ("Maskbuffer", par_mask),
-             ("Depthbuffer", par_depthbuf), ("Depthpins", par_pins),
+             ("Depthbuffer", par_depthbuf),
              ("Oscport", par_port),
              ("Smoothing", par_smooth), ("Mincutoff", par_mincut),
              ("Beta", par_beta)]

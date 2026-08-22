@@ -1319,6 +1319,27 @@ dropped when it disagrees by more than 0.5 m. VERIFIED that only ONE is ever dro
 dropping until the residual looks good would fit a line through whichever two pins
 happened to agree, which is a confident answer from no evidence.
 
+#### A TouchDesigner Sequence could not be built from Python
+
+`Depthpins` started as one text field and became a list, which is what a panel wants.
+The intended mechanism was TD's own **parameter Sequence**, and it does not work from
+Python in this build: `Page.appendSequence` creates the header parameter and the
+`Sequence` object, but nothing appended afterwards joins its block. `blockPars` stays
+empty and `numBlocks = 1` raises *"Could not set numBlocks to specified value. Please
+check for potential name conflicts."*
+
+Four orderings were tried, all failing identically: block parameters named `Pin0m`
+(0-based, matching the `point0weight` convention the docs describe), `Pin1m` (1-based),
+appended before the header rather than after, and `insertBlock(0)` instead of setting
+`numBlocks`. So a sequence is readable and mutable on operators that already have one -
+`td_add_latches.py` sets `seq.const.numBlocks` on a Constant CHOP and that works fine -
+but a CUSTOM sequence appears to need the Component Editor.
+
+What shipped instead: `Depthpincount` plus eight fixed rows, with rows past the count
+disabled by a parameter callback. Same behaviour - raise the count, another row becomes
+editable - through a mechanism that demonstrably works. Worth revisiting if a later
+build fixes `appendSequence`.
+
 #### Two API facts and one Fortran diagnostic
 
 `resolve_model` raises naming `tools/fetch_models.sh` rather than letting Core ML
