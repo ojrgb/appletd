@@ -170,14 +170,22 @@ All measured here. 1–10 are older and still true; 11 onwards are this session'
 
 ## Next
 
-### 1. The review gate, SEVEN milestones unpaid
+### 1. The review gate — WRITTEN OFF up to `b06484b`, and it resumes from there
 
-`STANDARDS.md` §3 requires a fresh review agent per milestone, scoped to correctness
-and concurrency. Pose, the gating, face, the restructure, the landmark counts, the
-builder fixes and now this pass have all landed without one, and between them they
-touched the engine's capture queue, three lock-free boxes and the sidecar's send
-path. **Offer this to the user before starting anything new.** It is the oldest
-outstanding item in the project and the only one with a real risk attached.
+**Do not put this back on the list.** The user declared bankruptcy on 2026-08-21 on
+the 32 commits after `98194f1`; `STANDARDS.md` §3 records it with the date and the
+reasoning, and `JOURNAL.md`'s last entry says what it cost. It is closed, not
+pending.
+
+What it cost, so nobody rediscovers it: ~1,300 lines across `engine.py`,
+`source.py`, `sidecar.py`, `pose.py` and `face.py` are unreviewed, including
+`LatestBox` becoming generic over a protocol with three instantiations where there
+was one, and the sidecar's per-stream send path. **If a teardown crash or a torn
+frame ever shows up, that diff is the first place to look.**
+
+**The gate resumes at the next milestone.** Offer it; it is cheap on one milestone's
+diff and the five that did run earned their keep — the last returned thirteen
+findings, four invisible to their author.
 
 ### 2. The unit vectors, and the channel-to-group registry
 

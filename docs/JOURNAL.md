@@ -2470,3 +2470,36 @@ holds its channels — so the builder checks presence only for the wire-contract
 The pleasant part: the user's own network reads `*_tx` and `*_ty` off the hands
 output, and those two Selects went from 42 channels to **50** without anyone
 touching them.
+
+## Bankruptcy on the review debt, declared rather than carried
+
+*2026-08-21. A decision, not a piece of work.*
+
+The gate ran five times — `583ed73`, `2ecfaa1`, `cfaa8a5`, `33e5d12`, `98194f1` —
+and then stopped for 32 commits and 8,565 insertions. I priced reviewing that as
+one batch (three scoped reviewers, a few hundred thousand tokens) and offered the
+alternative: write it off explicitly and gate from here. The user took the second.
+
+That is the right call and worth recording as a call rather than an omission. What
+made the debt unreviewable was not its size but its shape: 5,571 of those insertions
+are TouchDesigner builders that run on the main thread and have no concurrency at
+all, and reviewing them under a standard whose scope is "the lock-free handoff,
+teardown ordering, anything that can block TD's main thread" would have spent most
+of the budget on the least dangerous code in the repo.
+
+**What is genuinely unreviewed, and I would rather write it down than let it be
+discovered:** about 1,300 lines across `engine.py`, `source.py`, `sidecar.py`,
+`pose.py` and `face.py`. `LatestBox` became generic over a protocol and there are
+three of them where there was one. Two more Vision requests run on the capture
+thread. The sidecar's send path was rewritten around per-stream bundles with
+independent try/except so that no stream can `return` out of the callback — a path I
+wrote deliberately and have never exercised. If a teardown crash or a torn frame
+ever appears, that is where to look first.
+
+The distinction that matters: **written off is not pending.** The handoff said
+"seven milestones unpaid" for long enough that it had stopped meaning anything, and
+a permanent entry on a to-do list is worse than an honest closed one. §3 now records
+the write-off next to the rule it suspends, with the date and who decided it, and
+the gate resumes at the next milestone. A standard skipped seven times running is
+not a standard — so it either runs from here or it gets deleted, and the user chose
+for it to run.

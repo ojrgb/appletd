@@ -134,6 +134,29 @@ capture session. The agent is handed `DESIGN.md`, this document, and the diff.
 Findings are triaged and resolved or explicitly deferred with a reason before
 the next milestone opens.
 
+**Bankruptcy declared 2026-08-21, by the user, on everything up to `b06484b`.**
+The gate ran five times and then stopped: the last triage was `98194f1`, and the
+32 commits after it — pose, the `allowCooking` gating, face, the one-COMP
+restructure, the landmark counts, the builder fixes and the optimisation pass —
+accumulated 8,565 insertions without one. Reviewing that as a single batch was
+priced and declined. It is **written off, not pending**: nobody should carry it in
+a handoff as outstanding work, and nobody should go looking for the review that
+covers `dabe41d`, because there is not one and there will not be one.
+
+What that costs, stated so it is not discovered later: roughly 1,300 lines of the
+written-off diff are concurrency-critical — three lock-free boxes where there was
+one, `LatestBox` made generic over a protocol, two new capture requests and a
+rewritten sidecar send path. Those are the lines §3 exists for, and they are
+unreviewed. If a teardown crash or a torn frame ever shows up, that diff is the
+first place to look.
+
+**The gate resumes from `b06484b`** on the terms above, and the lesson from the
+five that did run is why it is worth resuming rather than dropping: the last one
+returned thirteen findings, four of which were invisible to their author, and one
+of those was that the previous entry's headline measurement was arithmetic
+nonsense. A gate that is skipped seven times in a row is not a standard, so
+either it runs at each milestone from here or §3 should be deleted honestly.
+
 **Version control.** One commit per milestone, so every review has a clean diff
 and a bad milestone is revertible.
 
