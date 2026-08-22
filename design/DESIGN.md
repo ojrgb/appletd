@@ -747,6 +747,20 @@ Against the running instance (099), not read anywhere:
   real 2.26, and the achieved cook rate at 26 frames in 89. `tools/td_profile.py`
   reports the ACHIEVED FRAME RATE for exactly this reason and warns below 45 fps. A
   performance figure without an fps beside it is not a measurement.
+- **TouchDesigner PICKLES operator storage into the `.toe` on save, so anything
+  `store()`d must be picklable - and a class from a module the builders purge from
+  `sys.modules` is NOT.** Measured, as a save failure the user saw:
+  `PicklingError: Can't pickle <class 'visionhands.temporal.TemporalState'>: it's not
+  the same object as visionhands.temporal.TemporalState`. Pickle compares the
+  instance's class against the module's current class BY IDENTITY, and every builder
+  here re-imports `visionhands.*` (see above), so after any rebuild the stored
+  object's class is a different object with the same name. The project then saves
+  "with errors" and the storage is silently dropped.
+  Two consequences. Store only primitives - a tuple of strings is fine, which is why
+  `derive_chop`'s channel-name cache was never affected. And **storage outlives the
+  code that wrote it**: removing the `store()` call does not remove the value, so a
+  builder that ever stored something unpicklable has to `unstore` it explicitly or the
+  save keeps failing.
 - **`absTime.stepSeconds` is how a Script CHOP learns its own `dt`.** Keeping a
   clock in operator storage and diffing it works and is the wrong instinct: `store()`
   is not a per-cook scratchpad, and `derive_chop` only gets away with storage because

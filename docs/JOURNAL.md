@@ -2611,3 +2611,41 @@ Eleven parameters on the Tuning page that a user would reasonably have assumed w
 already there. Everything in both new groups is unmeasured on a real hand — the
 arithmetic is exact and tested, the usefulness is not established, and `Zreference`
 and `Palmarea` are the two to move.
+
+### Addendum: the prototype would not let the project save
+
+The user tried to save and got `PicklingError: Can't pickle <class
+'visionhands.temporal.TemporalState'>: it's not the same object as
+visionhands.temporal.TemporalState`.
+
+TouchDesigner pickles operator storage into the .toe, and I had put the prototype's
+recurrence state there. So the third reason `ATTRIBUTES.md` gives for keeping memory
+in native CHOPs — "no hidden Python state for a project reload to treat
+unpredictably" — turns out to be understated. The state does not reload
+unpredictably. **The project does not save.**
+
+The specific failure is one this repo manufactures for itself, which is the part I
+should have seen coming: pickle compares an instance's class against the module's
+current class by IDENTITY, and every builder here purges `visionhands.*` from
+`sys.modules` so that edits are visible. After any rebuild, the stored object's class
+is a different object with the same name and pickle refuses. I had written that
+purging trap into `DESIGN.md` myself and did not connect it to storing an instance.
+
+Two things worth carrying:
+
+- **Store only primitives.** `derive_chop`'s channel-name cache is a tuple of strings
+  and was never at risk. I verified that by pickling every storage entry in the
+  project rather than reasoning about it — five entries, one bad, and it is worth
+  having a way to check.
+- **Storage outlives the code that wrote it.** Removing the `store()` call does not
+  remove the value: the .toe kept failing to save against a callback that no longer
+  wrote anything. The builder `unstore`s the stale keys explicitly now.
+
+I verified the fix the way the save does — `pickle.dumps` over every operator's
+storage — rather than by writing to the user's project file, and then confirmed the
+prototype still advances its recurrence (held 8.58 → 19.7 over 667 cooks).
+
+The verdict does not change. It gets firmer: a shipping version of that Script CHOP
+would have to make a recurrence's state survive a save and reload in a form
+TouchDesigner can serialise, which is most of what a Feedback CHOP hands you for
+nothing.

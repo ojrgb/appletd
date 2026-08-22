@@ -1037,6 +1037,36 @@ trade.
 attribute layer ever grows enough that 0.147 ms becomes 1.5, the measurement and the
 code are both already here.
 
+### Reason 3 stopped being an argument and became a save failure
+
+The prototype held its `TemporalState` in operator storage, and the user hit this
+trying to save:
+
+    PicklingError: Can't pickle <class 'visionhands.temporal.TemporalState'>:
+    it's not the same object as visionhands.temporal.TemporalState
+
+**TouchDesigner pickles operator storage into the .toe.** So the third reason for
+keeping memory native - "no hidden Python state for a project reload to treat
+unpredictably" - is understated: the state does not reload unpredictably, **the
+project does not save.** And the specific failure is one this repo manufactures for
+itself: pickle compares the instance's class against the module's current class by
+IDENTITY, and every builder purges `visionhands.*` from `sys.modules`, so after any
+rebuild the stored object's class is a different object with the same name.
+
+Fixed by moving the state into the callback DAT's module globals, which are not
+pickled and are lost on a recompile - one self-correcting frame for a level-driven
+recurrence. Two things learned that apply beyond the prototype:
+
+- **store only primitives.** `derive_chop`'s channel-name cache is a tuple of strings
+  and was never affected; verified by pickling every storage entry in the project.
+- **storage outlives the code that wrote it.** Deleting the `store()` call does not
+  delete the value, so the builder now `unstore`s the stale keys explicitly - without
+  that, the save keeps failing against a callback that no longer writes anything.
+
+If this were ever shipped, that is the problem to solve first, and it is not a small
+one: a recurrence's state has to survive a save/load in a form TouchDesigner can
+serialise, which is most of what a Feedback CHOP is giving you for free.
+
 ### Two measurement traps this turned up, and both nearly reversed the verdict
 
 **A DAT that COMPILES during the window reports the compile as its `cookTime`.**

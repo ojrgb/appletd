@@ -1040,7 +1040,13 @@ nobody in frame.
 
 Everything with memory stays native, because TouchDesigner does it properly, it
 is inspectable in the network, and it keeps no hidden Python state for a project
-reload to treat unpredictably:
+reload to treat unpredictably.
+
+**That third reason was tested in 2026-08-21 and is stronger than it reads.** A
+prototype holding one group's recurrences in a Python object made the project fail to
+SAVE - TouchDesigner pickles operator storage into the .toe, and a class from a module
+the builders re-import fails pickle's identity check. Not "reloads unpredictably":
+will not save. `DESIGN.md` 2.11 and `BUILD_PLAN.md` step 12.
 
 | need | operator |
 |---|---|

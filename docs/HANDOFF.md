@@ -209,7 +209,12 @@ All measured here. 1–10 are older and still true; 11 onwards are this session'
     exec context has neither bare name, and a scheduled string that raises NameError
     does so SILENTLY.
 17. **`totalCooks`, not `cookCount`** — the latter does not exist.
-18. **Gating costs about 0.11 ms per COMP boundary crossing at these channel
+18. **TouchDesigner pickles operator storage into the `.toe` on save.** Store only
+    primitives. A class instance from a module the builders purge from `sys.modules`
+    fails pickle's IDENTITY check and the project saves "with errors" — and **storage
+    outlives the code that wrote it**, so removing the `store()` call is not enough,
+    you have to `unstore` the key.
+19. **Gating costs about 0.11 ms per COMP boundary crossing at these channel
     counts**, paid whether the gate is open or shut. Do not wrap something in a COMP
     to make it switchable unless it is worth more than that switched off.
 

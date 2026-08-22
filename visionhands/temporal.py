@@ -24,9 +24,14 @@ reasons survive being measured:
   2. **It is inspectable.** 74 operators can be looked at in the network with a
      hand in front of the camera. A dict in operator storage cannot.
   3. **No hidden Python state for a project reload to treat unpredictably.** This is
-     the one that should decide it. Every recurrence here lives in a `TemporalState`
-     that a save/load cycle knows nothing about, so a reloaded project resumes with
-     whatever the state was - or with none - and the difference is invisible.
+     the one that decided it, and it turned out STRONGER than the argument for it.
+     The state does not merely reload unpredictably: with it in operator storage,
+     **the project would not save.** TouchDesigner pickles storage into the .toe, and
+     `PicklingError: Can't pickle <class 'visionhands.temporal.TemporalState'>: it's
+     not the same object as visionhands.temporal.TemporalState` is what a save
+     produced - because pickle compares class identity and the builders re-import this
+     module. The prototype keeps its state in its callback DAT's module globals now,
+     which are not pickled. A shipping version would have to answer this properly.
 
 WHAT IS FAITHFULLY REPRODUCED. The Schmitt debounce, exactly as
 `tools/td_add_temporal.py` builds it and `docs/ATTRIBUTES.md` specifies it:
