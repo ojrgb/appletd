@@ -2871,3 +2871,82 @@ pattern — so the y-flip and the un-stretch both belong in the Script TOP, and 
 not written yet. Segmentation is also not wired into the live capture queue:
 `detect_sample_buffer` exists and is unexercised, because the fixture path uses
 `detect_pixel_buffer` and the camera needs asking for.
+
+## The mask into TouchDesigner, and a restart that exposed a third door
+
+A force quit came first. My own probe hung TouchDesigner — I swept four array shapes
+through `copyNumpyArray` on a locked Script TOP to learn what it accepted, when one
+shape and one question would have done. The lesson is small and I keep needing it:
+probe the narrowest thing that answers the question.
+
+### The restart found a defect the two earlier fixes had not
+
+The project reloaded with `merge_streams` at 302 channels instead of 1,863. Frozen
+groups again — third door. `DESIGN.md` 2.16 had already recorded two ways a frozen
+group loses its channels (a forced cook of an ancestor, an upstream shape change);
+this was project LOAD. A `.toe` saved with `Temporal` off reopens with that group
+frozen and never cooked, so its channels simply are not there.
+
+Worse than the channels, it broke the BUILDERS. `td_add_temporal.py` rebuilt its group
+and then verified it while it was still frozen, so all ten structural checks reported
+`got ()` on a network that was fine. `td_add_coords.py` reported eight missing
+channels because its velocity branch reads the same group. Ten failures and one, all
+noise — and the noise is the danger, because the day a real failure appears it will be
+sitting in the middle of them.
+
+And the repair was incomplete: one cook brought `temporal` back to 23 channels of 27.
+The four missing were the velocity family, which is a Feedback CHOP chain whose
+template input has to have cooked once before it can name its own channels. So "cook
+it once, then freeze it" is not always enough, and I would not have found that by
+reading the code.
+
+The rule now: **a builder unfreezes what it needs to verify, and `td_add_groups.py`
+sets the final state because it runs last.** With that in place the chain runs nine
+builders with zero failures — and `td_add_coords.py`'s "built, not verified" message
+for pose and face is gone, because those spaces are now actually verified. A message
+saying a check was skipped had been sitting there looking like diligence.
+
+### Then the Script TOP
+
+Three operators: the Script TOP reads the buffer and flips y, a Fit TOP undoes the
+stretch on the GPU, an Out TOP publishes it. 0.0915 ms and 0.0312 ms — about 0.12 ms,
+next to the 0.11 ms the CHOP output costs.
+
+The flip is in the Script TOP and not in `maskbuf.py`, and the reason is the test:
+**a transport that silently reorients its payload cannot be checked against a known
+pattern.** So I checked the Script TOP against one. A mask looks plausible either way
+up, which is exactly why a mask cannot be the test — I published a frame with a bright
+band across the payload's first 24 rows and a grey block down its first 24 columns,
+and TouchDesigner showed the band at the top and the block at the left. That is the
+whole verification, and it took less time than reasoning about it would have.
+
+Four TD facts came out of it. `copyNumpyArray` needs three dimensions and takes uint8
+natively but refuses float16. It sets the TOP's resolution from the array, overriding
+`outputresolution`. `format = mono8fixed` keeps a mask one byte per pixel instead of
+four. And `allowCooking = False` **raises** on anything that is not a COMP — "This
+flag can only be disabled for COMPs" — which killed my first design for the `Segment`
+toggle. I could have wrapped the three operators in a base COMP to get the flag back;
+I decided a COMP boundary and a second connector to explain was a worse trade than
+checking the toggle inside `onCook`, for an operator that only cooks when something
+is looking at it. The toggle still earns its place: off releases the mapping.
+
+### The hardening I did before letting any of it near TouchDesigner
+
+A writer restarting at a different quality re-creates its buffer at a different size.
+Touching a page past the end of a file that shrank is a **SIGBUS** — not an exception,
+a process death, and inside TouchDesigner that is the user's whole project with no
+traceback. So the reader stats the file on every read and remaps when
+`(st_ino, st_size)` changes. The inode matters as much as the size: a writer
+recreating its buffer at the same geometry gets a new inode, and a reader still on the
+old one would report "nothing published yet" for ever, which is indistinguishable from
+a sidecar that never started.
+
+A file that has GONE is deliberately left mapped, because POSIX keeps it valid and
+that is what lets a sidecar restart without faulting the reader. Verified live: writer
+killed, buffer unlinked, and the TOP kept showing its last frame with no error.
+
+### What is not done
+
+`sidecar.py` still does not run segmentation, so `Segment` ships off and there is
+nothing to read until something writes. That is the next piece and it needs the
+camera.

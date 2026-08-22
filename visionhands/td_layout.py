@@ -108,6 +108,12 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     # hangs underneath. Nothing downstream reads these; they exist to be looked at.
     "housekeeping_sel": (2 * COL_W, -ROW_H),
     "housekeeping": (3 * COL_W, -ROW_H),
+    # The segmentation mask, a TOP path and the COMP's only TOP output. Its own row
+    # below the housekeeping, because it shares nothing with the CHOP network - it
+    # arrives by shared memory rather than over OSC (BUILD_PLAN step 16).
+    "seg_mask": (COL_W, -2 * ROW_H),
+    "seg_fit": (2 * COL_W, -2 * ROW_H),
+    "outmask": (3 * COL_W, -2 * ROW_H),
     "status": (-3 * COL_W, MASTER_ROW_H),
     "sidecar_control": (-5 * COL_W, -4 * MASTER_ROW_H),
     "sidecar_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H),
@@ -116,6 +122,8 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "groups_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H - ROW_H),
     "lat_threshold_callbacks": (-1 * COL_W, -4 * MASTER_ROW_H - ROW_H),
     "screenspace_callbacks": (-5 * COL_W, -4 * MASTER_ROW_H - 2 * ROW_H),
+    "seg_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H - 3 * ROW_H),
+    "seg_par_callbacks": (-1 * COL_W, -4 * MASTER_ROW_H - 3 * ROW_H),
     "profiler": (-3 * COL_W, -4 * MASTER_ROW_H - 2 * ROW_H),
     "notes": (-5 * COL_W, MASTER_ROW_H),
 }

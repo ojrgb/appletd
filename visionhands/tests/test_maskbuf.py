@@ -339,6 +339,74 @@ def test_unlink_is_idempotent(path: str) -> None:
     writer.unlink()
 
 
+# -- the writer replacing its buffer under a live reader -----------------
+
+
+def test_a_reader_remaps_when_the_writer_resizes_its_buffer(path: str) -> None:
+    """A SIGBUS, not an exception, is what this prevents. A writer restarting at a
+    different quality level re-creates the file at a different size, and touching a
+    page past the end of a file that SHRANK kills the process - inside TouchDesigner
+    that is the user's whole project, with no traceback.
+
+    So `read` stats the file first and remaps when it has been replaced.
+    """
+    big = MaskWriter(path, 512, 384)
+    big.write(b"\x01" * (512 * 384))
+    with MaskReader(path) as reader:
+        first = reader.read()
+        assert first is not None and first.width == 512
+        assert reader.remaps == 0
+
+        # The writer restarts, smaller. `unlink` first, which is what a new
+        # MaskWriter on a stale path effectively does when the capacity changes.
+        big.unlink()
+        small = MaskWriter(path, 64, 48)
+        small.write(b"\x02" * (64 * 48))
+        try:
+            got = reader.read()
+            assert got is not None
+            assert (got.width, got.height) == (64, 48)
+            assert set(got.pixels) == {0x02}
+            assert reader.remaps == 1
+        finally:
+            small.close()
+
+
+def test_a_reader_remaps_when_the_buffer_is_replaced_at_the_same_size(path: str) -> None:
+    """The identity is `(inode, size)` and not size alone. A writer that recreates
+    its buffer at the SAME size gets a new inode, and a reader still holding the old
+    one would sit on a file nobody writes to, reporting "nothing published yet" for
+    ever - which looks exactly like a sidecar that failed to start."""
+    first_writer = MaskWriter(path, 32, 32)
+    first_writer.write(b"\x0a" * 1024)
+    with MaskReader(path) as reader:
+        assert reader.read() is not None
+        first_writer.unlink()
+        second = MaskWriter(path, 32, 32)          # same geometry, new inode
+        second.write(b"\x0b" * 1024)
+        try:
+            got = reader.read()
+            assert got is not None
+            assert set(got.pixels) == {0x0b}
+            assert reader.remaps == 1
+        finally:
+            second.close()
+
+
+def test_an_unlinked_buffer_is_left_mapped_rather_than_remapped(path: str) -> None:
+    """The stat check must NOT react to the file going away. POSIX keeps the mapping
+    valid after an unlink, and that is what lets a sidecar restart without faulting
+    the reader - there is a test above for exactly that behaviour."""
+    writer = MaskWriter(path, 4, 4)
+    writer.write(b"\x0c" * 16)
+    reader = MaskReader(path)
+    writer.unlink()
+    got = reader.read()
+    assert got is not None and set(got.pixels) == {0x0c}
+    assert reader.remaps == 0
+    reader.close()
+
+
 # -- numpy view ----------------------------------------------------------
 
 

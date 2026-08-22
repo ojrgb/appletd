@@ -42,6 +42,11 @@ LAYERS = (
     ("coords",      "td_add_coords.py"),
     ("screenspace", "td_add_screenspace.py"),
     ("groups",      "td_add_groups.py"),
+    # LAST, and independent of everything above: the mask arrives by shared memory
+    # rather than over OSC, so it shares no operator with the CHOP network. It is
+    # after `groups` only because `groups` must not be the last word on a page it
+    # does not own.
+    ("segmentation", "td_add_segmentation.py"),
 )
 
 # What each layer drags along, and why. Anything listed here is added to the run
@@ -52,7 +57,7 @@ REQUIRES = {
     # (OTHER_BUILDERS_OWN, 2026-08-22), so a master rebuild is genuinely standalone.
     # It does re-derive the Attributes page's parameters though, and `groups` is what
     # writes the gating and the trim list from them.
-    "master": ("groups",),
+    "master": ("groups", "segmentation"),
     # These four each rebuild a group whose channels the trim list is generated
     # from, so the list has to be rewritten or the new channels are invisible - a
     # keep list fails closed (DESIGN.md 2.15).
@@ -65,6 +70,9 @@ REQUIRES = {
     # `allowCooking`, so it changes no channel NAMES and the trim list still holds.
     "filter": (),
     "groups": (),
+    # Nothing. It owns its own page, its own three operators and its own callbacks,
+    # and `td_build_vision.py` no longer destroys any of them (OTHER_BUILDERS_OWN).
+    "segmentation": (),
 }
 
 ALL = tuple(name for name, _script in LAYERS)

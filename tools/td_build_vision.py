@@ -371,6 +371,11 @@ OTHER_BUILDERS_OWN = {
     "lat_threshold_callbacks": "td_add_latches.py",
     "screenspace_callbacks": "td_add_screenspace.py",
     "profiler": "tools/td_profile.py",
+    "seg_mask": "td_add_segmentation.py",
+    "seg_fit": "td_add_segmentation.py",
+    "outmask": "td_add_segmentation.py",
+    "seg_callbacks": "td_add_segmentation.py",
+    "seg_par_callbacks": "td_add_segmentation.py",
 }
 # How a nested operator reaches a parameter on this COMP. Same form every builder
 # uses, and it is depth-independent - see the module docstring.

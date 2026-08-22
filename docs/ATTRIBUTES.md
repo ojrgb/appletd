@@ -771,13 +771,20 @@ Restructured 2026-08-21. **Every parameter on this page and the ones below belon
 to `/project1/vision`**, the master COMP, and every stream reads it:
 
 ```
-/project1/vision          Vision, Filter, Advanced, Tuning, Attributes
+/project1/vision   Vision, Filter, Advanced, Tuning, Attributes, Segmentation
   hands_osc 10000  ->  hands  --+
   pose_osc  10001  ->  pose   --+->  merge_streams  ->  trim_empty  ->  out1
   face_osc  10002  ->  face   --+          |                             258 chans
   status                          the     +->  housekeeping_sel  ->  housekeeping
                                   sc_* channels                       10 chans
+
+  /tmp/...mask.buf ->  seg_mask  ->  seg_fit  ->  outmask     a TOP, 1280x720
 ```
+
+**TWO outputs, of two families.** `out1` is the single CHOP output and is what
+everything in this document is about. `outmask` is a TOP carrying the person
+segmentation mask, and it arrives by shared memory rather than over OSC - a different
+transport for a different kind of data. Nothing about the channel contract touches it.
 
 **ONE output as of 2026-08-22**, not three. The three streams merge, `trim_empty`
 keeps only what the Attributes page has switched on, and that is the COMP's single
@@ -1131,3 +1138,45 @@ microseconds. To be measured rather than assumed once built.
 
 `derive()` takes the set of enabled groups so a disabled group costs nothing
 inside the Script CHOP as well as outside it.
+
+
+## The segmentation mask - a TOP, not channels
+
+### Page: Segmentation
+
+| parameter | default | what it does |
+|---|---|---|
+| `Segment` | **off** | read the shared buffer and publish the mask |
+| `Maskfit` | on | undo the anisotropic stretch, so the mask lines up with the camera frame |
+| `Masksourcew` `Masksourceh` | 1280 x 720 | READ-ONLY. The source geometry, read out of the buffer's header |
+
+`Maskbuffer` is on **Advanced**, with the other internals: it is a file path that has
+to match whatever writes the buffer, not something a consumer of this COMP chooses.
+
+**`Segment` ships OFF because nothing publishes yet.** `visionhands/sidecar.py` does
+not run segmentation, so switching it on today gives you black. To see the whole path
+work, run a writer yourself and then switch it on:
+
+    ~/.venvs/visionhands/bin/python tools/segmentation_probe.py --write-only
+
+That is the shape the sidecar will have. Switching `Segment` off releases the mapping,
+so a project not using the mask does not hold the buffer's file handle open.
+
+**Why `Maskfit` exists at all.** Vision's mask does NOT share its input's aspect
+ratio: a 1280x720 frame gives a 256x192 mask, and the shape is chosen by orientation
+alone - landscape gets 4:3, portrait gets 3:4. The image is stretched anisotropically
+to fit, with no letterboxing. So lining the mask up with the camera frame is a
+non-uniform scale, and `Maskfit` is what applies it, on the GPU, from the source
+geometry the buffer's header carries. Turn it off to get the mask at its native
+resolution - which is the right choice if you are going to composite it against
+something else that is also mask-shaped.
+
+**There is no quality parameter, deliberately.** The quality level - and therefore the
+mask's resolution and cost - is chosen by whatever WRITES the buffer. This side only
+reads. A control here would be a knob that cannot be honoured, which `DESIGN.md` and
+`engine.py` both argue is worse than no control at all.
+
+**What it costs.** About 0.12 ms: `seg_mask` 0.0915 and `seg_fit` 0.0312. A miss - the
+writer publishing while the Script TOP is reading - holds the previous frame rather
+than blocking or blanking, which for a mask is the right answer and is why the
+transport never takes a lock (`DESIGN.md` 2.19, 2.20).

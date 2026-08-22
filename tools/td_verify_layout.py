@@ -51,6 +51,11 @@ EXPECTED_ISLANDS = ("notes", "screen_only_notes", "profiler", "sidecar_control",
                     "sidecar_callbacks", "sidecar_exit", "filter_callbacks",
                     "groups_callbacks", "lat_threshold_callbacks",
                     "screenspace_callbacks", "derive_callbacks",
+                    # The segmentation mask's two DATs. The Script TOP takes its
+                    # code by PARAMETER, not by a wire, and a Parameter Execute DAT
+                    # has no inputs at all - so neither is orphaned, both are
+                    # correctly wireless (td_add_segmentation.py).
+                    "seg_callbacks", "seg_par_callbacks",
                     # A Script CHOP's callbacks DAT is docked to it by a PARAMETER,
                     # not by a wire, so it has no connections by design.
                     "tmp_motion_callbacks", "proto_callbacks",

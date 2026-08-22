@@ -513,6 +513,16 @@ def _build_one(td, child, stream, pairs, boxes, box_expressions, failures,
     # everything wired to its output, and a dangling input cannot be told apart from
     # one that was never connected - measured as a COMP output falling from 495
     # channels to 57 while the builder reported success (DESIGN.md 2.11).
+    # UNFREEZE the stream for the build, and let tools/td_add_groups.py set the final
+    # state - it runs last in the chain precisely so that it can. A builder cannot
+    # verify a network that is not allowed to cook, and the alternative was the
+    # "built, not verified" message below, which is an admission rather than a check.
+    # Same reasoning as td_add_temporal.py; DESIGN.md 2.16 is the measurement.
+    if not child.allowCooking:
+        child.allowCooking = True
+        print("   (unfroze `%s` to build and verify it - td_add_groups.py sets the "
+              "final state)" % stream)
+
     group = child.op(GROUP)
     existed = group is not None
     if group is None:

@@ -1004,6 +1004,27 @@ Two fixes, both in place:
   it repairs the vanish wherever it came from. `tools/td_add_groups.py` provokes it
   with a forced master cook and then verifies the repair, in that order.
 
+**A THIRD door, found 2026-08-22 after a TouchDesigner restart: project LOAD.** A
+`.toe` saved with `Temporal` off reloads with that group frozen and never cooked, so
+its channels are absent — `merge_streams` came back at 302 channels instead of 1,863.
+Worse, it broke the BUILDERS: `td_add_temporal.py` rebuilt the group and then
+verified it while it was still frozen, so all ten of its structural checks reported
+`got ()` on a network that was fine, and `td_add_coords.py` reported eight missing
+channels because its velocity branch was reading the same frozen group. And the
+repair was incomplete — one cook brought `temporal` back to 23 channels of 27,
+because the velocity family is a Feedback CHOP chain whose template input has to have
+cooked once before it can name its own channels.
+
+So the rule now is: **a builder unfreezes what it needs to verify, and
+`td_add_groups.py` sets the final state because it runs last.**
+`td_add_temporal.py`, `td_add_latches.py` and `td_add_coords.py` each unfreeze their
+own group or stream and say so. A builder cannot verify a network that is not allowed
+to cook, and the alternative — `td_add_coords.py`'s old "built, not verified" — is an
+admission rather than a check. With the rule in place the whole chain runs nine
+builders with zero failures, and pose and face coordinate spaces are genuinely
+verified instead of skipped.
+
+
 ### 2.17 `append*` on an existing parameter, and the deferred callback — 2026-08-22
 
 §2.11 already records that appending a custom parameter that exists RESETS it, and
@@ -1125,6 +1146,66 @@ sidecar lands in exactly that window. Fixed on both sides: the writer stamps the
 magic on the descriptor before the mapping exists, and an all-zero header now reads
 as "nothing published yet" rather than as a wiring mistake. A NON-zero wrong magic
 still raises, because that one really is a mistake.
+
+### 2.20 The mask into TouchDesigner — the Script TOP, measured
+
+`tools/td_add_segmentation.py` builds `seg_mask` (Script TOP) → `seg_fit` (Fit TOP) →
+`outmask` (Out TOP) inside `/project1/vision`. VERIFIED live against a writer in
+another process publishing real Vision masks.
+
+| operator | what it does | cost |
+|---|---|---|
+| `seg_mask` | stat, coherent read, y-flip, `copyNumpyArray` | **0.0915 ms** median |
+| `seg_fit` | 512 × 384 → 1280 × 720, non-uniform, on the GPU | **0.0312 ms** |
+
+About **0.12 ms** for the whole mask path, against the 0.11 ms the single CHOP output
+costs. A numpy resize on the main thread instead of the Fit TOP would have been a
+1280 × 720 resample per frame, which is why the stretch is undone on the GPU.
+
+**`copyNumpyArray`, verified rather than assumed:**
+
+- it needs **three dimensions**, `(h, w, components)`. A plain `(h, w)` raises
+  *"NumPy array must be 3 dimensions"* — so a mono mask still needs its trailing 1.
+- `uint8` is accepted **natively**. No float32 conversion, which for a mask would
+  have been a 4× widening for nothing. `float16` is refused outright: *"Arrays with
+  float data must be float32."*
+- it **sets the TOP's resolution** from the array, overriding `outputresolution`. So
+  the Script TOP is whatever size the mask is, and the Fit TOP is where a fixed
+  output resolution belongs.
+- `format = mono8fixed` keeps it one byte per pixel on the GPU. The default
+  `rgba8fixed` would carry four and copy three of them for nothing.
+
+**`allowCooking = False` raises on anything that is not a COMP:** *"This flag can
+only be disabled for COMPs."* So the gating pattern every CHOP group in this project
+uses is simply unavailable to a bare operator, and the `Segment` toggle is checked
+inside `onCook` instead. Wrapping three operators in a base COMP purely to get the
+flag would buy a COMP boundary and a second connector to explain, for an operator
+that only cooks when something is looking at it.
+
+**The orientation is verified with a known pattern, not with a mask.** A mask looks
+plausible either way up, which is exactly why it cannot be the test. Publishing a
+frame with a 255 band across the payload's FIRST 24 rows and a 180 block down its
+first 24 columns, TouchDesigner shows the band at the top and the block at the left —
+so the y-flip is right and there is no accidental x-mirror. `maskbuf.py` deliberately
+does not flip; the Script TOP does, because a transport that silently reorients its
+payload cannot be tested against a known pattern at all.
+
+`fit = fill` is the non-uniform stretch (the menu is
+`fill / fithorz / fitvert / fitbest / fitoutside / nativeres`). `fitbest` would
+letterbox, which would be right if Vision had letterboxed — it does not, and §2.18
+has the row-occupancy check that says so.
+
+**One hardening the reader needed before going anywhere near TD.** A writer restarting
+at a different quality level re-creates its buffer at a different size, and touching
+a page past the end of a file that SHRANK is a **SIGBUS** — inside TouchDesigner that
+is the user's whole project, with no traceback. So `MaskReader.read` stats the file
+first, every read, and remaps when `(st_ino, st_size)` has changed. The inode matters
+as much as the size: a writer that recreates its buffer at the same geometry gets a
+new inode, and a reader still on the old one would report "nothing published yet" for
+ever, which looks exactly like a sidecar that failed to start. A file that has GONE is
+left mapped on purpose — POSIX keeps it valid, and that is what lets a sidecar restart
+without faulting the reader. VERIFIED live: the writer killed and its buffer unlinked,
+the TOP kept showing its last frame with no error.
 
 ## 3. Traps — all of these cost real time in the spike
 

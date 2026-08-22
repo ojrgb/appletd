@@ -378,6 +378,23 @@ def main():
     existed = group is not None
     if group is None:
         group = comp.create(td.baseCOMP, GROUP)
+    # UNFREEZE it for the build, and let tools/td_add_groups.py decide the final
+    # state - it runs last in the chain precisely so that it can.
+    #
+    # WHY, measured 2026-08-22 after a TouchDesigner restart: a project reloads with
+    # this group frozen (its master toggle off in the saved file), so every operator built
+    # below cooks to NOTHING and every check in section 4 reports `got ()`. Ten
+    # failures on a build that was fine. Worse than the noise, it did not fully
+    # recover: `_apply_gating`'s one cook brought the group back to 23 channels of 27,
+    # because the velocity family is a Feedback CHOP chain that needs its template
+    # input to have cooked once before it can name its own channels.
+    #
+    # A builder cannot verify a network that is not allowed to cook, so it unfreezes
+    # first. DESIGN.md 2.16 is the same failure through a different door.
+    if not group.allowCooking:
+        group.allowCooking = True
+        print("   (unfroze `%s` to build it - td_add_groups.py sets the final "
+              "state)" % GROUP)
     kept = _clear_keeping_ports(td, group, ("in1", "in2", "out1", "out2"))
     _place(group, stream_xy(GROUP), _keep_layout(master), existed)
     group.color = (0.3, 0.5, 0.4)

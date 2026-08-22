@@ -64,6 +64,8 @@ ignore = [
 "tools/td_verify_layout.py" = ["F821"]
 "tools/td_add_temporal_proto.py" = ["F821"]
 "tools/td_add_tips.py" = ["F821"]
+"tools/td_add_segmentation.py" = ["F821"]
+"tools/td_rebuild.py" = ["F821"]
 "tools/probe_m1_in_td.py" = [
     "E402",
     # The probe's entire purpose is to survive a failing stage and report which

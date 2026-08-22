@@ -356,17 +356,34 @@ class MaskReader:
 
     def __init__(self, path: str) -> None:
         self._path = path
-        size = os.path.getsize(path)
-        if size < HEADER_BYTES:
+        self._map: mmap.mmap | None = None
+        self._capacity = 0
+        self._identity = (0, 0)
+        self.misses = 0                 # cumulative, for the profiler to report
+        self.remaps = 0                 # how often the writer replaced its buffer
+        self._open()
+
+    def _open(self) -> None:
+        """(Re)map the file, remembering which file and what size it was.
+
+        The identity is `(st_ino, st_size)`, not just the size: a writer that
+        unlinks and recreates its buffer at the SAME size gets a new inode, and a
+        reader still mapped to the old inode would sit on a file nobody writes to
+        and report "nothing published yet" for ever.
+        """
+        stat = os.stat(self._path)
+        if stat.st_size < HEADER_BYTES:
             raise ValueError("%s is %d bytes, too small to hold a %d-byte header"
-                             % (path, size, HEADER_BYTES))
-        fd = os.open(path, os.O_RDONLY)
+                             % (self._path, stat.st_size, HEADER_BYTES))
+        if self._map is not None and not self._map.closed:
+            self._map.close()
+        fd = os.open(self._path, os.O_RDONLY)
         try:
-            self._map = mmap.mmap(fd, size, access=mmap.ACCESS_READ)
+            self._map = mmap.mmap(fd, stat.st_size, access=mmap.ACCESS_READ)
         finally:
             os.close(fd)
-        self._capacity = size
-        self.misses = 0                 # cumulative, for the profiler to report
+        self._capacity = stat.st_size
+        self._identity = (stat.st_ino, stat.st_size)
 
     def __enter__(self) -> MaskReader:
         return self
@@ -393,6 +410,24 @@ class MaskReader:
         or a different build, which retrying forever would hide behind a mask that is
         simply always blank.
         """
+        # A stat FIRST, every read, and it is not paranoia - it is the difference
+        # between an exception and a SIGBUS. If the writer restarts at a different
+        # quality level it re-creates its buffer at a different size, and touching a
+        # page past the end of a file that SHRANK kills the process. Inside
+        # TouchDesigner that is the user's whole project, with no traceback.
+        #
+        # `os.stat` is about a microsecond against the read's twenty, and a file that
+        # has GONE is left alone deliberately: POSIX keeps the mapping valid after an
+        # unlink, which is what lets a sidecar restart without faulting the reader.
+        try:
+            stat = os.stat(self._path)
+        except OSError:
+            stat = None
+        if stat is not None and (stat.st_ino, stat.st_size) != self._identity:
+            self._open()
+            self.remaps += 1
+
+        assert self._map is not None                    # _open sets it or raises
         for _ in range(max(1, attempts)):
             (magic, version, seq, seq_tail, width, height, components, dtype,
              frame, timestamp, source_w,

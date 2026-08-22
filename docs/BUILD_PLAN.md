@@ -1345,3 +1345,52 @@ the fixture path uses `detect_pixel_buffer`.
 runs the whole pipeline in two real processes and writes the mask both as published
 and stretched back to its source, which is the shortest available explanation of why
 the header carries the source geometry.
+
+## Step 17 — the mask into TouchDesigner — DONE 2026-08-22
+
+`tools/td_add_segmentation.py`, and `td_rebuild.py` gained a `segmentation` layer.
+
+    seg_mask (Script TOP)  ->  seg_fit (Fit TOP)  ->  outmask (Out TOP)
+       reads the mmap,            undoes the              a TOP output, and the
+       flips y                    stretch, on the GPU     COMP's second family
+
+**Three operators, each doing the one thing it is cheapest at.** The Script TOP does
+what only Python can - read the shared buffer - and the y-flip, because it is the
+operator that knows the convention. The Fit TOP undoes the anisotropic stretch on the
+GPU, where a numpy resize would have cost a 1280x720 resample per frame on the main
+thread. MEASURED: 0.0915 ms and 0.0312 ms, so about 0.12 ms for the whole path.
+
+**The orientation is verified with a KNOWN PATTERN, not with a mask.** A mask looks
+plausible either way up, which is precisely why it cannot be the test. A frame with a
+255 band across the payload's first 24 rows and a 180 block down its first 24 columns
+shows up in TouchDesigner as a band at the top and a block at the left - so the flip
+is right and there is no accidental x-mirror.
+
+### Four TouchDesigner facts this needed
+
+- **`copyNumpyArray` wants three dimensions**, `(h, w, components)`. A plain `(h, w)`
+  raises. `uint8` is accepted natively - no float32 widening for a mask - and
+  `float16` is refused outright. It also SETS the TOP's resolution from the array.
+- **`allowCooking = False` raises on anything that is not a COMP:** "This flag can
+  only be disabled for COMPs". So the gating pattern every CHOP group here uses is
+  unavailable to a bare operator, and `Segment` is checked inside `onCook` instead.
+- **`format = mono8fixed`** keeps a mask at one byte per pixel on the GPU. The default
+  would carry four.
+- **`fit = fill`** is the non-uniform stretch. `fitbest` letterboxes, which would be
+  right if Vision letterboxed - it does not (DESIGN.md 2.18).
+
+### And one hardening the reader needed first
+
+A writer restarting at a different quality re-creates its buffer at a different size,
+and touching a page past the end of a file that SHRANK is a **SIGBUS** - inside
+TouchDesigner that is the user's whole project with no traceback. `MaskReader.read`
+now stats the file every read and remaps when `(st_ino, st_size)` changes. The inode
+matters as much as the size: a writer that recreates its buffer at the same geometry
+gets a new inode, and a reader still on the old one reports "nothing published yet"
+for ever, which looks exactly like a sidecar that failed to start.
+
+### Still not done
+
+`visionhands/sidecar.py` does not run segmentation, so `Segment` ships OFF and there
+is nothing to read until something writes. `detect_sample_buffer` is there and
+unexercised. That is the next piece, and it needs the camera.
