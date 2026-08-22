@@ -119,6 +119,45 @@ pixel in the frame**. That is not the model changing its mind, it is division.
 
 Anything you build on the raw map has to be scale-invariant — or pinned.
 
+### "I move my hand toward the camera and it just stays white"
+
+That is the `reduce_max`, working exactly as described, and it is the single most
+confusing thing about this map. MEASURED over the fixture: the maximum is **exactly
+1.000 in every single frame**. It has to be — it is what everything else was divided by.
+
+So if your hand is the nearest thing in shot, it reads ~1.0 at every distance. Moving
+it does not change its own value; it changes **everything else's**. On the same
+fixture, a patch of stationary wall swung between 0.383 and 0.920 — a 54% swing on
+something that never moved — purely because the divisor was changing.
+
+If you want the hand itself to change value, either put something nearer than it in
+frame, or use metric depth.
+
+### Is metric depth the same as the normalised depth? No.
+
+| | what it is | units | comparable between frames? |
+|---|---|---|---|
+| **normalised / raw** — what `outdepth` carries | inverse depth ÷ this frame's maximum | none | **no** |
+| **metric** — what you compute | `Z = 1 / (alpha*d + beta)` | metres | yes, as far as the fit holds |
+
+**`outdepth` publishes the NORMALISED map, not metres.** Nothing in this component
+converts one to the other — §"Pinning" above says why, and `Depthfitalpha` /
+`Depthfitbeta` are published so you can. If you have been reading `outdepth` expecting
+metres, that is the mismatch.
+
+### And pinning is only as good as the pins
+
+Worth measuring before trusting it. On `fixtures/hand_clip.mp4` with the default pins,
+that same stationary wall patch still drifts **54 cm** in metric depth — because the
+clip is a person filling the frame, so one default pin is occluded every frame and the
+remaining two-pin fit is solved from observations that are partly a torso. The
+correction is arithmetically perfect and the inputs are wrong.
+
+Pins have to be on things that really are at the stated distance and really are not
+occluded. `Depthpinsdraw` shows you where they landed; `Depthfitpins` says how many
+survived; `Depthfitchecked` says whether the residual means anything. Use all three
+before believing a number.
+
 ### Pinning: how to get metres
 
 The corruption is *affine*, and affine corruptions can be solved away. Give it points
@@ -236,6 +275,7 @@ stops poisoning the whole frame.
 | `buffer version N, this reader speaks M` | a stale buffer from an older build. The message names the file — delete it |
 | the map is there but `Depthfitpins` is 0 | no pins set, or they were refused. The sidecar prints why at startup |
 | `Depthfitresidual` is 0.000 and looks perfect | check `Depthfitchecked`. With two pins it is meaningless |
+| the sidecar log says `0.5 fps` and a huge `age` | those were the HANDS stream's numbers and read nonsense with hands off. Fixed 2026-08-22 — the line now says `sends`, only shows `age` when hands is on, and has a `depth N @ M ms` counter |
 | depth arrives but hands got choppy | expected. 23 ms of inference on a 33 ms frame interval — see §2. MEASURED live: the camera holds 30 fps but every frame arrives ~35 ms old |
 | `sc_depth` reads 0 while `Streamdepth` is on | the sidecar was launched without it. Read `/tmp/visionhands_sidecar.log` — its first line lists the streams it actually started |
 

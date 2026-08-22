@@ -335,6 +335,16 @@ class Sidecar:
                      aux=frame.fit.pack())
         self.n_depth_written += 1
 
+    def _depth_ms(self) -> float:
+        """The most recent depth inference, in ms. A GAUGE, not a measurement.
+
+        Reached through the engine because the detector belongs to it - and 0.0 when
+        there is no engine yet, which is the honest reading during the camera's ~1.5 s
+        warm-up rather than a number invented to fill the field.
+        """
+        engine = getattr(self.source, "_engine", None)
+        return float(getattr(engine, "depth_inference_ms", 0.0)) if engine else 0.0
+
     def _source_px(self) -> tuple[int, int]:
         """What the camera actually delivered, or (0, 0) for "not stated".
 
@@ -649,23 +659,42 @@ class Sidecar:
                         next_send = now + self.send_interval_s
 
                 if now >= next_status:
-                    delivered = new_frames - frames_at_last_status
+                    # `sends` and not "camera fps", and the rename is a bug fix. This
+                    # counted iterations where `send_once` reported news, which keys
+                    # off the HANDS sequence - so with hands disabled it read 0.5 fps
+                    # and the age climbed to four seconds while depth was running
+                    # perfectly. Two numbers that looked like a catastrophe and
+                    # measured nothing. MEASURED 2026-08-22, from a user asking why
+                    # depth was not working.
+                    #
+                    # `age` has the same problem and the same fix: it is the HANDS
+                    # box's age, so it is only shown when hands is on.
+                    sends = (new_frames - frames_at_last_status) / STATUS_INTERVAL_S
                     pose, face = self.pose_source, self.face_source
-                    print("camera %5.1f fps | sent %d | age %6.1f ms | hands %d%s%s"
-                          % (delivered / STATUS_INTERVAL_S, self.n_sent,
-                             self.source.age_ms(),
-                             sum(1 for h in self.source.latest().hands if h.found),
-                             "".join(x for x in (
-                                 "" if pose is None or STREAM_POSE not in self.streams
-                                 else " | bodies %d" % sum(
-                                     1 for b in pose.latest_pose().bodies if b.found),
-                                 "" if face is None or STREAM_FACE not in self.streams
-                                 else " | faces %d" % sum(
-                                     1 for f in face.latest_face().faces if f.found),
-                             )),
-                             "" if not self.source.errors
-                             else " | ERRORS: %s" % self.source.errors),
-                          flush=True)
+                    parts = ["sends %5.1f/s | sent %d" % (sends, self.n_sent)]
+                    if STREAM_HANDS in self.streams:
+                        parts.append("age %6.1f ms | hands %d"
+                                     % (self.source.age_ms(),
+                                        sum(1 for h in self.source.latest().hands
+                                            if h.found)))
+                    if pose is not None and STREAM_POSE in self.streams:
+                        parts.append("bodies %d" % sum(
+                            1 for b in pose.latest_pose().bodies if b.found))
+                    if face is not None and STREAM_FACE in self.streams:
+                        parts.append("faces %d" % sum(
+                            1 for f in face.latest_face().faces if f.found))
+                    # THE IMAGE STREAMS, which had no line of their own at all - which
+                    # is precisely why "is depth even on?" could not be answered from
+                    # this log. A count that climbs is the whole answer, and the
+                    # inference gauge next to it says what it is costing.
+                    if REQUEST_SEGMENT in self.streams:
+                        parts.append("masks %d" % self.n_masks_written)
+                    if REQUEST_DEPTH in self.streams:
+                        parts.append("depth %d @ %.1f ms"
+                                     % (self.n_depth_written, self._depth_ms()))
+                    if self.source.errors:
+                        parts.append("ERRORS: %s" % self.source.errors)
+                    print(" | ".join(parts), flush=True)
                     frames_at_last_status = new_frames
                     next_status += STATUS_INTERVAL_S
                     if next_status < now:
