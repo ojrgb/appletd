@@ -3270,3 +3270,64 @@ headroom is not enough. Widened to 3x with the reason written next to the number
 bound that fails under contention is not a regression guard, it is a coin toss. The
 authoritative figures still come from `tools/depth_probe.py` on a quiet machine, which
 is what STANDARDS.md 3 requires anyway.
+
+---
+
+## 2026-08-22 — Step 21 planned: the shipping design, and the venv that turns out to be unnecessary
+
+Plan only, no build. The user's decision: one `.toe`, the files stay the source of truth,
+the builders embed them, an Install button writes them back out and fetches the model,
+and the status text probes on load. `BUILD_PLAN.md` step 21 is the design.
+
+### The question that produced it was better than the answer I expected
+
+"Why do we need repo root? What does TouchDesigner use that's in the repo?" I had been
+treating the hardcoded paths as untidiness. Answering the question properly showed they
+are not: `derive_callbacks` imports `visionhands.derive` **every cook**, both Script TOPs
+import `maskbuf` every cook, and the sidecar is launched as `-m visionhands.sidecar` with
+`cwd` set. The `.toe` cannot run without the repo, so fifteen hardcoded paths mean the
+project opens on exactly one machine on earth. That is a blocker, not a tidy-up.
+
+### The finding that changed the shape of the step
+
+Before planning I checked what TouchDesigner actually bundles:
+
+    python3.11   3.11.15, Derivative build      pip 24.2      numpy 2.1.2
+    pyobjc       absent - the only thing missing
+
+`requirements.txt` has said since the spike that the cp311 ABI match with TD is
+deliberate. That was an argument about loading pyobjc *inside* TD. It turns out to be
+worth much more: **the sidecar can run on TD's own interpreter, so there is no venv to
+create.** `pip install --dry-run` through TD's own pip resolves all nine packages to
+prebuilt `cp311-macosx_10_9_universal2` wheels, pyobjc-core included, so no compiler
+either. Install becomes: write 19 files, `pip install --target`, fetch 47 MB. One button.
+
+Not into TD's own `site-packages` - the app is code-signed with the hardened runtime and
+a TouchDesigner update would delete our packages. `--target` keeps them ours, and using
+the same interpreter makes the ABI correct by construction instead of by a pin somebody
+has to remember to check.
+
+Two things I deliberately did not claim. Resolving a wheel is not importing one, and TD's
+CPython is a Derivative patch - that needs a one-minute test. And changing the sidecar's
+interpreter may reset the camera TCC grant, or may attribute it to TouchDesigner, which
+would be better; that needs the camera, so it needs asking for. Both are written into
+21.7 rather than assumed.
+
+### Two traps found while computing what to ship, not while shipping it
+
+**`__init__.py` is invisible to an import-closure walk.** Nothing imports *from* it, so
+walking the graph from `sidecar`, `derive`, `maskbuf` and `pins` finds 18 modules and
+misses the one that makes them a package. An installer generated from that walk produces
+a folder that fails on the first cook. So the check has to be "does `import
+visionhands.sidecar` succeed in a fresh interpreter", not "are the 18 files present".
+
+**Two copies of the code is a silent-wrong-answer defect, not an inconvenience.** A user
+opening a newer `.toe` over an older install runs the OLD `derive` every cook with no
+error and wrong channels. Existence checks cannot see it; only a version stamp can, which
+is why the status field grows an `Update needed` state. Same class as two benchmark
+figures that both look measured - the problem is not that one is wrong, it is that
+nothing tells you which.
+
+The pleasing part of the design: during development `Installroot` points at the checkout,
+so the dev path and the ship path are one code path with a different parameter value, and
+there is no second copy on this machine to drift.

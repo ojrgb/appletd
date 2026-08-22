@@ -1597,3 +1597,178 @@ sampling now.
 Live camera verification. Everything here is fixture replay and a writer in a second
 process; the TD side was verified against real model output flowing through the real
 buffer, but no sidecar has yet run depth off the camera - that needs asking for it.
+
+---
+
+## Step 21 — one `.toe`, an Install button, and paths that resolve — PLANNED 2026-08-22
+
+The goal, in the user's words: ship a single `.toe`. Source of truth stays the actual
+files; the builders write them into the `.toe`; an Install button writes them back out to
+a folder; the status text probes that folder on load and says `Press Install` when it is
+missing.
+
+This is not only a packaging convenience. Fifteen files currently hardcode one
+developer's home directory, so **the project cannot be opened by anybody else at all**
+right now. Step 21 is the step that makes it shippable.
+
+### 21.1 The finding that decides the shape: TouchDesigner's own Python
+
+Checked before planning, because it changes what Install has to do:
+
+    TouchDesigner.app/Contents/Frameworks/Python.framework/Versions/3.11
+        python3.11      3.11.15  (Derivative build, `heads/3.11-Derivative-dirty`)
+        pip3            24.2
+        numpy           2.1.2    already there
+        pyobjc          ABSENT   - the only thing missing
+
+`requirements.txt` already says the cp311 ABI match with TD is deliberate and is the
+reason this project is Python rather than Objective-C++. That match is now worth more
+than an argument: **the sidecar can run on TD's own interpreter, so there is no venv to
+create.** A `pip install --dry-run` against TD's pip resolves all nine packages to
+prebuilt `cp311-macosx_10_9_universal2` wheels - pyobjc-core included - so no compiler is
+needed either.
+
+    launch:  <TD>/bin/python3.11  -m visionhands.sidecar
+    env:     PYTHONPATH=<install>/site-packages:<install>
+
+**Never install into TD's own `site-packages`.** The app is code-signed with the hardened
+runtime, it lives in `/Applications`, and anything put inside it is destroyed by the next
+TouchDesigner update. `pip install --target <install>/site-packages` keeps our packages
+ours, and the same interpreter guarantees the ABI by construction rather than by a pin
+somebody has to remember.
+
+This collapses the install story from *clone, venv, pip, fetch, point two parameters* to
+*press Install*. It is the single largest reason to do this step at all.
+
+### 21.2 Portable paths — one resolution point, and two roots on purpose
+
+Today: fifteen files each carry `REPO_ROOT = "/Users/omer/..."` as a literal.
+`tools/depth_probe.py` and `tools/segmentation_probe.py` already derive it from
+`__file__` and are the proof that the literal was never necessary for anything run from
+disk. The generated DAT text is the one genuinely hard case - a Text DAT has no
+`__file__` - which is why the value has to be *stored* rather than derived.
+
+Two roots, and the distinction is the design:
+
+| | resolved from | who uses it |
+|---|---|---|
+| **checkout root** | `tools/td_paths.py`, from its own `__file__` | the builders. Developer tools, run from a git checkout |
+| **install root** | `Installroot`, a parameter on Advanced | the generated DATs and the sidecar. Written by Install |
+
+Every builder imports `td_paths`; every generated DAT reads `op.Vision.par.Installroot`.
+`SIDECAR_PYTHON` goes the same way - a parameter, defaulting to TD's own interpreter,
+with a probe that checks the binary exists rather than letting `Popen` fail.
+
+The pleasing consequence: **during development `Installroot` points at the checkout**, so
+the dev path and the ship path are the same code path with a different parameter value,
+and there is no second copy of the source on this machine to drift.
+
+### 21.3 What gets embedded, and what stays a file
+
+The runtime closure, computed rather than guessed:
+
+| | modules | note |
+|---|---|---|
+| the sidecar process | 15 | separate OS process - **cannot** import from a DAT |
+| the cook-time DATs | +3 | `derive`, `spaces`, `td_layout` |
+| `__init__.py` | +1 | imported by nobody, required by everybody. See below |
+| **written out by Install** | **19**, ~399 KB | of 27 `.py` in the package |
+
+Not needed at runtime and deliberately not shipped: `coords`, `motion`, `sequences`,
+`temporal`, `tuning`, `synth`, `synth_body`, `synth_face`.
+
+**`__init__.py` is the trap here.** An import-closure walk finds it in nothing, because
+nothing imports *from* it - and without it on disk `import visionhands.derive` fails at
+the first cook. Any generator that derives the file list from the import graph must add
+it explicitly, and the check has to be "does `import visionhands.sidecar` succeed in a
+fresh interpreter", not "are the modules the walk named present".
+
+A new builder - `tools/td_embed_package.py` - reads each file and writes one Text DAT
+into a container inside the COMP. ~399 KB of text is a rounding error on a `.toe`.
+
+**The DATs are a build artefact and must never become the source.** 539 tests, ruff and
+mypy all run against files; source that lives in a binary `.toe` cannot be diffed,
+tested or linted. So the embed builder overwrites every DAT unconditionally, the DATs
+carry a header saying so, and editing one is a change that the next builder run silently
+destroys. That is the intended behaviour, not a bug to fix later.
+
+### 21.4 Install, in order, with the failure named at each step
+
+1. **write the source** - 19 files to `<install>/visionhands/`, plus `INSTALLED.json`
+   carrying the version stamp. Local, fast, cannot fail except on permissions.
+2. **`pip install --target <install>/site-packages -r` the pinned pyobjc** - needs
+   network. Nine wheels. This is where a corporate proxy fails.
+3. **fetch the model** - `tools/fetch_models.sh` logic, 47 MB from Hugging Face, no
+   account and no token. Also where the network fails, and the slow one.
+
+Steps 2 and 3 are subprocesses and must not block TD's main thread. They already have a
+pattern to copy: the sidecar pid watch polls from the main thread rather than calling
+back from another one, because **nothing may touch a TouchDesigner object from any
+thread but the main one**. Install polls the same way.
+
+Where `<install>` defaults to is a real decision and should be made when this is built.
+`~/Library/Application Support/visionhands/<version>/` is the macOS-correct answer -
+always writable, versioned so two `.toe` versions cannot fight - against `project.folder`
+being far more discoverable for the beginner audience this component is aimed at.
+Recommend Application Support, with the path visible and editable in `Installroot` so it
+is never magic.
+
+### 21.5 The probe, and seven status states where there were three
+
+The probe runs on component load: stat the 19 modules, the `site-packages` marker, the
+model directory, and compare `INSTALLED.json`'s stamp against the one the builders baked
+into the COMP. Nineteen stats at load is free.
+
+The existing status field grows from three states to seven, and install states preempt
+run states because a missing install is why nothing runs:
+
+| state | colour | when |
+|---|---|---|
+| `Not installed — press Install` | red | the probe found nothing |
+| `Installing — writing files` | yellow | step 1 |
+| `Installing — Python packages` | yellow | step 2 |
+| `Installing — model, 47 MB` | yellow | step 3, the slow one |
+| `Install failed: <step>` | red | and it must name **which** step, not just "failed" |
+| `Update needed — press Install` | yellow | stamp mismatch |
+| `Requires Restart` / `Running` / `Stopped` | as now | install is good |
+
+**`Update needed` is the state that stops a silent wrong answer.** With the code in two
+places, a user opening a newer `.toe` over an older install runs the OLD `derive` every
+cook while the `.toe` expects the new one - no error, wrong channels. Existence checks
+cannot catch that; only the stamp can. It is the same class of defect as two benchmark
+numbers that both look measured.
+
+### 21.6 The two pulses
+
+`Install` on the **Vision** page, `par.enable = False` once the probe passes, so the
+common case shows a button that is visibly already done.
+
+`Forceinstall` on **Advanced**, always enabled: rewrite every file, reinstall the
+packages, re-download the model. `fetch_models.sh` currently skips anything already
+present and big enough - that re-runnability is deliberate and is the repair path for an
+interrupted download - so it needs a `--force` flag rather than a change of default.
+
+### 21.7 Verify these first, because two of them can undo the design
+
+1. **A `cp311-macosx` wheel actually loading in TD's Derivative-patched CPython.** The
+   dry-run resolves; resolving is not importing. `import Vision` in a subprocess of
+   TD's own `python3.11` with `PYTHONPATH` set is the whole test, and it costs a minute.
+2. **Camera permission.** TCC attributes the prompt to the responsible process. Changing
+   the sidecar's interpreter from `~/.venvs/visionhands/bin/python` to TD's bundled one
+   may reset the grant, or may attribute it to TouchDesigner - which would be *better*,
+   since TD is already trusted. Genuinely unknown, and needs the camera, so it needs
+   asking for.
+3. `pip install --target` alongside TD's populated `site-packages` - `--target` does no
+   conflict resolution, and pyobjc-core landing in the target while numpy stays in TD's
+   bundle is the arrangement to confirm, not assume.
+
+### 21.8 A simplification this enables
+
+Both Script TOPs import `visionhands.maskbuf` at cook time, and the depth one also
+imports `pins.unpack`. Both are stdlib-only - `maskbuf` is `struct` and `mmap`, `unpack`
+is one `struct.unpack` - so both could be inlined into their generated DATs exactly as
+`groups_callbacks` already is, for the reason its docstring already gives: *a project
+someone opens on another machine still has to be able to switch a group off.* Then the
+mask and depth outputs need no install at all, and only `derive` and the sidecar do.
+
+Worth doing at the same time, because it shrinks what a broken install can break.

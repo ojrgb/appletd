@@ -410,7 +410,26 @@ header layouts and the reason TD's protocol is closed to a foreign owner. Do not
 re-research it. The one thing still unmeasured needs a camera: the per-frame cost of
 `VNGeneratePersonSegmentationRequest` at each quality level.
 
-### 5. Smaller, and each is self-contained
+### 5. Shipping — PLANNED, and it is the reason nobody else can open this yet
+
+`docs/BUILD_PLAN.md` step 21 is the whole design. The blocker in one line: **fifteen
+files hardcode `/Users/omer/Documents/GitHub/visionhands-touchdesigner`**, so the
+project opens on exactly one machine. The user's decision is a single `.toe` with an
+Install button - the files stay the source of truth, the builders embed them, Install
+writes them back out and fetches the model, and the status text probes on load.
+
+The finding that shaped it, checked 2026-08-22: **TouchDesigner bundles Python 3.11.15
+with its own pip and numpy 2.1.2, and pyobjc is the only thing missing.** All nine
+pinned wheels resolve as prebuilt `cp311-macosx_10_9_universal2`, so the sidecar can run
+on TD's own interpreter with `pip install --target` - no venv, no compiler. Never into
+TD's own `site-packages`: it is code-signed and a TD update destroys it.
+
+Two things to verify before trusting any of it, both in step 21.7: a cp311 wheel
+actually *importing* in TD's Derivative-patched CPython (resolving is not importing), and
+whether changing the sidecar's interpreter resets the camera TCC grant - that one needs
+the camera, so it needs asking for.
+
+### 6. Smaller, and each is self-contained
 
 - **`face/coords/lm_world` is 0.83–1.08 ms** and it is the most expensive thing in
   the COMP when it is on. I looked for a cheaper native shape and there is not one:
