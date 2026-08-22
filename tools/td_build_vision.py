@@ -16,11 +16,18 @@
 
     WHAT IT PRODUCES
 
-        /project1/vision            every user parameter, and the sidecar control
-          hands_osc  port 10000  ->  hands   ->  out1
-          pose_osc   port 10001  ->  pose    ->  out2
-          face_osc   port 10002  ->  face    ->  out3
+        /project1/vision            every user parameter, and the capture control
+          hands_osc  port 10000  ->  hands  --+
+          pose_osc   port 10001  ->  pose   --+-> merge_streams -> trim_empty
+          face_osc   port 10002  ->  face   --+        |              -> out1
+                                                       +-> housekeeping_sel
+                                                              -> housekeeping
           status                                 the sidecar's own sc_* channels
+
+    ONE OUTPUT as of 2026-08-22, not three. A project wires this component once, and
+    `trim_empty` drops the channels of every group that is not computing - so the
+    list a beginner meets is the list that is actually live. `Delete Empty Channels`
+    on the Vision page bypasses it.
 
 WHY ONE COMP AROUND THE THREE, replacing the three siblings this supersedes. The
 filter and the coordinate spaces were built inside the hands COMP because hands
@@ -353,6 +360,18 @@ COMP_NAME = "vision"
 # how `op.Vision` reads at a call site, and it must not collide with anything else
 # in the project - TD shortcuts are global.
 OP_SHORTCUT = "Vision"
+
+# Master-level operators this script must NOT destroy, and who does own each one.
+# Added 2026-08-22: without it, `td_build_vision.py` alone left the COMP with no
+# gating callback, no filter callback and no latch thresholds, so the only safe way
+# to run it was to run the whole chain after it.
+OTHER_BUILDERS_OWN = {
+    "filter_callbacks": "td_add_filter.py",
+    "groups_callbacks": "td_add_groups.py",
+    "lat_threshold_callbacks": "td_add_latches.py",
+    "screenspace_callbacks": "td_add_screenspace.py",
+    "profiler": "tools/td_profile.py",
+}
 # How a nested operator reaches a parameter on this COMP. Same form every builder
 # uses, and it is depth-independent - see the module docstring.
 MASTER_PAR = "op.%s.par.%%s" % OP_SHORTCUT
@@ -403,7 +422,7 @@ VISION_PAGE_ORDER = (
     "Active", "Camera", "Listcameras",
     "Streamhands", "Streampose", "Streamface", "Slotassign",
     "Resw", "Resh", "Renderw", "Renderh", "Orthowidth",
-    "Screenspaceonly", "Keeplayout",
+    "Screenspaceonly", "Deleteempty", "Keeplayout",
 )
 
 # Defaults for the aspect and pixel conversions. MEASURED: the sidecar requests and
@@ -501,8 +520,23 @@ def main():
     # cooking off their own clocks, so the COMP still looked busy. Nothing errored.
     # This is precisely the failure DESIGN.md 2.11 records for group builders; the
     # master had the same hole.
+    # `out1` only: `out2` and `out3` are retired below, and the merge and the delete
+    # in front of out1 are cheap to rebuild because out1 itself is what external
+    # wires attach to.
     kept = (set(STREAM_NAMES) | {name + "_osc" for name in STREAM_NAMES}
-            | {"out%d" % (index + 1) for index in range(len(STREAM_NAMES))})
+            | {"out1", "merge_streams", "trim_empty",
+               "housekeeping_sel", "housekeeping"}
+            # `out2` and `out3` are RETIRED, not kept - but they are retired further
+            # down, where their consumers can be read off them first and repointed at
+            # out1. Destroyed by this loop instead they would be gone before anything
+            # had looked, and an orphaned input cannot be told from an empty one.
+            | {"out2", "out3"}
+            # AND every master-level operator another builder owns. This script used
+            # to destroy them, which meant a change to the master shell dragged four
+            # more builders along behind it just to put back callback DATs it had no
+            # business removing - and made "rebuild the master" a five-script job.
+            # Each builder owns its own operators; this one owns the shell.
+            | OTHER_BUILDERS_OWN.keys())
     for child in list(comp.children):
         if child.name not in kept:
             child.destroy()
@@ -601,6 +635,24 @@ def main():
     # toggle that ships ON would delete them out from under one.
     par_screen.default = False
 
+    # Drop the channels of every group that is not computing. The whole point of
+    # the single output: a component handed to a beginner opens with a channel list
+    # they can read, not 1,861 channels of which most are frozen at zero.
+    #
+    # ON by default, and that is a DELIBERATE reversal of DESIGN.md 6.2 for this one
+    # operator. Everywhere else this system prefers a stale channel to a missing one,
+    # because a channel that vanishes breaks its consumers with no error anywhere.
+    # Here the user's call is the other way round and the reasoning is sound: the
+    # audience is beginners, an understandable list matters more than a stable one,
+    # and channels appearing and disappearing as toggles move is acceptable - even
+    # useful, since it makes the toggles legible.
+    #
+    # It is the LAST operator before the output, so nothing inside the COMP reads
+    # through it and no group's own verification is affected.
+    par_empty = page.appendToggle(
+        "Deleteempty", label="Delete Empty Channels")[0]
+    par_empty.default = True
+
     # Whether the builders may move nodes. `visionhands.td_layout.placement` has the
     # rule and what it cannot protect - the short version is that it holds the group
     # COMPs, the stream shell and the OSC In CHOPs, and cannot hold operators INSIDE
@@ -655,7 +707,8 @@ def main():
              ("Slotassign", par_slots), ("Resw", par_w), ("Resh", par_h),
              ("Renderw", par_rw), ("Renderh", par_rh),
              ("Orthowidth", par_ortho), ("Screenspaceonly", par_screen),
-             ("Keeplayout", par_keep), ("Oscport", par_port),
+             ("Keeplayout", par_keep), ("Deleteempty", par_empty),
+             ("Oscport", par_port),
              ("Smoothing", par_smooth), ("Mincutoff", par_mincut),
              ("Beta", par_beta)]
     owned += [("Stream" + name, par) for name, par in stream_pars.items()]
@@ -735,20 +788,124 @@ def main():
         child.color = (0.35, 0.45, 0.55)
         child.inputConnectors[0].connect(osc)
 
-        out = comp.op("out%d" % (index + 1))
-        out_existed = out is not None
-        if out is None:
-            out = comp.create(td.outCHOP, "out%d" % (index + 1))
-        _at(out, (COL_W, row), keep_layout, out_existed)
-        # REUSED, never recreated - see the `kept` set above. The connector index a
-        # project's wire is attached to follows these operators, so replacing one
-        # moves every output the project reads.
-        # `outputConnectors[0]`, not the COMP: connect() takes an operator only
-        # where it has one unambiguous output, which a base COMP does not.
-        out.inputConnectors[0].connect(child.outputConnectors[0])
-        outputs.append((stream, osc, child, out))
-        print("3.%d %-5s port %d -> %s -> out%d"
-              % (index + 1, stream, osc.par.port.eval(), child.name, index + 1))
+        outputs.append((stream, osc, child))
+        print("3.%d %-5s port %d -> %s"
+              % (index + 1, stream, osc.par.port.eval(), child.name))
+
+    # -- ONE output ---------------------------------------------------------
+    # Three streams -> one Merge -> a Delete -> one Out. Changed 2026-08-22 from
+    # three separate Out CHOPs, so that a project wires this component once and a
+    # beginner meets one channel list rather than three.
+    #
+    # The names still say which stream they came from - `h0_`, `p0_`, `f0_`,
+    # `pose_seq`, `face_seq` - so merging loses nothing. A Merge CHOP accepts the
+    # same operator on any number of inputs silently and the only symptom is the
+    # channel count, so the inputs are set from scratch here rather than patched.
+    merge = comp.op("merge_streams")
+    merge_existed = merge is not None
+    if merge is None:
+        merge = comp.create(td.mergeCHOP, "merge_streams")
+    _at(merge, master_xy("merge_streams"), keep_layout, merge_existed)
+    for _attempt in range(16):
+        if not merge.inputs:
+            break
+        merge.inputConnectors[0].disconnect()
+    for index, (_stream, _osc, child) in enumerate(outputs):
+        merge.inputConnectors[index].connect(child.outputConnectors[0])
+
+    # The trim. Its LIST is written by tools/td_add_groups.py, which is the only
+    # place that knows which groups are frozen - and it has to be rewritten whenever
+    # a toggle moves, so it cannot be baked here.
+    #
+    # A SELECT rather than the Delete CHOP this started as. MEASURED 2026-08-22 on
+    # the same 1,764-channel merge, median of 30 forced cooks, same 306 channels out:
+    #
+    #     Delete,  35 drop patterns          0.6697 ms
+    #     Delete, 306 literal keep names     3.3618 ms
+    #     Select, 306 literal keep names     0.0555 ms
+    #
+    # The Delete's cost grows with list length times input channels; the Select's
+    # barely moves. Two consequences of the swap, both handled in td_add_groups.py:
+    #
+    #   * a keep list FAILS CLOSED. A channel nobody named is gone, where the Delete's
+    #     drop list let an unnamed channel through. So EVERY attribute toggle has to
+    #     rewrite the list, not just the ones that gate cooking - otherwise turning a
+    #     group on would leave its channels invisible.
+    #   * a Select emits in `channames` ORDER, so the list is generated in merge order
+    #     to leave the output identical to the Delete's.
+    #
+    # And it is BYPASSED whenever nothing is frozen: an empty drop list was free for
+    # the Delete, where a Select naming all 1,861 channels would not be.
+    stale = comp.op("delete_empty")
+    if stale is not None and stale.valid:
+        stale.destroy()
+        print("   retired delete_empty (a Select does the same trim 12x cheaper)")
+    empty = comp.op("trim_empty")
+    empty_existed = empty is not None
+    if empty is None:
+        empty = comp.create(td.selectCHOP, "trim_empty")
+        # Bypassed, and naming everything, until td_add_groups.py writes the list.
+        # Set on creation only, so the list it wrote survives a rebuild of the shell.
+        empty.par.channames = "*"
+        empty.bypass = True
+    _at(empty, master_xy("trim_empty"), keep_layout, empty_existed)
+    empty.color = (0.5, 0.32, 0.32)
+    empty.inputConnectors[0].connect(merge)
+
+    # The housekeeping, which the output deliberately does NOT carry: `sc_*`, `seq`
+    # and `age_ms`. Asked for 2026-08-22 - they are diagnostics, and a beginner
+    # reading the channel list should not have to step over them. They are one click
+    # away rather than gone: this Select picks them off the merge and the Null beside
+    # it is the thing to look at. Its LIST, like the trim's, is written by
+    # tools/td_add_groups.py, which is the only place that knows what the output drops.
+    house_sel = comp.op("housekeeping_sel")
+    house_sel_existed = house_sel is not None
+    if house_sel is None:
+        house_sel = comp.create(td.selectCHOP, "housekeeping_sel")
+        house_sel.par.channames = ""
+    _at(house_sel, master_xy("housekeeping_sel"), keep_layout, house_sel_existed)
+    house_sel.inputConnectors[0].connect(merge)
+    house = comp.op("housekeeping")
+    house_existed = house is not None
+    if house is None:
+        house = comp.create(td.nullCHOP, "housekeeping")
+    _at(house, master_xy("housekeeping"), keep_layout, house_existed)
+    house.inputConnectors[0].connect(house_sel)
+    # Cook Type = Selective, the default, so it costs nothing until something looks.
+    house.comment = ("the channels out1 does not carry: sc_*, seq, age_ms. "
+                     "Diagnostics, kept where they can be inspected.")
+
+    out = comp.op("out1")
+    out_existed = out is not None
+    if out is None:
+        out = comp.create(td.outCHOP, "out1")
+    _at(out, master_xy("out1"), keep_layout, out_existed)
+    # PRESERVED, never recreated - an Out CHOP IS the COMP's output connector, and
+    # destroying it disconnects whatever the project had wired to it (DESIGN.md 2.11).
+    out.inputConnectors[0].connect(empty)
+
+    # -- retire the two outputs this replaces ------------------------------
+    # EVERY consumer on EVERY output connector is captured first and reconnected to
+    # connector 0 afterwards. Not just the two being retired: which connector index
+    # belongs to which Out CHOP is TouchDesigner's business, not something this
+    # script should assume, and reconnecting a consumer that was already on out1 to
+    # out1 costs nothing. Guessing the mapping and getting it wrong would silently
+    # leave a project reading a dead wire.
+    moved = []
+    for connector in comp.outputConnectors:
+        for connection in list(connector.connections):
+            moved.append((connection.owner, connection.index))
+    retired = [name for name in ("out2", "out3")
+               if comp.op(name) is not None and comp.op(name).valid]
+    for name in retired:
+        comp.op(name).destroy()
+    for owner, connector_index in moved:
+        if owner.valid:
+            owner.inputConnectors[connector_index].connect(comp.outputConnectors[0])
+    if retired:
+        print("   retired %s; %d consumer%s now on the single output: %s"
+              % (", ".join(retired), len(moved), "" if len(moved) == 1 else "s",
+                 ", ".join(sorted({owner.name for owner, _i in moved})) or "none"))
 
     # The sidecar's own status channels, split out for the panel. They arrive on the
     # HANDS port (DESIGN.md 6.4) and are left in that stream as well - this is a
@@ -819,12 +976,20 @@ def main():
         print("   rewired %s" % ", ".join(rewired))
 
     # -- report ------------------------------------------------------------
-    comp.cook(force=True)
+    # NOT force=True. MEASURED 2026-08-22: a forced cook of this COMP asks every
+    # child for fresh data, a group frozen by `allowCooking` cannot answer, and its
+    # Out CHOP drops to ZERO channels - so the channels VANISH from the output
+    # instead of holding their last value (DESIGN.md 6.2). `hands` went from 503
+    # channels to 406 and every builder that ran afterwards reported false failures
+    # against the empty groups. A plain cook is enough for a channel count.
+    comp.cook()
     print()
     print("5. %d operators in %s" % (len(comp.children), comp.path))
-    for stream, osc, child, out in outputs:
-        print("   %-5s osc %3d chans -> %s out %3d chans"
-              % (stream, osc.numChans, child.name, out.numChans))
+    for stream, osc, child in outputs:
+        inner = child.op("out1")
+        print("   %-5s osc %4d chans -> %s %4d chans"
+              % (stream, osc.numChans, child.name,
+                 0 if inner is None else inner.numChans))
         if osc.numChans == 0:
             print("         (zero until something SENDS on port %d - the OSC In "
                   "CHOP creates" % osc.par.port.eval())
@@ -835,9 +1000,16 @@ def main():
     print("   td_add_temporal.py, td_add_latches.py, td_add_coords.py,")
     print("   td_add_screenspace.py, td_add_groups.py")
     print()
+    print("   ONE output: merge_streams -> trim_empty -> out1, %d channels."
+          % out.numChans)
+    print("   Delete Empty Channels = %s. The LIST is written by td_add_groups.py,"
+          % bool(par_empty.eval()))
+    print("   which is the only thing that knows which groups are frozen - so run")
+    print("   it after this, or the trim keeps whatever list it had.")
+    print()
     print("   Reference a fingertip as:  op('%s/hands')['h0_index_tip_tx']"
           % comp.path)
-    print("   Outputs, in order: out1 hands, out2 pose, out3 face.")
+    print("   ...or off the single output:  op('%s')['h0_index_tip_tx']" % comp.path)
     print("=" * 70)
 
 

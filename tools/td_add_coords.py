@@ -404,6 +404,14 @@ def _apply_rename(node, names, old_suffix, new_suffix, failures, label):
     node.par.renameto = " ".join(expected)
     node.cook(force=True)
     if [c.name for c in node.chans()] != expected:
+        # UNVERIFIABLE is not the same as wrong. If this node's input carries no
+        # channels there is nothing to rename, and the rename map is still correct -
+        # it just cannot be demonstrated. That happens whenever the branch reads a
+        # group `allowCooking` has frozen, or a stream that is switched off, and it
+        # used to be reported as four failures on a network that was fine. A check
+        # that cries wolf hides the next real failure among its noise.
+        if not any(inp.numChans for inp in node.inputs):
+            return "unverified"
         failures.append("%s: renaming produced %r, expected %r"
                         % (label, [c.name for c in node.chans()][:3], expected[:3]))
         return "FAILED"
@@ -608,7 +616,14 @@ def _build_one(td, child, stream, pairs, boxes, box_expressions, failures,
     # failure report rather than the message above.
     expected = sum(len(b.names) for src, b in pairs if src not in absent) + sum(
         len(box.names) for box in boxes)
-    if group_out.numChans != expected:
+    # And only when the stream is actually COOKING. A frozen stream's operators hold
+    # nothing to count - `Streampose` off used to report "produced 0 channels,
+    # expected 152" on a group that had been built correctly. Say it was not
+    # verified rather than that it failed.
+    if not child.allowCooking:
+        print("   (`%s` is frozen - built, not verified. Turn Stream%s on to "
+              "check it.)" % (stream, stream))
+    elif group_out.numChans != expected:
         failures.append("%s: `%s` produced %d channels, expected %d"
                         % (stream, GROUP, group_out.numChans, expected))
     # And no branch may collide with another: two branches renaming to the same

@@ -453,6 +453,20 @@ Presets on the `Verbosity` menu: **Minimal** = Landmarks + Coordstx (221),
 **Interaction** = everything except the pixel spaces and Descriptor (421),
 **Everything** = all of it (589).
 
+**OFF FREEZES, IT DOES NOT REMOVE — and the label says so now.** Turning `Coordspx`
+off stops `coords/pixels` cooking; the `_px`/`_py` channels stay on the COMP output
+holding their last value. VERIFIED when a user asked why they were still there: 0
+cooks across all eight operators in `coords/pixels` over 403 frames of moving data.
+What the toggle saves is the COMPUTE, about 0.1 ms per stream, not the channel count.
+
+Why that way round: `DESIGN.md` 6.2 — a channel that VANISHES breaks every reference
+to it with no error anywhere, so stale beats absent. If you actually want the
+channels gone from the output, that is `Screenspaceonly`'s job, and it currently
+removes the RAW normalised ones rather than the pixel ones.
+
+A frozen channel is likely to read **0**, not a plausible last value, because a
+freshly built group is frozen right after a cook that had no data in it yet.
+
 **`Coordspx` DEFAULTS ON as of 2026-08-21, and that is a change.** It used to
 default off and gate nothing at all, so the `_px`/`_py` channels were always live.
 It now freezes `coords/pixels` — the channels stay, holding their last value — and a
@@ -504,6 +518,33 @@ A disabled `derive` group's channels are excluded from the output. A disabled
 NATIVE group has `allowCooking` off, so it costs nothing and its channels are left
 at their last value — which is deliberate, and 6.2 of `DESIGN.md` is why.
 
+**And then they are trimmed off the output.** The component has ONE output, and a
+Select in front of it (`trim_empty`) keeps only the channels that are actually being
+computed. So a group you switch off does not just stop costing anything — its
+channels leave the list. In the shipping configuration that is 258 channels on the
+output rather than 1,863. `Delete Empty Channels` on the Vision page turns the trim
+off if you would rather see everything, frozen values included.
+
+**Four families never reach the output at all**, whatever the toggles say:
+
+| never on the output | where it went | why |
+|---|---|---|
+| the 80 per-joint `*_conf` | nowhere — use `h?_conf_median` | one confidence per joint is 80 channels nobody reads one at a time |
+| `sc_uptime_s` `sc_hands` `sc_pose` `sc_face` | the `housekeeping` Null | the capture process's own state, not the hands' |
+| `seq` `pose_seq` `face_seq` | the `housekeeping` Null | frame counters |
+| `age_ms` `pose_age_ms` `face_age_ms` | the `housekeeping` Null | how stale the last datagram is |
+
+`housekeeping` is a Null CHOP inside the component, beside `out1`. Open the COMP and
+look at it — 10 channels, and it costs 0.0037 ms because a Null only cooks when
+something is watching. `h0_conf_median` and `h1_conf_median` DO stay on the output:
+they are the summary confidence, and they are what to gate on (`DESIGN.md` 6.2).
+
+Four toggles are the exception, and they change nothing at all: `Landmarks`,
+`Triggers`, `Motion` and `Events`. Their channels come out of a group that is still
+cooking — `Motion` shares `temporal` with `Presence`, and the other three share
+`latches` — so nothing can tell them apart from the channels beside them. See the
+table below.
+
 #### What the toggles gate, and the one thing to know about switching one off
 
 Three kinds of toggle, and the label says which:
@@ -513,7 +554,7 @@ Three kinds of toggle, and the label says which:
 | `Core` `Presence` `Contacts` `Pose` `Twohands` `Gestures` `Descriptor` | `derive()` does not compute the group, and its channels leave the output |
 | `Presence` `Motion` (→ `temporal`), `Triggers` `Gestures` `Events` (→ `latches`), `Coordstx` `Coordspx` (→ `coords/world`, `coords/pixels` in all three streams), `Lmcoordstx` `Lmcoordspx` (→ the face's landmark halves) | the group COMP stops cooking entirely, via `allowCooking`. Its channels stay, holding their last value |
 | `Temporal` `Latches` | a VETO: off freezes the group whatever the toggles above say. See below |
-| `Landmarks` `Triggers` `Motion` `Events` | nothing on their own — advisory, and the LABEL says "channels only". Closing that needs an exact channel-to-group map, and `DESIGN.md` §2.14 explains why it still would not help |
+| `Landmarks` `Triggers` `Motion` `Events` | nothing on their own — advisory, and the LABEL says "channels only". Every OTHER toggle now also removes its channels from the output, because `trim_empty` is generated from the frozen groups; these four name channels inside a group that is still cooking, so telling them apart needs an exact channel-to-group map. `DESIGN.md` §2.15 |
 
 **`Temporal` and `Latches` are master switches, and they needed a second
 mechanism.** The table above is an OR — "any of these toggles being on keeps the
@@ -731,16 +772,23 @@ to `/project1/vision`**, the master COMP, and every stream reads it:
 
 ```
 /project1/vision          Vision, Filter, Advanced, Tuning, Attributes
-  hands_osc 10000  ->  hands  ->  out1
-  pose_osc  10001  ->  pose   ->  out2
-  face_osc  10002  ->  face   ->  out3
-  status                          the sidecar's sc_* channels
+  hands_osc 10000  ->  hands  --+
+  pose_osc  10001  ->  pose   --+->  merge_streams  ->  trim_empty  ->  out1
+  face_osc  10002  ->  face   --+          |                             258 chans
+  status                          the     +->  housekeeping_sel  ->  housekeeping
+                                  sc_* channels                       10 chans
 ```
+
+**ONE output as of 2026-08-22**, not three. The three streams merge, `trim_empty`
+keeps only what the Attributes page has switched on, and that is the COMP's single
+output connector. Channel names still say which stream they came from — `h0_`, `p0_`,
+`f0_`, `pose_seq`, `face_seq` — so nothing is ambiguous.
 
 One `Smoothing` toggle drives all three filters; one `Orthowidth` drives all three
 sets of coordinate spaces. Reference a channel as
-`op('/project1/vision/hands')['h0_index_tip_tx']`, or wire from the master's output
-connectors - out1 hands, out2 pose, out3 face - since an operator outside the COMP
+`op('/project1/vision')['h0_index_tip_tx']` off the merged output, or
+`op('/project1/vision/hands')['h0_index_tip_tx']` to reach past the trim into a
+stream, or wire from the master's one output connector — an operator outside the COMP
 cannot wire to a nested one.
 
 **Paths changed:** `/project1/visionhands` is now `/project1/vision/hands`.
@@ -766,7 +814,25 @@ moved to Advanced.
 | `Renderw` `Renderh` | 1280x720 | the RENDER, for the world-space aspect |
 | `Orthowidth` | 1.0 | the camera's ortho width |
 | `Screenspaceonly` | off | drop the raw normalised coords (above) |
+| `Deleteempty` | **on** | keep only the channels that are actually being computed. `sc_*`, `seq`, `age_ms` and the per-joint `*_conf` are off the output either way — see `housekeeping` |
 | `Keeplayout` | off | builders leave existing nodes where you put them |
+
+**`Delete Empty Channels` is why the output is short.** The COMP has ONE output —
+`hands`, `pose` and `face` merge into it — and with every stream and space enabled
+that is 1,863 channels. Nobody should meet a component that way. So a Select in
+front of the Out CHOP keeps only what the Attributes page has switched on: 258
+channels in the shipping configuration. Switch a group on later and its channels
+appear; switch it off and they go. That is the intended behaviour, not a
+regression — a channel holding a frozen value is worse than a channel that is
+honestly absent, because nothing about the number says it stopped moving.
+
+Turn it OFF to see everything, frozen values and all. That is the right setting if
+you have a patch that already references a channel from a group you have since
+disabled and you want it back without re-enabling the group.
+
+This toggle is the ONE place in the component that deliberately reverses
+`DESIGN.md` 6.2's "channels never vanish" rule, and it does so because the audience
+is people meeting a hand tracker for the first time.
 
 **`Active` is a COMMAND, not a reading.** The process can die on its own — a camera
 unplugged, a crash, a kill from a terminal — and the toggle would still read on.

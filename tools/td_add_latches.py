@@ -1013,6 +1013,38 @@ def main():
     # would leave a network that cooks cleanly and computes the wrong thing.
     print("4. structure:")
     failures = []
+
+    # WHICH latches are actually live, read off the input rather than assumed.
+    # A latch whose distance or validity channel is not on `in1` cannot be built -
+    # `derive()` takes an enabled-groups set, so `Pose` off drops `h?_openness` and
+    # with it the two grab latches, which is DOCUMENTED behaviour ("a dropped group
+    # costs one latch"). Comparing against the full LATCHES table anyway reported
+    # nine failures for a network that was correct, every run, and a check that
+    # cries wolf is worse than no check: the next real failure hides among them.
+    # WHICH latches can carry data, read off the input rather than assumed. A latch
+    # whose DISTANCE channel is not on `in1` cannot compute - `derive()` takes an
+    # enabled-groups set, so `Pose` off drops `h?_openness` and with it the two grab
+    # latches, which is DOCUMENTED behaviour ("a dropped group costs one latch").
+    #
+    # The network is still built FIFTEEN wide, and that is the thing to get right:
+    # the constant CHOPs have a block per row, the validity fan reads `h?_valid`
+    # which is always there, and only the operators downstream of the distance fan
+    # narrow to thirteen. So the expectation below is not "thirteen everywhere" - it
+    # is the full table, with the dropped rows' names ALLOWED to be missing and
+    # nothing else tolerated. Comparing against the full table flat reported nine
+    # failures on a correct network; comparing against thirteen flat reported fifteen.
+    have = set(named(derived_in))
+    dropped_rows = [row for row in LATCHES if row[1] not in have]
+    dropped = [row[0] for row in dropped_rows]
+    # Every name a dropped row would have contributed, in any column any check uses.
+    droppable = {row[0] for row in dropped_rows}
+    droppable |= {name for row in dropped_rows for name in row[5:10]}
+    if dropped:
+        print("   %d of %d latches have no source on in1, so a derive group they "
+              "need is off:" % (len(dropped), len(LATCHES)))
+        print("      %s   (expected, not a failure - their channels are allowed to "
+              "be absent below)" % ", ".join(dropped))
+
     checks = [(dist, WORKING), (valid_raw, WORKING), (valid, WORKING)]
     if gate13 is not None:
         checks.append((gate13, WORKING))
@@ -1040,13 +1072,20 @@ def main():
                            "both_pinching"))]
     for node, expected in checks:
         actual = tuple(named(node))
-        # Compared as SETS. Every rename is now keyed on channel names rather than
-        # on position, so order carries no meaning and every multi-input operator
-        # pairs by name - asserting an order here would be asserting something the
-        # network no longer depends on, and would fail on a harmless reordering.
-        ok = set(actual) == set(expected) and len(actual) == len(expected)
-        if not ok:
-            failures.append("%s: expected %r, got %r" % (node.name, expected, actual))
+        # Compared as SETS. Every rename is keyed on channel names rather than on
+        # position, so order carries no meaning and asserting one would fail on a
+        # harmless reordering. An EXTRA channel is always a failure; a MISSING one
+        # is a failure unless it belongs to a latch whose source is switched off.
+        actual_set, expected_set = set(actual), set(expected)
+        extra = sorted(actual_set - expected_set)
+        missing = sorted(expected_set - actual_set)
+        unexplained = [name for name in missing if name not in droppable]
+        ok = not extra and not unexplained and len(actual) == len(actual_set)
+        if extra or unexplained:
+            failures.append("%s: extra %r, unexplained missing %r"
+                            % (node.name, extra[:4], unexplained[:4]))
+        elif len(actual) != len(actual_set):
+            failures.append("%s: duplicate channel name(s)" % node.name)
         print("   %s %-22s %d chans  %s" % ("ok " if ok else "BAD", node.name,
                                             len(actual), " ".join(sorted(actual)[:4])))
         if node.errors():

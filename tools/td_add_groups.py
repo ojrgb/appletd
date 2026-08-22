@@ -57,6 +57,7 @@ Ref: docs/ATTRIBUTES.md (the group table and the budget), docs/BUILD_PLAN.md ste
 """
 
 import sys
+from fnmatch import fnmatchcase
 
 REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
 # The master COMP holds every parameter; the hands STREAM holds this
@@ -210,12 +211,131 @@ COOK_VETOED = {
     "hands/latches": ("Latches", "Temporal"),
 }
 
+
+# >>> TRIM SCOPE - everything between these markers is copied VERBATIM into the
+# generated Parameter Execute DAT (see _trim_source), so that the DAT and this
+# module cannot drift. Keep it dependent on nothing but the standard library.
+#
+# The one Select CHOP in front of the master's single output, and the toggle that
+# bypasses it. Both live on the MASTER COMP - tools/td_build_vision.py builds them,
+# this script is the only thing that knows what to put IN the list.
+TRIM_CHOP = "trim_empty"
+TRIM_TOGGLE = "Deleteempty"
+MERGE_CHOP = "merge_streams"
+
+# Channels the output never carries, whatever the toggles say. Asked for by the user
+# 2026-08-22, and the reason is the same one the trim exists for: a beginner reading
+# the channel list should see the things they came for, not the housekeeping.
+#
+# `HOUSEKEEPING` goes to a Null CHOP inside the component instead - `housekeeping`,
+# next to the output - so it is one click away rather than gone.
+#
+# WHAT IS DELIBERATELY NOT HERE: `*_conf_median`. "All conf channels" would take it,
+# but it is not a per-joint confidence - it is the SUMMARY, and DESIGN.md 6.2 tells
+# people to gate on it ("gate on `h<i>_conf_median`, never on `found` alone"). Taking
+# the channel the documentation recommends off the output would be a trap. The 80
+# per-joint `*_conf` channels do go.
+PER_JOINT_CONF = ("*_conf",)
+HOUSEKEEPING = ("sc_*", "seq", "*_seq", "age_ms", "*_age_ms")
+NEVER_ON_OUTPUT = PER_JOINT_CONF + HOUSEKEEPING
+
+
+def _trim_keep(comp, wanted):
+    """The channels to KEEP on the single output, in merge order. Returns a list.
+
+    Which channels to drop is read off the NETWORK - each group's `out1` is exactly
+    the set of channels that group contributes - rather than from a channel-to-group
+    map, which does not exist and would go stale the first time a builder added a
+    channel. A frozen group still reports its channels, holding their last value,
+    which is the whole reason this trim is needed: `Coordspx` off used to leave 100
+    `_px`/`_py` channels on the output carrying a plausible wrong number.
+
+    A KEEP list rather than the drop list this started as, because the operator is a
+    Select and not a Delete CHOP - see tools/td_build_vision.py for the measurement.
+    Two consequences:
+
+      * it FAILS CLOSED. A channel nobody names is gone, so every attribute toggle
+        has to rewrite this list, not just the ones that gate cooking. That is why
+        `callbacks.par.pars` lists all of GROUPS and not just the gating subset.
+      * a Select emits in `channames` ORDER, so this returns MERGE order and not
+        sorted order, leaving the output identical to what the Delete produced.
+
+    Literal names, not patterns: MEASURED, a Select naming 306 channels costs
+    0.0555 ms where one pattern costs 0.0313, and compaction cannot beat that by
+    enough to be worth a wildcard that could match a channel added later.
+
+    NOT covered, and the labels already say so: `Landmarks`, `Triggers`, `Motion`
+    and `Events` are advisory. Their channels come out of a group that IS cooking -
+    `Motion` shares `temporal` with `Presence`, the other three share `latches` -
+    so separating them needs the channel-to-group map this deliberately avoids.
+    """
+    drop = set()
+    for group_name, enabled in wanted.items():
+        if enabled:
+            continue
+        group = comp.op(group_name)
+        out = None if group is None else group.op("out1")
+        if out is None:
+            continue
+        drop.update(chan.name for chan in out.chans())
+    merged = comp.op(MERGE_CHOP)
+    if merged is None:
+        return None
+    names = [chan.name for chan in merged.chans()]
+    # The per-joint confidences and the housekeeping, dropped whatever is frozen.
+    # `*_conf_median` survives `*_conf` because fnmatch anchors at both ends.
+    drop.update(name for name in names
+                if any(fnmatchcase(name, pattern) for pattern in NEVER_ON_OUTPUT))
+    if not drop.intersection(names):
+        # Nothing to drop: BYPASS rather than name all 1,861 channels. An empty list
+        # is free for a Delete CHOP but not for a Select.
+        return None
+    return [name for name in names if name not in drop]
+
+
+def _housekeeping_names(comp):
+    """The channels the output does not carry but somebody may want to look at.
+
+    Read off the merge, so it is whatever is actually there rather than a list to
+    keep in step. Returns [] when the merge is missing.
+    """
+    merged = comp.op(MERGE_CHOP)
+    if merged is None:
+        return []
+    return [chan.name for chan in merged.chans()
+            if any(fnmatchcase(chan.name, pattern) for pattern in HOUSEKEEPING)]
+# <<< TRIM SCOPE
+
+
+def _trim_source():
+    """The TRIM SCOPE block of this file, for pasting into the generated DAT.
+
+    Read off DISK rather than duplicated by hand, because the previous duplication in
+    this file - `_apply_gating` - is a copy somebody has to remember to update, and
+    this block is the part where a divergence would be silent: the DAT would write a
+    delete list that disagreed with the one the builder wrote.
+    """
+    text = open(__file__ if "__file__" in globals()
+                else REPO_ROOT + "/tools/td_add_groups.py").read()
+    start = text.index("# >>> TRIM SCOPE")
+    end = text.index("# <<< TRIM SCOPE")
+    return text[start:end].rstrip() + "\n"
+
 # The presets from docs/ATTRIBUTES.md. Verbosity sets the toggles in one click; it
 # is not a fourth state, and moving a toggle afterwards does not fight it.
 PRESETS = {
     "Minimal": ("Landmarks", "Coordstx"),
+    # Excluded from Interaction for the same reason each ships OFF: `Coordspx` and
+    # `Lmcoordspx` are channel volume nobody asked for, `Descriptor` is 84 channels,
+    # and `Depth`/`Tilt` are UNCALIBRATED - `Palmarea` and `Zreference` are still set
+    # against synthetic geometry (BUILD_PLAN step 13).
+    #
+    # A preset must not contradict the defaults. `Verbosity` itself defaults to
+    # "Interaction", so a preset that included these would turn them on the moment
+    # anyone pressed the button their panel already claimed to be set to.
     "Interaction": tuple(n for n, _d, _g in GROUPS
-                         if n not in ("Coordspx", "Lmcoordspx", "Descriptor")),
+                         if n not in ("Coordspx", "Lmcoordspx", "Descriptor",
+                                      "Depth", "Tilt")),
     "Everything": tuple(n for n, _d, _g in GROUPS),
 }
 
@@ -230,6 +350,10 @@ PRESETS = %(presets)r
 COOK_GATED = %(cook_gated)r
 COOK_REQUIRES = %(cook_requires)r
 COOK_VETOED = %(cook_vetoed)r
+
+from fnmatch import fnmatchcase  # noqa: E402  - stdlib, no repo on sys.path needed
+
+%(trim_source)s
 
 
 def onValueChange(par, prev):
@@ -278,10 +402,27 @@ def _apply_gating(comp):
         if group is None:
             continue
         out = group.op("out1")
-        if not enabled and out is not None and out.numChans == 0:
+        if not enabled and out is not None:
+            # Cook it, THEN freeze it - unconditionally. A frozen Out CHOP holds its
+            # channels only until something upstream changes shape; after that it is
+            # dirty, cannot cook, and reports ZERO, so the channels vanish instead of
+            # holding. tools/td_add_groups.py has the measurement.
             group.allowCooking = True
             out.cook(force=True)
         group.allowCooking = enabled
+    # LAST, after every allowCooking above: `_trim_keep` reads the groups' channels,
+    # and a group cooked for the first time only has them once that has happened.
+    trim = comp.op(TRIM_CHOP)
+    if trim is not None:
+        toggle = getattr(comp.par, TRIM_TOGGLE, None)
+        on = True if toggle is None else bool(toggle.eval())
+        keep = _trim_keep(comp, wanted)
+        if keep is not None:
+            trim.par.channames = " ".join(keep)
+        trim.bypass = keep is None or not on
+    house = comp.op("housekeeping_sel")
+    if house is not None:
+        house.par.channames = " ".join(_housekeeping_names(comp))
 '''
 
 
@@ -331,10 +472,19 @@ def _apply_gating(comp, verbose=False):
             report.append("%s: MISSING" % group_name)
             continue
         out = group.op("out1")
-        if not enabled and out is not None and out.numChans == 0:
-            # Never cooked: freeze it AFTER it has produced its channels once, or
-            # they leave the COMP's output entirely instead of holding their last
-            # value.
+        if not enabled and out is not None:
+            # Cook it, THEN freeze it. Unconditionally, not just when it has never
+            # cooked - MEASURED 2026-08-22, and this was a silent hole: a frozen
+            # group's Out CHOP holds its channels only until something upstream
+            # changes SHAPE. After that it is dirty, it cannot cook because it is
+            # frozen, and it reports zero channels - so the channels VANISH from the
+            # component's output instead of holding their last value, which is
+            # exactly the failure DESIGN.md 6.2 forbids. Reproduced by flipping
+            # `Descriptor`, which changes derive_chop's channel count: `temporal`
+            # went from 27 channels to 0 and `latches` from 70 to 0.
+            #
+            # The cost is one cook per frozen group per parameter change - the same
+            # one cook re-enabling it would take, at human speed, not per frame.
             group.allowCooking = True
             out.cook(force=True)
         group.allowCooking = enabled
@@ -343,6 +493,55 @@ def _apply_gating(comp, verbose=False):
             print("   %-15s %-7s from %s" % (group_name,
                                             "on" if enabled else "off",
                                             ", ".join(COOK_GATED[group_name])))
+
+    # LAST, and after every `allowCooking` above, because `_trim_keep` reads the
+    # groups' channels and a group that was just cooked for the first time only has
+    # them once that has happened.
+    report.extend(_apply_trim(comp, wanted, verbose=verbose))
+    return report
+
+
+def _apply_trim(comp, wanted, verbose=False):
+    """Write the Select CHOP's keep list and bypass from the same `wanted` map.
+
+    The list is a PARAMETER, so this could in principle be an expression - but the
+    expression would have to walk every group on every cook, which is exactly the
+    cost the gating exists to avoid. Written instead, from here at build and from the
+    Parameter Execute DAT on every change, the same pattern `allowCooking` uses.
+    """
+    report = []
+    trim = comp.op(TRIM_CHOP)
+    if trim is None:
+        return ["%s: MISSING" % TRIM_CHOP]
+    toggle = getattr(comp.par, TRIM_TOGGLE, None)
+    on = True if toggle is None else bool(toggle.eval())
+    keep = _trim_keep(comp, wanted)
+    if keep is not None:
+        trim.par.channames = " ".join(keep)
+    trim.bypass = keep is None or not on
+    house = comp.op("housekeeping_sel")
+    if house is not None:
+        house.par.channames = " ".join(_housekeeping_names(comp))
+    merged = comp.op(MERGE_CHOP)
+    total = 0 if merged is None else len(merged.chans())
+    if keep is None:
+        report.append("%s: BYPASSED, nothing to trim (%d channels out)"
+                      % (TRIM_CHOP, total))
+    elif not on:
+        report.append("%s: BYPASSED by %s, %d of %d channels would be trimmed"
+                      % (TRIM_CHOP, TRIM_TOGGLE, total - len(keep), total))
+    else:
+        report.append("%s: %d of %d channels kept"
+                      % (TRIM_CHOP, len(keep), total))
+    if house is not None:
+        report.append("housekeeping: %d channels off the output, in `housekeeping`"
+                      % len(house.par.channames.eval().split()))
+    if verbose:
+        # Every line, each labelled by its own operator - printing `report[-1]`
+        # under the trim's name put the housekeeping count beside the wrong node.
+        for line in report:
+            name, _, detail = line.partition(": ")
+            print("   %-15s %s" % (name, detail))
     return report
 
 
@@ -361,41 +560,42 @@ def _page(comp, name="Attributes"):
     if page is None:
         page = comp.appendCustomPage(name)
 
-    known = {n for n, _d, _g in GROUPS}
-    was = {p.name: p.eval() for p in comp.customPars
-           if p.name in known or p.name == "Verbosity"}
+    # NEVER re-append a parameter that already exists. MEASURED: `appendMenu` on an
+    # existing parameter RESETS it, and a menu resets to INDEX 0, which here is
+    # "Minimal" - the append-clobbers-a-value trap (DESIGN.md 2.11) wearing a
+    # different costume. Writing the value straight back afterwards is not enough,
+    # and that is the 2026-08-22 fix: a Parameter Execute DAT is watching this menu,
+    # its callbacks are DEFERRED to the end of the frame, and when two builders run
+    # in the same frame the queued reset outlives the restore. The observed result
+    # was `Verbosity` sitting on "Minimal" with every derive group off, so
+    # `derive_chop` published 0 channels, `temporal` fell to 12 and `latches` to 45,
+    # and the COMP output went from 505 channels to 366 - silently, from re-running
+    # two builders that are each correct on their own.
+    #
+    # So: append only what is absent. Nothing that exists is touched except its
+    # `default`, which is not a value. Labels on existing parameters are left alone
+    # too - a rebuild must not overwrite a label somebody edited.
+    existing = {par.name: par for par in comp.customPars}
 
-    menu = page.appendMenu("Verbosity", label="Verbosity")[0]
+    menu = existing.get("Verbosity")
+    if menu is None:
+        menu = page.appendMenu("Verbosity", label="Verbosity")[0]
+        menu.val = "Interaction"
     menu.menuNames = list(PRESETS)
     menu.menuLabels = list(PRESETS)
     menu.default = "Interaction"
-    # ALWAYS written back, not only when the parameter is new - and this line is a
-    # bug fix. MEASURED: `appendMenu` on an EXISTING parameter resets it, and a menu
-    # resets to INDEX 0, which here is "Minimal". That is the recorded
-    # append-clobbers-a-value trap (DESIGN.md 2.11) wearing a different costume: for
-    # a menu the reset lands on the first entry rather than on zero-as-false.
-    #
-    # And it does not stay a one-parameter problem, because a Parameter Execute DAT
-    # is watching: the reset FIRED the preset callback, which correctly turned every
-    # derive group off, which took `derive_chop` to 0 channels, which left the latch
-    # bank nothing to select - the COMP output fell from 499 to 381 and every latch
-    # channel disappeared. All of it downstream of one menu quietly reverting.
-    #
-    # The toggles below are restored from `was` after this, so a preset firing here
-    # cannot have the last word.
-    menu.val = was.get("Verbosity", "Interaction")
 
     cost_gating = {name for names in COOK_GATED.values() for name in names}
     for group, default, gated in GROUPS:
-        if gated == "derive" or group in cost_gating:
-            suffix = ""
-        else:
-            suffix = "  (channels only)"
-        par = page.appendToggle(group, label=group + suffix)[0]
+        par = existing.get(group)
+        if par is None:
+            if gated == "derive" or group in cost_gating:
+                suffix = ""
+            else:
+                suffix = "  (channels only)"
+            par = page.appendToggle(group, label=group + suffix)[0]
+            par.val = default
         par.default = default
-        # A toggle has no invalid value, so a stored one always wins - unlike a
-        # threshold, where zero had to be treated as untuned.
-        par.val = was.get(group, default)
     return page
 
 
@@ -456,6 +656,7 @@ def main():
         "cook_gated": {k: list(v) for k, v in COOK_GATED.items()},
         "cook_requires": {k: list(v) for k, v in COOK_REQUIRES.items()},
         "cook_vetoed": {k: list(v) for k, v in COOK_VETOED.items()},
+        "trim_source": _trim_source(),
     }
     callbacks.par.op = master.path
     # Verbosity AND every toggle that gates a group's cooking: `allowCooking` is an
@@ -463,7 +664,17 @@ def main():
     # change.
     gating_toggles = sorted(
         {name for names in COOK_GATED.values() for name in names}
-        | {name for names in COOK_VETOED.values() for name in names})
+        | {name for names in COOK_VETOED.values() for name in names}
+        # `Deleteempty` gates nothing's cooking - it bypasses the trim - but it goes
+        # through the same callback, so it is in the same list.
+        | {TRIM_TOGGLE}
+        # And EVERY attribute toggle, not just the ones that gate cooking. The trim
+        # is a Select with a keep list, so it fails CLOSED: a channel the list does
+        # not name is gone. `Descriptor`, `Depth` and `Tilt` gate no group's cooking,
+        # but turning one on adds channels, and if nothing rewrote the list those
+        # channels would be computed and then thrown away - a toggle that appeared
+        # to do nothing.
+        | {name for name, _default, _kind in GROUPS})
     callbacks.par.pars = " ".join(["Verbosity", *gating_toggles])
     callbacks.par.valuechange = True
     print("2. Verbosity presets and cook gating wired through %s (%s)"
@@ -505,6 +716,20 @@ def main():
     # vanishing from the COMP's output and silently breaking every reference
     # (DESIGN.md 6.2). Checked by NAME, which is a same-frame-safe question, unlike
     # anything about cook counts.
+    #
+    # And it is checked AFTER a forced cook of the whole master, because that is what
+    # breaks it. MEASURED 2026-08-22: `master.cook(force=True)` - which
+    # tools/td_build_vision.py does at its own report step - asks every child for
+    # fresh data, a frozen group cannot answer, and its Out CHOP drops to ZERO
+    # channels. `hands/temporal` went from 27 to 0 and `latches` from 70 to 0, and
+    # the hands stream from 503 channels to 406. Nothing said so; the channels were
+    # simply gone.
+    #
+    # `_apply_gating` repairs it - it unfreezes each group, cooks its Out CHOP, and
+    # freezes it again - so it is called once more here, after the forced cook. The
+    # order is deliberate: provoke, repair, then verify.
+    master.cook(force=True)
+    _apply_gating(master)
     print("5. stream outputs:")
     for stream_name in sorted({name.split("/")[0] for name in COOK_GATED}):
         stream_out = master.op(stream_name + "/out1")
@@ -543,25 +768,21 @@ def main():
               "changes what derive() computes.")
 
     print("\nNOT DONE, deliberately, and what each needs:")
-    print("  Trimming the output channel list for the NATIVE groups. A disabled")
-    print("  derive group really does vanish from out1; the latch, trigger and")
-    print("  motion channels keep their last value, because nothing gates them.")
-    print("  docs/ATTRIBUTES.md suggests a Select whose channames is assembled")
-    print("  from the enabled groups - but wildcard patterns CANNOT partition")
-    print("  these channels: `h?_*_x` matches both the raw `h0_wrist_x` (Landmarks)")
-    print("  and the derived `h0_palm_x` (Core), and `h?_e_*` matches both the")
-    print("  Events pulses and the Triggers pulses. It needs an exact channel-to-")
-    print("  group map, and the sound way to get one is a registry in the package:")
-    print("  derive() can already report a group's channels by being called with")
-    print("  just that group, and the latch table would move from")
-    print("  tools/td_add_latches.py into visionhands/ so both can import it.")
-    print("  That refactor is worth doing carefully rather than quickly.")
+    print("  Four toggles still change nothing: `Landmarks`, `Triggers`, `Motion`")
+    print("  and `Events`. Everything else is now trimmed off the single output by")
+    print("  `%s`, which is generated from the FROZEN groups - so a toggle" % TRIM_CHOP)
+    print("  that gates a group's cooking also removes its channels. These four do")
+    print("  not gate a group: `Motion` shares `temporal` with `Presence` and the")
+    print("  other three share `latches`, so their channels come out of a COMP that")
+    print("  is still cooking, and wildcards cannot partition them - `h?_*_x`")
+    print("  matches both the raw `h0_wrist_x` (Landmarks) and the derived")
+    print("  `h0_palm_x` (Core). It needs an exact channel-to-group map, and the")
+    print("  sound way to get one is a registry in the package: derive() can already")
+    print("  report a group's channels by being called with just that group, and the")
+    print("  latch table would move from tools/td_add_latches.py into visionhands/")
+    print("  so both can import it. Worth doing carefully rather than quickly.")
     print("")
-    print("  NOTE what IS done now: `temporal` and `latches` are real group COMPs,")
-    print("  so their toggles gate COOKING through allowCooking - the restructuring")
-    print("  this note used to say was needed happened in docs/BUILD_PLAN.md 7.3.")
-    print("  `filter` is still not a candidate: it is in the data path, and its")
-    print("  Smoothing toggle gates its cost through the bypass flag instead.")
-
+    print("  `filter` is still not a gating candidate: it is in the data path, and")
+    print("  its Smoothing toggle gates its cost through the bypass flag instead.")
 
 main()

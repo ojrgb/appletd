@@ -167,6 +167,7 @@ what was measured with numbers, what surprised us, what is still unknown.
 with their figures. Questions in 11 are closed explicitly with the answer, not
 left to rot. A design change is written into the doc *before* the code changes.
 
+
 **Fixtures are hands-only, and the gate is people, not faces.** A committed
 fixture is a video file that enters git history and stays there, so no fixture
 containing an identifiable person may be committed. The first version of this
@@ -192,3 +193,22 @@ and in prose.
 around: milestone 1 needs TouchDesigner booted by hand, the fixture clip needs
 recording on the target machine, and the camera TCC prompt attaches to
 TouchDesigner.app.
+
+## 4. What each change owes the documentation — narrowed 2026-08-22
+
+Five documents per change was the standing obligation, and it stopped being
+proportionate: on 2026-08-22 a three-operator change to the master COMP updated
+DESIGN, ATTRIBUTES, BUILD_PLAN, JOURNAL and HANDOFF, and the doc pass was a bigger
+share of the work than the change, the measurement and a real bug put together. So,
+per change:
+
+| document | when | why it earns it |
+|---|---|---|
+| `DESIGN.md` 2 | **always**, if anything was measured | every figure in 2 has changed a decision. It is the reason a wrong operator choice costs twenty minutes |
+| `docs/ATTRIBUTES.md` | **always**, if user-visible behaviour moved | it is the contract. A parameter whose documented behaviour is wrong is worse than one that is undocumented |
+| `docs/JOURNAL.md` | **per milestone**, not per change | what surprised us and what it cost. Keep it short; it is not a changelog |
+| `docs/BUILD_PLAN.md` | **only for a new step** — a new capability or a structural change | it had become a second journal, one numbered step per change. A change that fits inside an existing step does not need a new one |
+| `docs/HANDOFF.md` | **when handing off**, not mid-session | it is a snapshot for the next session. Rewriting it while still working means writing it twice |
+
+Unchanged: a stale comment is a defect (1.5), and anything unmeasured is labelled
+unmeasured. Narrowing what gets written does not narrow what has to be true.

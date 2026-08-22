@@ -89,8 +89,23 @@ def test_every_operator_a_builder_places_has_an_entry() -> None:
     for name in ("status", "sidecar_control", "sidecar_callbacks", "sidecar_exit",
                  "filter_callbacks", "groups_callbacks",
                  "lat_threshold_callbacks", "screenspace_callbacks",
-                 "profiler", "notes"):
+                 "profiler", "notes",
+                 # The single output path, 2026-08-22.
+                 "merge_streams", "trim_empty", "out1"):
         assert name in MASTER_NODES, name
+
+
+def test_the_single_output_path_reads_left_to_right() -> None:
+    """merge -> trim -> out, on the hands row, in that order. The three streams sit
+    at x = 0, so the path has to start to the RIGHT of them and stay on one row -
+    a reader should be able to follow the only output without scrolling."""
+    xs = [master_xy(name)[0]
+          for name in ("merge_streams", "trim_empty", "out1")]
+    assert xs == sorted(xs)
+    assert xs[0] > 0  # right of the stream COMPs, which sit at x = 0
+    ys = {master_xy(name)[1]
+          for name in ("merge_streams", "trim_empty", "out1")}
+    assert ys == {stream_row(0)}
 
 
 def test_overlaps_actually_detects_an_overlap() -> None:

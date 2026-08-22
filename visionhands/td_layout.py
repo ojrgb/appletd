@@ -92,6 +92,22 @@ STREAM_NODES: Final[dict[str, tuple[int, int]]] = {
 MASTER_ROW_H: Final = 400
 
 MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
+    # The single output path, on row 0 to the right of the three stream COMPs.
+    # ONE output as of 2026-08-22: the three streams merge, the merge feeds a Select
+    # that keeps only what is being computed, and that feeds the only Out CHOP. A
+    # component handed to a beginner should not open with 1,861 channels.
+    #
+    # A SELECT, not a Delete, and the reason is measured: for the same reduction of
+    # the same 1,764 channels a Delete CHOP costs 0.6697 ms against the Select's
+    # 0.0555 ms, and 3.3618 ms if the list is long. DESIGN.md 2.15.
+    "merge_streams": (COL_W, 0),
+    "trim_empty": (2 * COL_W, 0),
+    "out1": (3 * COL_W, 0),
+    # The housekeeping channels, one row BELOW the output path - the same convention
+    # the streams use, where the data path is a row and anything that only reads it
+    # hangs underneath. Nothing downstream reads these; they exist to be looked at.
+    "housekeeping_sel": (2 * COL_W, -ROW_H),
+    "housekeeping": (3 * COL_W, -ROW_H),
     "status": (-3 * COL_W, MASTER_ROW_H),
     "sidecar_control": (-5 * COL_W, -4 * MASTER_ROW_H),
     "sidecar_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H),

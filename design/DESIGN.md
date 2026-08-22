@@ -911,12 +911,133 @@ configuration a project actually runs is the fourth row, not the second.
 
 The last row is the one that says the gating works: 287 operators, 29 of them
 cooking, 0.60 ms. Every expensive thing in the COMP is now behind a toggle, and a
-frozen group keeps its channels rather than dropping them (6.2).
+frozen group keeps its channels rather than dropping them (6.2) - with the one
+exception §2.16 measured.
 
 **What is left, and it is not the network's fault.** `hands/derive_chop` at 0.20 ms
 is the single most expensive operator, and 0.06 of that is reading 141 input
 channels into a dict and 0.04 is `derive()` itself. The rest is Script CHOP
 framework overhead. There is no arrangement of native CHOPs that computes atan2.
+
+### 2.15 One output, and what trimming it costs — measured 2026-08-22
+
+The three stream outputs became ONE: `hands`, `pose` and `face` merge, a Select
+keeps only the channels that are actually being computed, and that feeds the only
+Out CHOP. A project wires the component once, and a beginner opening it meets 306
+channels in the shipping configuration rather than 1,863.
+
+**The trim started as a Delete CHOP and had to stop being one.** Same input (the
+1,863-channel merge), same reduction, same 306 channels out, median of 30–40 forced
+cooks:
+
+| operator | list | ms |
+|---|---|---|
+| Delete CHOP | 35 drop patterns | **0.6697** |
+| Delete CHOP | 6 drop patterns | 0.0772 |
+| Delete CHOP | 306 literal keep names | **3.3618** |
+| Select CHOP | 306 literal keep names | **0.0555** |
+| Select CHOP | 258 literal keep names (shipping) | 0.0438 |
+| Select CHOP | one pattern (`h0_*`) | 0.0313 |
+| Delete CHOP | bypassed | 0.0003 |
+
+The Delete's cost grows with list length × input channels; the Select's barely
+moves — 306 names cost it 1.8× what one pattern does, where the same 306 names cost
+the Delete 43× a six-pattern list. **So the trim is a Select**, and the shipping
+path costs `merge_streams` 0.0590 + `trim_empty` 0.0438 + `housekeeping_sel` 0.0037
+= **0.11 ms** for 1,863 → 258 channels.
+
+Three consequences of a Select, all handled rather than discovered:
+
+- **A keep list fails CLOSED.** A channel nobody names is gone, where a Delete's
+  drop list let an unnamed channel through. So EVERY attribute toggle has to rewrite
+  the list, not just the ones that gate cooking — `groups_callbacks` now watches all
+  of `GROUPS`. Without that, turning `Descriptor` on would compute 84 channels and
+  then throw them away, and the toggle would look broken. VERIFIED: `Descriptor` on
+  takes the output from 306 channels to 390, `Temporal`+`Latches` on to 487.
+- **A Select emits in `channames` order**, so the list is generated in MERGE order.
+  Verified: the output's channel order is a subsequence of the merge's.
+- **An empty list is not free**, where an empty drop list was. So the Select is
+  BYPASSED whenever there is nothing to drop. That path is now mostly theoretical —
+  see the exclusions below, which always match something.
+
+**Four things never reach the output at all**, whatever the toggles say, added
+2026-08-22 at the user's request for the same reason the trim exists: the 80
+per-joint `*_conf` channels, and `sc_*`, `seq` and `age_ms`. The three housekeeping
+families are not thrown away — a `housekeeping_sel` Select picks them off the merge
+into a `housekeeping` Null beside the output, 10 channels, 0.0037 ms, one click away
+for anyone who needs them. The output is **258 channels** in the shipping
+configuration, and the trim got CHEAPER doing it: 0.0438 ms against 0.0669, because a
+Select's cost tracks its list length.
+
+`*_conf_median` is deliberately kept. "All conf channels" would take it, but it is
+the SUMMARY rather than a per-joint confidence, and §6.2 tells people to gate on it —
+removing the channel the documentation recommends would be a trap.
+
+The list itself is read off the network — each group's `out1` IS the set of channels
+that group contributes — rather than from a channel-to-group map, which does not
+exist. Four toggles are therefore still advisory: `Landmarks`, `Triggers`, `Motion`
+and `Events` name channels that come out of a COMP which is still cooking (`Motion`
+shares `temporal` with `Presence`; the other three share `latches`), and wildcards
+cannot partition them.
+
+### 2.16 A frozen group's channels VANISH after a forced cook — 2026-08-22
+
+§6.2 says a frozen group holds its last output rather than dropping its channels,
+and `allowCooking = False` does behave that way. What it does not survive is
+**`cook(force=True)` on an ancestor**: that asks every child for fresh data, a
+frozen group cannot answer, and its Out CHOP reports ZERO channels. Nothing is
+logged. `hands/temporal` went from 27 channels to 0, `hands/latches` from 70 to 0,
+and the hands stream from 503 to 406 — and every builder that ran afterwards
+reported false failures against the empty groups (`td_add_coords.py` produced 7).
+
+An upstream SHAPE change does it too, for the same reason: flipping `Descriptor`
+changes `derive_chop`'s channel count, which dirties the frozen groups downstream,
+and dirty plus frozen reads as empty.
+
+Two fixes, both in place:
+
+- `tools/td_build_vision.py` no longer force-cooks the master for its report. A
+  plain `cook()` gives the same channel counts without asking frozen children.
+- `_apply_gating` now cooks each group it is about to freeze **unconditionally** —
+  unfreeze, cook `out1`, freeze — where it used to do that only for a group that had
+  never cooked. One cook per frozen group per parameter change, at human speed, and
+  it repairs the vanish wherever it came from. `tools/td_add_groups.py` provokes it
+  with a forced master cook and then verifies the repair, in that order.
+
+### 2.17 `append*` on an existing parameter, and the deferred callback — 2026-08-22
+
+§2.11 already records that appending a custom parameter that exists RESETS it, and
+that a menu resets to index 0. What it did not record is why writing the value
+straight back afterwards is not a fix, and this one cost real time to find.
+
+**A Parameter Execute DAT's callbacks are DEFERRED to the end of the frame.** So:
+
+1. `appendMenu("Verbosity")` resets it to index 0, which here is `Minimal`.
+2. The next line writes the tuned value back. Both changes are now queued.
+3. The builder finishes and reports the correct value. Everything looks right.
+4. Two builders run in the same frame — which is exactly what a rebuild does — and
+   the queue resolves with `Minimal` winning.
+
+`Minimal` is a preset of `Landmarks` and `Coordstx` only, so it turned **every derive
+group off**. `derive_chop` published 0 channels; `temporal` fell from 27 to 12,
+`latches` from 72 to 45, `coords/dv_world` to 0, and the COMP output from 505
+channels to 366. No error, no warning, and each builder individually correct — a
+`master`-only rebuild was clean, a `groups`-only rebuild was clean, and running the
+two together broke it.
+
+**The fix is to never re-append.** `_page` now appends only what is absent and
+touches nothing that exists except its `default`, which is not a value. That also
+means a rebuild no longer overwrites a label somebody edited. `tools/td_build_vision.py`
+still uses capture-and-restore for its own twenty parameters; the values survive
+because nothing watching them applies a preset, but the same rule should reach it.
+
+Two general lessons, both cheap to state and expensive to learn:
+
+- **A check that runs before the thing that breaks it proves nothing.** The builder
+  verified the parameters right after writing them, one step before the queue ran.
+- **"Correct alone" is not "correct composed"** when callbacks are deferred. Any
+  builder that writes a parameter another builder's callback reads is order- and
+  frame-dependent.
 
 ## 3. Traps — all of these cost real time in the spike
 
@@ -1147,6 +1268,12 @@ class LandmarkFrame:
 **The channel list is fixed and never varies.** A CHOP whose channels appear and
 disappear breaks every downstream reference the moment they vanish. An absent
 hand reports zeros with all its channels still present.
+
+Two later qualifications, both measured and both deliberate: a group frozen by
+`allowCooking` keeps its channels, but NOT across a forced cook of an ancestor
+(§2.16), and the single output's `trim_empty` REMOVES the channels of every group
+that is not computing on purpose, because the alternative was handing a beginner
+1,863 channels of which 1,557 held a plausible wrong number (§2.15).
 
 ```
 n_hands, seq, age_ms
@@ -1383,17 +1510,18 @@ The trigger for doing it is a second thing needing to control the process — a
 
 ---
 
-### 6.5 The TouchDesigner side — one COMP, three streams
+### 6.5 The TouchDesigner side — one COMP, three streams, one output
 
 Restructured 2026-08-21, after the third stream landed and made the shape obvious.
+Collapsed to a single output 2026-08-22 (§2.15).
 
 ```
 /project1/vision                    every user parameter; Global OP Shortcut "Vision"
-  hands_osc  10000  ->  hands  ->  out1        499 channels
-  pose_osc   10001  ->  pose   ->  out2        275
-  face_osc   10002  ->  face   ->  out3         39
+  hands_osc  10000  ->  hands  --+                              505 channels
+  pose_osc   10001  ->  pose   --+-> merge_streams -> trim_empty  -> out1
+  face_osc   10002  ->  face   --+   1,863 chans     306 kept
   status                                       the sidecar's own sc_* channels
-  sidecar_control / _callbacks / _exit         Start, Stop, Print Status
+  sidecar_control / _callbacks / _exit         Active, Print Status
 ```
 
 **Why the wrap.** The filter and the coordinate spaces were built inside the hands

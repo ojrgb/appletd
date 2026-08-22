@@ -1151,3 +1151,127 @@ had already drifted: it named eight of the nine fields that existed, so
 **Everything here is unmeasured on a real hand.** The arithmetic is exact and tested
 (17 tests); whether the numbers feel right at a real distance is not established, and
 `Zreference` and `Palmarea` are what to move.
+
+## Step 14 — one output, and a trim that follows the toggles — DONE 2026-08-22
+
+The COMP had three output connectors, one per stream, and with everything enabled
+they carried 1,863 channels between them. Asked for by the user, in their words:
+
+> I'm going to be rolling out this component to beginners and don't want them to
+> immediately get 1000 channels in the out. I want to make it so they can have a
+> very limited list they can understand.
+
+**The shape.** `hands`, `pose` and `face` now merge into `merge_streams`, that feeds
+`trim_empty`, and that feeds the only `out1`. `Delete Empty Channels` on the Vision
+page (on by default) bypasses the trim. Node positions are in
+`visionhands/td_layout.py` like everything else.
+
+**The trim's list is generated, never written by hand.** `tools/td_add_groups.py`
+owns it, because it is the only thing that knows which groups are frozen, and it
+reads the channel names off the NETWORK — each group's `out1` IS the set of channels
+that group contributes. No channel-to-group map, which is the map that does not
+exist and would go stale the first time a builder added a channel.
+
+### The Delete CHOP had to become a Select
+
+It was built as a Delete CHOP first, because "delete the empty channels" is what was
+asked for. That cost **0.6697 ms** — 28% of the whole component's budget — and the
+Select that replaces it costs **0.0555 ms** for the same reduction. `DESIGN.md` §2.15
+has the table. The user's call, made on the numbers.
+
+Three things the swap changed, all handled:
+
+- a keep list **fails closed**, so `groups_callbacks` now watches every toggle in
+  `GROUPS`, not just the ones that gate cooking. Otherwise turning `Descriptor` on
+  would compute 84 channels and throw them away.
+- a Select emits in `channames` order, so the list is generated in MERGE order and
+  the output's channel order is unchanged.
+- an empty list is not free, so the Select is bypassed whenever nothing is frozen.
+
+### Two defects this found, neither of them in the new code
+
+**A frozen group's channels vanish after a forced cook** (`DESIGN.md` §2.16).
+`hands/temporal` was reporting 0 channels instead of 27, `hands/latches` 0 instead
+of 70, and `hands` 406 instead of 503 — silently. `td_build_vision.py`'s
+`comp.cook(force=True)` was the trigger, and every builder that ran after it
+reported false failures against the empty groups. Fixed on both sides: the builder
+does a plain `cook()`, and `_apply_gating` now cooks each group it is about to
+freeze unconditionally rather than only when the group has never cooked.
+
+**`td_add_latches.py`'s self-check compares against the full latch table** whatever
+is enabled, so with `Pose` off it reports 9 failures for the two `grab` latches it
+correctly dropped, plus packing order. Pre-existing, unfixed, and NOT the new code —
+it fails the same way before this step.
+
+### What existing patterns this breaks
+
+Anything wired to output connector 1 or 2 was moved to 0 by the builder, which
+captures every consumer before destroying `out2`/`out3` and repoints it. But a
+pattern that matched one stream now sees all three:
+
+| operator | before | after |
+|---|---|---|
+| `select3` `*_tx`, `select4` `*_ty` | hands only | hands, and pose and face too when those streams are on and the trim is bypassed |
+| `null2`, `null3` | pose, face | the single merged output |
+| `select5` `*trigger*` | 24 channels | 0 while `Latches` is off — the trim removes them, which is the point |
+| `select6` `select7` `*f0*_x`/`_y` | face | 0 while `Streamface` is off |
+
+## Step 15 — making the next change cheap — DONE 2026-08-22
+
+Asked for after a three-operator change took a full session. The diagnosis was not
+the builder infrastructure — it is what let a wrong operator choice be a
+twenty-minute fix — but three things around it.
+
+### 1. The chain was all-or-nothing: `tools/td_rebuild.py`
+
+Eight builders, in order, every time. Now:
+
+    TARGET = "master"          # or ("coords", "latches"), or "all"
+    run(".../tools/td_rebuild.py")
+
+`LAYERS` maps a layer to its script in chain order; `REQUIRES` says what a change
+drags along, written out by hand per layer with a reason, because a builder's
+dependencies are a fact about what it destroys and reads rather than something to
+infer. `master` is 2 builders instead of 8. An unknown layer name RAISES — "I asked
+for a rebuild and got no output" is the worst way to find a typo.
+
+What made that possible: `td_build_vision.py` stopped destroying master-level
+operators other builders own (`OTHER_BUILDERS_OWN` — the filter, gating, latch
+threshold and screenspace callback DATs, and the profiler). It used to remove them
+and leave the COMP with no gating callback, so the only safe move was to run
+everything afterwards.
+
+### 2. Two self-checks that cried wolf
+
+Both reported failures on correct networks, every run, which meant triaging them
+before every real failure could be seen.
+
+- **`td_add_latches.py`** compared against the full 15-row table. `Pose` off drops
+  `h?_openness` and with it the two grab latches — documented behaviour — so it
+  reported 9 failures. The naive fix (compare against 13) reported 15, because the
+  network really is built 15 wide: the constant CHOPs have a block per row and the
+  validity fan reads `h?_valid`, which is always present. Only the operators
+  downstream of the distance fan narrow to 13. So the check now compares against the
+  full table with the dropped rows' names ALLOWED to be absent and nothing else
+  tolerated, and it also catches a duplicate name, which the old equality could not.
+  24 checks, 0 failures.
+- **`td_add_coords.py`** reported "produced 0 channels, expected 152" for a frozen
+  stream and four rename failures for a branch reading a frozen group. Both now say
+  "built, not verified" — a rename of nothing produces nothing, and the map is still
+  correct; it just cannot be demonstrated.
+
+**The whole chain now runs with zero failures**, which it had not done all session.
+
+### 3. The documentation obligation
+
+`STANDARDS.md` asked for five documents per change. DESIGN 2 (measurements) and
+ATTRIBUTES (user-facing behaviour) have both earned their place — every measurement
+in 2 has changed a decision. BUILD_PLAN had become a second journal, and HANDOFF
+does not need rewriting mid-session. See `STANDARDS.md` 4.
+
+### And the defect all this uncovered
+
+`append*` on an existing parameter resets it, the reset FIRES a deferred callback,
+and a menu resets to index 0. `Verbosity` reverting to `Minimal` turned every derive
+group off and took the output from 505 channels to 366, silently, only when two
+builders ran in the same frame. `DESIGN.md` 2.17. Fixed by never re-appending.
