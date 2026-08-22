@@ -53,7 +53,7 @@ EXPECTED_ISLANDS = ("notes", "screen_only_notes", "profiler", "sidecar_control",
                     "screenspace_callbacks", "derive_callbacks",
                     # A Script CHOP's callbacks DAT is docked to it by a PARAMETER,
                     # not by a wire, so it has no connections by design.
-                    "tmp_motion_callbacks",
+                    "tmp_motion_callbacks", "proto_callbacks",
                     # tools/td_verify_latches.py's stored counter baseline.
                     "ver_baseline")
 

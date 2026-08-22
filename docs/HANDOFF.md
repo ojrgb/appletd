@@ -1,6 +1,6 @@
 # Handoff — 2026-08-21
 
-**396 tests**, `ruff check` and `mypy visionhands` clean. Working tree clean apart
+**430 tests**, `ruff check` and `mypy visionhands` clean. Working tree clean apart
 from `tools/vision_landmarks.py` and `tools/vision_landmarks_live.py`, which are the
 user's own untracked files — leave them alone. (`ruff check` at the repo root will
 fail on one of those two; lint `visionhands/` and `tools/td_*.py tools/send_*.py
@@ -25,7 +25,7 @@ entry is what went wrong on the way.
 ## What is running
 
     /project1/vision            every parameter, six pages, the sidecar control
-      hands_osc 10000  ->  hands  ->  out1      531 channels
+      hands_osc 10000  ->  hands  ->  out1      547 channels
       pose_osc  10001  ->  pose   ->  out2      275
       face_osc  10002  ->  face   ->  out3     1083
       status                                   the sidecar's own sc_* channels
@@ -66,6 +66,15 @@ because it now reads `derive_chop` and `temporal` as well as `filter`.
     td_build_vision.py -> td_add_filter.py -> td_add_derive.py -> td_add_temporal.py
     -> td_add_latches.py -> td_add_coords.py -> td_add_screenspace.py
     -> td_add_groups.py
+
+`tools/td_add_temporal_proto.py` is OPTIONAL and not in that order: it builds a
+frozen experiment (BUILD_PLAN step 12) and nothing depends on it.
+
+**Re-running `td_build_vision.py` means re-running everything after it**, because it
+destroys and recreates the master-level DATs the later builders own. That is by
+design and it is also how a half-finished chain bites: a builder that dies partway
+leaves the COMP without its sidecar control DATs, and the only symptom is that the
+Active toggle does nothing.
 
 Then, both read-only and both worth running after any build:
 
@@ -111,6 +120,26 @@ interleave into a plausible wrong answer rather than a visible fault. **The reve
 is NOT checked** — the sidecar does not look for a running sender — so the senders
 were stopped at the end of this session, and the COMP is holding its last synthetic
 values. Start one, or start the sidecar; not both.
+
+## What the user asked for on 2026-08-21, and where each answer lives
+
+Their second list, in their numbering. `BUILD_PLAN.md` steps 11-13 have the detail.
+
+| | asked | answer |
+|---|---|---|
+| 1 | one Script CHOP instead of a CHOP chain? | **2.9x faster, not shipped.** Step 12 |
+| 2 | do my node positions survive a build? | **No.** `Keeplayout` now makes them, for persistent nodes |
+| 3 | camera selector | `Camera` + `Listcameras`. **Needs their validation** |
+| 4 | Start/Stop as one Active toggle | done, and it is a command not a reading |
+| 5a | OSC port control | `Oscport` on Advanced, expression-driven |
+| 5b | hand/finger Z from hand size | `Depth` group, off by default |
+| 6 | hand XY angles | `Tilt`/`Tilt_axis`, NOT pitch and yaw - the sign is unrecoverable |
+| 7 | toggles for temporal and latches | `Temporal`/`Latches`, a new VETO mechanism |
+| 8 | is only-Lmcoordstx already minimal? | **Yes, proven by cook count.** 221 operators frozen |
+
+**Cook cost as shipped: 2.3728 ms at 60.0 fps**, 244 of 325 operators cooking, with
+all three streams on and the face landmark world coords enabled. `face/coords/lm_world`
+is 0.93 of that and has its own toggle.
 
 ## The state this project's TouchDesigner file is in
 
@@ -203,7 +232,24 @@ frame ever shows up, that diff is the first place to look.**
 diff and the five that did run earned their keep — the last returned thirteen
 findings, four invisible to their author.
 
-### 2. The unit vectors, and the channel-to-group registry
+### 2. Calibrate `Palmarea` and `Zreference` against a real hand
+
+The `Depth` and `Tilt` groups ship OFF and everything in them is unmeasured on a
+real hand. Two constants are what make them useful, and both are currently
+calibrated against `synth.py`'s geometry rather than a person:
+
+- **`Palmarea`** (0.3059) is the zero point of `h{i}_tilt`. Hold a hand face-on: if
+  `h0_tilt` reads anything but ~0, raise it. **Get this wrong low and the channel has
+  a DEAD ZONE rather than an offset** — the first guess of 0.14 gave `tilt` a flat 0
+  for the first 62 degrees of real rotation and every test still passed.
+- **`Zreference`** (0.12) is where `h{i}_z` reads 1.0. Hold a hand where you want
+  that and read `h0_size`.
+
+`h{i}_z_<finger>` is the one I would look at hardest before trusting: it is only
+meaningful for a STRAIGHT finger, because a curled one foreshortens too, and it
+cannot tell toward from away. `ATTRIBUTES.md` has both caveats.
+
+### 3. The unit vectors, and the channel-to-group registry
 
 The derived POSITIONS and RATES got their companions (BUILD_PLAN step 10 item 7), so
 `Screenspaceonly` is complete except for eight channels: `h{i}_point_x/y` and
@@ -238,7 +284,7 @@ channels belong to which group", which is what a channel-trimming Select needs �
 what `Screenspaceonly` had to be a Delete CHOP to avoid needing. It is not worth
 building to make those four toggles gate cost. Measured, not assumed.
 
-### 3. Segmentation — PARKED, decision made
+### 4. Segmentation — PARKED, decision made
 
 File-backed `mmap` plus a Script TOP with `numpy.memmap` and a seqlock. NOT
 TouchDesigner's shared-memory protocol. `docs/BUILD_PLAN.md` step 9 has the compiled
@@ -246,7 +292,7 @@ header layouts and the reason TD's protocol is closed to a foreign owner. Do not
 re-research it. The one thing still unmeasured needs a camera: the per-frame cost of
 `VNGeneratePersonSegmentationRequest` at each quality level.
 
-### 4. Smaller, and each is self-contained
+### 5. Smaller, and each is self-contained
 
 - **`face/coords/lm_world` is 0.83–1.08 ms** and it is the most expensive thing in
   the COMP when it is on. I looked for a cheaper native shape and there is not one:

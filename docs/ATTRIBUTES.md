@@ -541,6 +541,18 @@ keeps `temporal` cooking** whatever Presence and Motion say, because the latches
 armed by temporal's presence gate — a frozen gate would either arm every latch
 forever or disarm them forever, with nothing to indicate which.
 
+**OBSERVED 2026-08-21, and it is the documented cost arriving in practice.** Freezing
+`latches` with the new `Temporal` veto and then re-enabling it left the counters one
+release ahead of one fire — `tools/td_verify_latches.py` reported the standing
+invariant BAD, with 20 fires against 21 releases. That is exactly the "one edge pulse
+across the gap may be wrong" this section predicts, and rebuilding the latch bank
+(which resets the Count CHOPs) then gave a clean ramp +4 with all five invariants ok.
+
+So the invariant check is what makes the cost VISIBLE rather than silent, and the
+practical rule is: after freezing and unfreezing a memory group, the cumulative
+counters are off by up to one per gap. The deltas stay correct, which is what a
+project reads.
+
 **A frozen group keeps its channels**, holding their last values. They do not vanish
 from the COMP output, so nothing downstream loses a reference (DESIGN.md 6.2).
 

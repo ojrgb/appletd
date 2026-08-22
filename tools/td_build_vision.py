@@ -946,7 +946,7 @@ def _place_shell(td, child, stream, keep):
     whatever position it has. The notes DAT's TEXT is rewritten either way - the flag
     is about arrangement, not about letting documentation go stale.
     """
-    from visionhands.td_layout import placement
+    from visionhands.td_layout import placement, stream_xy
 
     for name in ("in1", "merge_out", "out1"):
         node = child.op(name)
