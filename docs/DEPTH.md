@@ -48,7 +48,8 @@ writer: 7302 distinct fp16 levels per frame (an 8-bit read caps at 256)
 reader: read cost median 0.0517 ms
 ```
 
-- **~23 ms inference** is what this model costs on an M-series Mac. If yours is much
+- **~23 ms inference** is what this model costs on an M4 Pro (`docs/BENCHMARKS.md` has
+  the machine and every other figure). If yours is much
   worse, `--compute cpu` is several times slower than the default `all` — a machine
   that has silently fallen back to CPU is the usual explanation.
 - **~7,300 distinct levels.** If you ever see 256, something has quantised the fp16

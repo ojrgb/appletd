@@ -19,6 +19,8 @@ entry is what went wrong on the way.
    behaviour that has cost time (it grew by fifteen entries this session) and 2.14
    is what the COMP costs and why.
 3. **`docs/ATTRIBUTES.md`** — the channel spec and every toggle.
+3a. **`docs/BENCHMARKS.md`** — every measured figure in one table, and the machine
+   they came from (M4 Pro). Read it before quoting a number at anybody.
 4. **`docs/JOURNAL.md`**, last two entries.
 5. **`docs/STANDARDS.md`** — binding.
 

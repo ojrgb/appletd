@@ -251,7 +251,7 @@ def solve(depth: numpy.typing.NDArray[Any], pins: tuple[Pin, ...],
         # reaches `polyfit` as an illegal LAPACK argument printed straight to stderr -
         # not an exception, a line of Fortran diagnostics in the sidecar's log.
         return Solve(None, None, (), None, (), 0.0, "the frame is empty")
-    frame_range = max(float(depth.max()) - float(depth.min()), 1e-9)
+    frame_range = _range(depth)
     if len(pins) < 2:
         return Solve(None, None, (), None, (), frame_range,
                      "needs 2 pins at different distances, have %d" % len(pins))
@@ -285,6 +285,33 @@ def solve(depth: numpy.typing.NDArray[Any], pins: tuple[Pin, ...],
         # and looks like the best possible news.
         note += " - residual is NOT a check, two points always fit a line exactly"
     return Solve(alpha, beta, indices, dropped, tuple(residuals), frame_range, note)
+
+
+# How coarsely the frame's range is sampled. MEASURED, and it was 88% of the entire
+# solve: numpy has no fast path for fp16 reductions, so `max()`/`min()` on a 518x392
+# half-float map costs 0.5123 ms against 0.0170 for the same array as float32 - THIRTY
+# times slower. Every 4th pixel in each direction is 0.0415 ms.
+#
+# Legitimate because of what the number is FOR. `frame_range` is the scale the
+# conditioning test is expressed against - "do the pins span at least 5% of the range" -
+# so it is a rough magnitude, not a measurement. And the model's output is a smooth
+# upsampled ViT map where adjacent pixels are highly correlated: MEASURED at 0.00%
+# difference in the range at every 4th pixel, and 0.02% at every 8th.
+#
+# The whole solve goes from 0.589 ms to about 0.12 on the capture thread, next to 23 ms
+# of inference. Small in proportion and free to have.
+RANGE_STEP: Final = 4
+# Below this, sample every pixel. A 32x32 synthetic frame subsampled 4x is 8x8, where
+# the correlation argument above stops holding - and the tests use small frames.
+RANGE_MIN_SIDE: Final = 64
+
+
+def _range(depth: numpy.typing.NDArray[Any]) -> float:
+    """The spread of the map, from a subsample on anything big enough. See RANGE_STEP."""
+    view = depth
+    if min(depth.shape[:2]) >= RANGE_MIN_SIDE:
+        view = depth[::RANGE_STEP, ::RANGE_STEP]
+    return max(float(view.max()) - float(view.min()), 1e-9)
 
 
 def _refusal(readings: list[float], pins: tuple[Pin, ...],

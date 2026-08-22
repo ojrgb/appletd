@@ -189,6 +189,26 @@ replay. Live-camera timings are never quoted as results — the spike saw an 8x
 spread on identical configs. Anything unmeasured is labelled unmeasured, in code
 and in prose.
 
+**And every figure goes into `docs/BENCHMARKS.md`.** Enrich it whenever a measurement
+is taken — not at the end of a milestone, at the point the number exists, because that
+is when its provenance is still known. Three things have to travel with it or it is
+worth less than nothing:
+
+  * **the machine.** Everything in this project rides on the Neural Engine, so a
+    figure without hardware attached is unfalsifiable. The file states its own
+    machine at the top; if a measurement was taken elsewhere, say so beside it.
+  * **how it was taken** — fixture replay, a forced-cook loop, or TouchDesigner's own
+    wall-clock `cookTime` gauge. These are not interchangeable and the gauge always
+    reads higher. Where both exist, record both; picking the flattering one makes the
+    file useless.
+  * **what it is compared against.** "23 ms" means nothing; "23 ms against a 33.3 ms
+    frame interval" is a decision. A bare number invites the reader to invent the
+    comparison, and they will invent a kind one.
+
+Delete a figure when it stops being true rather than leaving two. A benchmarks file
+with a superseded number in it is the same defect as a stale comment (1.5), and it is
+harder to spot because both numbers look measured.
+
 **Human-in-the-loop points** are flagged as they arrive rather than worked
 around: milestone 1 needs TouchDesigner booted by hand, the fixture clip needs
 recording on the target machine, and the camera TCC prompt attaches to
@@ -205,6 +225,7 @@ per change:
 | document | when | why it earns it |
 |---|---|---|
 | `DESIGN.md` 2 | **always**, if anything was measured | every figure in 2 has changed a decision. It is the reason a wrong operator choice costs twenty minutes |
+| `docs/BENCHMARKS.md` | **always**, if anything was measured — the same trigger as DESIGN 2 | 2 is where a number is ARGUED; this is where it is looked up. A figure that exists only inside a paragraph of prose is a figure nobody finds when they need to compare against it |
 | `docs/ATTRIBUTES.md` | **always**, if user-visible behaviour moved | it is the contract. A parameter whose documented behaviour is wrong is worse than one that is undocumented |
 | `docs/JOURNAL.md` | **per milestone**, not per change | what surprised us and what it cost. Keep it short; it is not a changelog |
 | `docs/BUILD_PLAN.md` | **only for a new step** — a new capability or a structural change | it had become a second journal, one numbered step per change. A change that fits inside an existing step does not need a new one |

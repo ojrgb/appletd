@@ -30,6 +30,11 @@ TouchDesigner with bundled Python 3.11.
 
 ## 2. Proven — measured, not assumed
 
+**`docs/BENCHMARKS.md` is the same numbers as a table**, with the machine they were
+taken on (MacBook Pro, Apple M4 Pro, macOS 26.5.2) and a note on which are fixture
+replays, which are forced cooks and which are TouchDesigner's own wall-clock gauges.
+This section is where each one is ARGUED; that file is where they are looked up.
+
 A working spike exists in [`reference/`](reference/). Both scripts run today.
 
 - [`reference/spike_vision_hands.py`](reference/spike_vision_hands.py) — one
