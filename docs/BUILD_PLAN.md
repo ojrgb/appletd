@@ -903,3 +903,87 @@ groups, ribbons and orphans, and it earned its keep on the first run:
   omitting the four `sc_*` status channels — which are exactly the set that once
   vanished silently between the OSC In CHOP and the COMP output. It sends them now,
   so a synthetic session exercises the whole contract.
+
+## Step 11 — the panel, the plumbing and two master switches — DONE 2026-08-21
+
+The user's second list. Items are numbered as they asked them.
+
+### The Sidecar page is gone, and so is the word (their item 4, 5a, 3)
+
+It named an implementation detail. What was operational moved to **Vision**
+(`Active`, `Camera`, `Listcameras`, the three stream toggles, `Slotassign`) and what
+was diagnostic moved to **Advanced** (`Oscport`, `Printstatus`, `Capturepid`). Five
+pages now, not six.
+
+`Active` replaces the Start and Stop pulses. It is a COMMAND, not a reading — the
+process can die and the toggle will still read on, which the label says and
+`sc_uptime_s` contradicts truthfully.
+
+`Camera` is a name SUBSTRING, straight into the `--camera` flag the sidecar already
+had. A string and not a menu: MEASURED, this machine has four devices — the built-in
+camera, an OBS virtual camera, a Camo camera and an iPhone — so a list baked at build
+time goes wrong the moment one is unplugged. `Listcameras` shells out to
+`python -m visionhands.sidecar --list-cameras` (new), a subprocess and not an import,
+so pyobjc never enters TouchDesigner and the names come from the same code that
+`--camera` matches against.
+
+`Oscport` drives the three OSC In CHOPs through an EXPRESSION, so TD follows it
+immediately while the running process keeps sending to the old port until restarted.
+VERIFIED: 10000 → 10010 → 10000, ports following as 10010/10011/10012.
+
+**Moving a parameter between pages is a destroy plus an append**, because TD will not
+hold one custom parameter name on two pages and the append cannot run first. `_retire`
+destroys before anything is appended, with `previous` already captured, so the four
+tuned values survive. It refuses to destroy a page that still holds anything — which
+is what caught the first attempt, where the four had not been listed as moving.
+
+### `Keeplayout` (their item 2)
+
+**Yes, the builders overwrite your positions on every run** — every one writes
+`nodeX`/`nodeY` from `visionhands/td_layout.py`. `Keeplayout` (default off) makes them
+leave an operator that already existed where it is.
+
+**What it cannot hold, and the label says so:** anything INSIDE a group. `temporal`
+destroys and regenerates all 73 of its operators every run, so there is nothing to
+preserve. It holds the group COMPs, the stream shell, the OSC In CHOPs and the loose
+operators at the top level — which is the layer a person actually rearranges. A NEW
+node is always placed whatever the flag says, because TouchDesigner puts a freshly
+created operator wherever it likes and "leave it alone" would mean piling every new
+operator somewhere arbitrary. The rule is one function,
+`visionhands.td_layout.placement`, with a test.
+
+### `Temporal` and `Latches` master switches (their item 7)
+
+The existing toggles could not express "off": `COOK_GATED` is an OR, so adding
+`Temporal` to it would mean turning it ON keeps the group alive. Hence `COOK_VETOED`
+and `cooking = any(COOK_GATED) and all(COOK_VETOED)`.
+
+**The veto beats `COOK_REQUIRES`**, and that was a decision rather than a detail. The
+latch bank gates on `temporal`'s presence signal, and `COOK_REQUIRES` exists to keep
+`temporal` cooking whenever `latches` does — a frozen gate arms every latch for ever
+or disarms them for ever, silently. So `Temporal` off has to take `latches` with it
+rather than being overridden. `_apply_gating` prints when it does.
+
+### Item 8: it already held, and here is the proof
+
+Asked whether only `Lmcoordstx` being on leaves everything else frozen. It does, and
+the answer needed a cook-COUNT check rather than an assertion — a group COMP's own
+cook count is always 0 whatever its children do, which is the trap that nearly made
+this look broken.
+
+With `Coordstx`, `Coordspx` and `Lmcoordspx` off and `Lmcoordstx` on, plus both new
+master switches off:
+
+| gated group | cooking children |
+|---|---|
+| `face/coords/lm_world` | **11 / 12** |
+| `hands/temporal` | 0 / 74 |
+| `hands/latches` | 0 / 53 |
+| `hands/coords/world` `pixels` `dv_world` `dv_pixels` | 0 / 8, 0 / 8, 0 / 13, 0 / 13 |
+| `face/coords/world` `pixels` `lm_pixels` | 0 / 12 each |
+| `pose/coords/world` `pixels` | 0 / 8 each |
+
+**221 operators frozen, one half cooking, 1.5086 ms** over 42 of 317 operators — and
+`face/coords/lm_world` is 0.8241 of that, which is the landmark transform doing the
+only work asked of it. There was no hidden dependency to fix: `lm_world` composes
+through the bounding box from `filter`, not from `coords/world`.

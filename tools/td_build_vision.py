@@ -601,10 +601,10 @@ def main():
     # toggle that ships ON would delete them out from under one.
     par_screen.default = False
 
-    # Whether the builders may move nodes. See `_keep_layout` for what it can and
-    # cannot protect - the short version is that it holds the group COMPs and the
-    # stream shell, and cannot hold operators INSIDE a group, because those are
-    # destroyed and regenerated on every run.
+    # Whether the builders may move nodes. `visionhands.td_layout.placement` has the
+    # rule and what it cannot protect - the short version is that it holds the group
+    # COMPs, the stream shell and the OSC In CHOPs, and cannot hold operators INSIDE
+    # a group, because those are destroyed and regenerated on every run.
     par_keep = page.appendToggle(
         "Keeplayout", label="Keep Layout (builders leave existing nodes)")[0]
     par_keep.default = False
@@ -698,13 +698,18 @@ def main():
              par_ortho.eval(), bool(par_smooth.eval())))
 
     # -- the three streams -------------------------------------------------
+    # Read once. Everything below that PERSISTS across a rebuild honours it; the
+    # loose DATs at the top level do not, because this script destroys and recreates
+    # them every run and there is nothing to preserve.
+    keep_layout = bool(par_keep.eval())
     outputs = []
     for index, stream in enumerate(STREAM_NAMES):
         row = stream_row(index)
         osc = comp.op(stream + "_osc")
+        osc_existed = osc is not None
         if osc is None:
             osc = comp.create(td.oscinCHOP, stream + "_osc")
-        osc.nodeX, osc.nodeY = -4 * COL_W, row
+        _at(osc, (-4 * COL_W, row), keep_layout, osc_existed)
         # An EXPRESSION on `Oscport`, not a baked number: the port is a parameter
         # now, and the receiver has to follow it the moment it changes. The offset
         # comes from the package (DESIGN.md 6.4), so the receiver cannot end up
@@ -714,6 +719,7 @@ def main():
         osc.par.active = True
 
         child = comp.op(stream)
+        child_existed = child is not None
         if child is None:
             child = comp.create(td.baseCOMP, stream)
             # Only a fresh child gets its shell BUILT here. An existing one already
@@ -724,15 +730,16 @@ def main():
         # an existing one alike. Otherwise a layout change reaches new projects only
         # - which is how the master and the streams ended up laid out to two
         # different conventions at once.
-        _place_shell(td, child, stream)
-        child.nodeX, child.nodeY = -2 * COL_W, row
+        _place_shell(td, child, stream, keep_layout)
+        _at(child, (-2 * COL_W, row), keep_layout, child_existed)
         child.color = (0.35, 0.45, 0.55)
         child.inputConnectors[0].connect(osc)
 
         out = comp.op("out%d" % (index + 1))
+        out_existed = out is not None
         if out is None:
             out = comp.create(td.outCHOP, "out%d" % (index + 1))
-        out.nodeX, out.nodeY = COL_W, row
+        _at(out, (COL_W, row), keep_layout, out_existed)
         # REUSED, never recreated - see the `kept` set above. The connector index a
         # project's wire is attached to follows these operators, so replacing one
         # moves every output the project reads.
@@ -834,6 +841,21 @@ def main():
     print("=" * 70)
 
 
+def _at(node, xy, keep, existed):
+    """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
+
+    The rule lives in `visionhands.td_layout.placement`, including what the flag
+    cannot hold: anything a builder destroys and regenerates, which is every
+    operator inside a group.
+    """
+    from visionhands.td_layout import placement
+
+    where = placement(xy, keep, existed)
+    if where is not None:
+        node.nodeX, node.nodeY = where
+    return node
+
+
 def _retire(comp, par_names, page_names):
     """Destroy named custom parameters, then any of `page_names` left empty.
 
@@ -913,21 +935,31 @@ Built by tools/td_build_vision.py and six more builders. Edits here are overwrit
 """
 
 
-def _place_shell(td, child, stream):
+def _place_shell(td, child, stream, keep):
     """Re-apply the stream shell's positions, and its notes DAT. Every run.
 
     Separate from `_shell` because that one only runs for a NEW stream: an existing
     child already holds the networks six other builders own, so its INSIDES must not
     be rebuilt - but its layout should still follow the current table.
+
+    `keep` is `Keeplayout`: with it on, an operator that already existed keeps
+    whatever position it has. The notes DAT's TEXT is rewritten either way - the flag
+    is about arrangement, not about letting documentation go stale.
     """
-    from visionhands.td_layout import stream_xy
+    from visionhands.td_layout import placement
 
     for name in ("in1", "merge_out", "out1"):
         node = child.op(name)
-        if node is not None:
-            node.nodeX, node.nodeY = stream_xy(name)
-    notes = child.op("notes") or child.create(td.textDAT, "notes")
-    notes.nodeX, notes.nodeY = stream_xy("notes")
+        if node is None:
+            continue
+        where = placement(stream_xy(name), keep, True)
+        if where is not None:
+            node.nodeX, node.nodeY = where
+    existing = child.op("notes")
+    notes = existing or child.create(td.textDAT, "notes")
+    where = placement(stream_xy("notes"), keep, existing is not None)
+    if where is not None:
+        notes.nodeX, notes.nodeY = where
     notes.text = STREAM_NOTES % {"stream": stream.upper()}
 
 

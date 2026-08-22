@@ -556,6 +556,32 @@ def _verify_hysteresis(comp):
     return problems
 
 
+def _keep_layout(master):
+    """Has the user asked the builders to leave their node arrangement alone?
+
+    `getattr` with a default, because this parameter is younger than several of the
+    builders and a COMP built before it existed must still build rather than raise.
+    """
+    par = getattr(master.par, "Keeplayout", None)
+    return bool(par is not None and par.eval())
+
+
+def _place(node, xy, keep, existed):
+    """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
+
+    See `visionhands.td_layout.placement` for the rule and for what the flag can
+    and cannot hold - the short version is that it holds the group COMPs and the
+    stream shell, and not the operators inside a group, which are regenerated on
+    every run.
+    """
+    from visionhands.td_layout import placement
+
+    where = placement(xy, keep, existed)
+    if where is not None:
+        node.nodeX, node.nodeY = where
+    return node
+
+
 def _clear_keeping_ports(td, group, ports):
     """Empty a group of its working operators but KEEP its In/Out CHOPs.
 
@@ -633,10 +659,11 @@ def main():
     # to its output, and a dangling input cannot be told from one never connected
     # (DESIGN.md 2.11).
     group = comp.op(GROUP)
+    group_existed = group is not None
     if group is None:
         group = comp.create(td.baseCOMP, GROUP)
     kept = _clear_keeping_ports(td, group, ("in1", "in2", "out1"))
-    group.nodeX, group.nodeY = stream_xy(GROUP)
+    _place(group, stream_xy(GROUP), _keep_layout(master), group_existed)
     group.color = (0.5, 0.35, 0.45)
     removed = 0
     for child in list(comp.children):

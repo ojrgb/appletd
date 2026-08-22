@@ -297,7 +297,7 @@ def main():
         built.append(_build_one(td, master, child, stream,
                                 smoothed_names(stream), passthrough_names(stream),
                                 failures, scope_pattern(stream),
-                                stream_xy(GROUP)))
+                                stream_xy(GROUP), _keep_layout(master)))
 
     # One DAT for all three groups. Beside the streams rather than inside one, so it
     # keeps working if any group is rebuilt without it - and because a single toggle
@@ -339,6 +339,31 @@ def main():
         print("   then toggle Smoothing and compare")
 
 
+def _keep_layout(master):
+    """Has the user asked the builders to leave their node arrangement alone?
+
+    `getattr` with a default, because this parameter is younger than several of the
+    builders and a COMP built before it existed must still build rather than raise.
+    """
+    par = getattr(master.par, "Keeplayout", None)
+    return bool(par is not None and par.eval())
+
+
+def _place(node, xy, keep, existed):
+    """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
+
+    See `visionhands.td_layout.placement` for the rule and for what the flag can
+    and cannot hold - the short version is that it holds this group COMP and not
+    the operators inside it, which are regenerated on every run.
+    """
+    from visionhands.td_layout import placement
+
+    where = placement(xy, keep, existed)
+    if where is not None:
+        node.nodeX, node.nodeY = where
+    return node
+
+
 def _clear_keeping_ports(td, group, ports):
     """Empty a group of its working operators but KEEP its In/Out CHOPs.
 
@@ -378,7 +403,7 @@ def _clear_keeping_ports(td, group, ports):
 
 
 def _build_one(td, master, child, stream, smoothed, passthrough, failures, scope,
-               group_xy):
+               group_xy, keep):
     """Build one stream's filter group. Returns (stream, chans in, chans out, ms).
 
     The check at the bottom compares the output against the INPUT rather than
@@ -400,10 +425,11 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures, scope
     # as the COMP output falling from 495 channels to 57 while the builder reported
     # success (DESIGN.md 2.11).
     group = child.op(GROUP)
+    existed = group is not None
     if group is None:
         group = child.create(td.baseCOMP, GROUP)
     kept = _clear_keeping_ports(td, group, ("in1", "out1"))
-    group.nodeX, group.nodeY = group_xy
+    _place(group, group_xy, keep, existed)
     group.color = (0.35, 0.45, 0.55)
 
     group_in = kept.get("in1") or group.create(td.inCHOP, "in1")

@@ -21,6 +21,7 @@ from visionhands.td_layout import (
     STREAM_NODES,
     master_xy,
     overlaps,
+    placement,
     stream_row,
     stream_xy,
 )
@@ -99,3 +100,14 @@ def test_overlaps_actually_detects_an_overlap() -> None:
     assert overlaps({"a": (0, 0), "b": (COMP_W, 0)}) == []
     assert overlaps({"a": (0, 0), "b": (0, COMP_H)}) == []
     assert overlaps({"a": (0, 0), "b": (COMP_W - 1, COMP_H - 1)}) == [("a", "b")]
+
+
+def test_keeplayout_holds_an_existing_node_and_never_a_new_one() -> None:
+    """A new node has to be placed whatever the flag says: TouchDesigner puts a
+    freshly created operator wherever it likes, so "leave it alone" would mean
+    piling every new operator somewhere arbitrary."""
+    xy = (200, -300)
+    assert placement(xy, keep_layout=False, existed=False) == xy
+    assert placement(xy, keep_layout=False, existed=True) == xy
+    assert placement(xy, keep_layout=True, existed=False) == xy
+    assert placement(xy, keep_layout=True, existed=True) is None

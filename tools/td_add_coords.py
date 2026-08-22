@@ -307,6 +307,31 @@ def _attach_once(merge, node, drop_names=()):
     return removed
 
 
+def _keep_layout(master):
+    """Has the user asked the builders to leave their node arrangement alone?
+
+    `getattr` with a default, because this parameter is younger than several of the
+    builders and a COMP built before it existed must still build rather than raise.
+    """
+    par = getattr(master.par, "Keeplayout", None)
+    return bool(par is not None and par.eval())
+
+
+def _place(node, xy, keep, existed):
+    """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
+
+    See `visionhands.td_layout.placement` for the rule and for what the flag can
+    and cannot hold - the short version is that it holds this group COMP and not
+    the operators inside it, which are regenerated on every run.
+    """
+    from visionhands.td_layout import placement
+
+    where = placement(xy, keep, existed)
+    if where is not None:
+        node.nodeX, node.nodeY = where
+    return node
+
+
 def _clear_keeping_ports(td, group, ports):
     """Empty a group of its working operators but KEEP its In/Out CHOPs.
 
@@ -426,7 +451,7 @@ def main():
                 pairs.extend((src, b) for b in derived_branches(src))
         built.append(_build_one(td, child, stream, pairs,
                                 box_branches(stream), box_expressions, failures,
-                                stream_xy(GROUP)))
+                                stream_xy(GROUP), _keep_layout(master)))
 
     print()
     for stream, operators, channels, renames in built:
@@ -456,7 +481,7 @@ def main():
 
 
 def _build_one(td, child, stream, pairs, boxes, box_expressions, failures,
-               group_xy):
+               group_xy, keep):
     """Build one stream's coords group. Returns (stream, operators, channels, how).
 
     `pairs` is [(source name, Branch)] - the source is which of this group's inputs
@@ -481,10 +506,11 @@ def _build_one(td, child, stream, pairs, boxes, box_expressions, failures,
     # one that was never connected - measured as a COMP output falling from 495
     # channels to 57 while the builder reported success (DESIGN.md 2.11).
     group = child.op(GROUP)
+    existed = group is not None
     if group is None:
         group = child.create(td.baseCOMP, GROUP)
     kept = _clear_keeping_ports(td, group, ("in1", "in2", "in3", "out1"))
-    group.nodeX, group.nodeY = group_xy
+    _place(group, group_xy, keep, existed)
     group.color = (0.45, 0.4, 0.3)
 
     # One In CHOP per source, stacked so the row a wire leaves says which input it

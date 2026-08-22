@@ -182,6 +182,25 @@ def onCook(scriptOp):
 '''
 
 
+def _keep_layout(master):
+    """Has the user asked the builders to leave their node arrangement alone?"""
+    par = getattr(master.par, "Keeplayout", None)
+    return bool(par is not None and par.eval())
+
+
+def _place(node, xy, keep, existed):
+    """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
+
+    Rule and caveats in `visionhands.td_layout.placement`.
+    """
+    from visionhands.td_layout import placement
+
+    where = placement(xy, keep, existed)
+    if where is not None:
+        node.nodeX, node.nodeY = where
+    return node
+
+
 def _attach_once(merge, node, drop_names=()):
     """Normalise a Merge CHOP's inputs: `node` exactly once, anything in
     `drop_names` gone, every other source exactly once. Returns what it removed.
@@ -259,12 +278,15 @@ def main():
         print("FAIL no COMP at %s - run tools/td_build_vision.py first" % COMP_PATH)
         return
 
-    callbacks = comp.op("derive_callbacks") or comp.create(td.textDAT, "derive_callbacks")
-    callbacks.nodeX, callbacks.nodeY = stream_xy("derive_callbacks")
+    keep = _keep_layout(op(MASTER_PATH) or comp)
+    existing = comp.op("derive_callbacks")
+    callbacks = existing or comp.create(td.textDAT, "derive_callbacks")
+    _place(callbacks, stream_xy("derive_callbacks"), keep, existing is not None)
     callbacks.text = CALLBACK_SOURCE % {"repo": REPO_ROOT}
 
-    chop = comp.op("derive_chop") or comp.create(td.scriptCHOP, "derive_chop")
-    chop.nodeX, chop.nodeY = stream_xy("derive_chop")
+    existing_chop = comp.op("derive_chop")
+    chop = existing_chop or comp.create(td.scriptCHOP, "derive_chop")
+    _place(chop, stream_xy("derive_chop"), keep, existing_chop is not None)
     chop.par.callbacks = callbacks.path
     # The raw OSC channels are the input; derive() needs the landmark positions.
     # The FILTERED stream, not the raw input, and this line is a bug fix. It used to

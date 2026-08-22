@@ -132,6 +132,29 @@ def stream_row(index: int) -> int:
     return -index * MASTER_ROW_H
 
 
+def placement(xy: tuple[int, int], keep_layout: bool,
+              existed: bool) -> tuple[int, int] | None:
+    """Where to put a node, or None to leave it exactly where it is.
+
+    Contract: returns `xy` unless the user has asked to keep their own layout AND
+              the node already existed before this build. A NEW node is always
+              placed, whatever the flag says - TouchDesigner puts a freshly created
+              operator wherever it likes, so "leave it alone" would mean piling
+              every new operator somewhere arbitrary.
+    Why here: the RULE is one line and belongs in one place, even though each
+              builder has to call it - a builder must survive being pasted into a
+              Text DAT on its own, so they cannot share a helper module of their own.
+    What `Keeplayout` CANNOT hold, and the parameter's label says so: anything
+              INSIDE a group. `temporal` destroys and regenerates all 73 of its
+              operators on every run, so there is nothing there to preserve. It
+              holds the group COMPs, the stream shell and the loose operators at
+              the top level - which is the layer a person actually rearranges.
+    """
+    if keep_layout and existed:
+        return None
+    return xy
+
+
 def overlaps(placed: dict[str, tuple[int, int]],
              width: int = COMP_W, height: int = COMP_H) -> list[tuple[str, str]]:
     """Every pair in `placed` whose node boxes would intersect, as sorted pairs.

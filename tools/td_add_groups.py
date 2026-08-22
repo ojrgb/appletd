@@ -95,6 +95,10 @@ GROUPS = (
     ("Core",        True,  "derive"),
     ("Presence",    True,  "derive"),
     ("Contacts",    True,  "derive"),
+    # The two MASTER switches for the hands attribute layer, added 2026-08-21
+    # because the existing toggles could not express "off". See COOK_VETOED.
+    ("Temporal",    True,  "native"),
+    ("Latches",     True,  "native"),
     ("Triggers",    True,  "native"),
     ("Pose",        True,  "derive"),
     ("Motion",      True,  "native"),
@@ -178,6 +182,28 @@ COOK_GATED = {
 # dependency expressed in the gating.
 COOK_REQUIRES = {"hands/latches": ("hands/temporal",)}
 
+# A VETO: if any listed toggle is OFF, the group is frozen whatever COOK_GATED says.
+#
+# WHY a second mechanism rather than another entry in COOK_GATED. That table is an
+# OR - "any of these toggles being on keeps the group alive" - which is right for
+# `Presence` and `Motion`, because either one needs `temporal` cooking. It cannot
+# express "off": adding `Temporal` to that list would make turning it ON keep the
+# group alive, which is the opposite of a master switch. So:
+#
+#     cooking = any(COOK_GATED) and all(COOK_VETOED)
+#
+# THE INTERACTION THAT NEEDED A DECISION. `latches` reads `temporal`'s presence
+# gate, and COOK_REQUIRES exists to force `temporal` to keep cooking whenever
+# `latches` does - a frozen gate either arms every latch for ever or disarms them
+# for ever, with nothing to say which. A veto on `Temporal` fights that. The veto
+# WINS, and `latches` is frozen with it: the alternative is a latch bank running on
+# a gate that stopped updating, which is the exact silent failure COOK_REQUIRES was
+# written to prevent. `_apply_gating` prints when it does this.
+COOK_VETOED = {
+    "hands/temporal": ("Temporal",),
+    "hands/latches": ("Latches", "Temporal"),
+}
+
 # The presets from docs/ATTRIBUTES.md. Verbosity sets the toggles in one click; it
 # is not a fourth state, and moving a toggle afterwards does not fight it.
 PRESETS = {
@@ -197,6 +223,7 @@ PRESETS = %(presets)r
 
 COOK_GATED = %(cook_gated)r
 COOK_REQUIRES = %(cook_requires)r
+COOK_VETOED = %(cook_vetoed)r
 
 
 def onValueChange(par, prev):
@@ -232,6 +259,14 @@ def _apply_gating(comp):
         if wanted.get(group_name):
             for needed in needs:
                 wanted[needed] = True
+    # A veto beats both passes above, COOK_REQUIRES included. tools/td_add_groups.py
+    # says why: a latch bank gating on a frozen presence gate is the silent failure
+    # COOK_REQUIRES exists to prevent, so `Temporal` off has to take `latches` with
+    # it rather than being overridden.
+    for group_name, vetoes in COOK_VETOED.items():
+        if any(hasattr(comp.par, v) and not bool(getattr(comp.par, v).eval())
+               for v in vetoes):
+            wanted[group_name] = False
     for group_name, enabled in wanted.items():
         group = comp.op(group_name)
         if group is None:
@@ -273,6 +308,16 @@ def _apply_gating(comp, verbose=False):
         if wanted.get(group_name):
             for needed in needs:
                 wanted[needed] = True
+    # LAST pass, so a veto beats both of the above - including COOK_REQUIRES, which
+    # would otherwise force a vetoed group back on. See the COOK_VETOED comment for
+    # why the veto has to win.
+    for group_name, vetoes in COOK_VETOED.items():
+        blocked = [v for v in vetoes
+                   if hasattr(comp.par, v) and not bool(getattr(comp.par, v).eval())]
+        if blocked and wanted.get(group_name):
+            report.append("%s: FROZEN by %s" % (group_name, ", ".join(blocked)))
+        if blocked:
+            wanted[group_name] = False
 
     for group_name, enabled in sorted(wanted.items()):
         group = comp.op(group_name)
@@ -379,6 +424,9 @@ def main():
     for group_name, toggles in COOK_GATED.items():
         for toggle in toggles:
             freezes.setdefault(toggle, []).append(group_name)
+    for group_name, vetoes in COOK_VETOED.items():
+        for toggle in vetoes:
+            freezes.setdefault(toggle, []).append(group_name + " (veto)")
     for group, _default, gated in GROUPS:
         if gated == "derive":
             reach = "gates derive()"
@@ -401,12 +449,15 @@ def main():
         "all_groups": [n for n, _d, _g in GROUPS],
         "cook_gated": {k: list(v) for k, v in COOK_GATED.items()},
         "cook_requires": {k: list(v) for k, v in COOK_REQUIRES.items()},
+        "cook_vetoed": {k: list(v) for k, v in COOK_VETOED.items()},
     }
     callbacks.par.op = master.path
     # Verbosity AND every toggle that gates a group's cooking: `allowCooking` is an
     # attribute, so it cannot be bound to a parameter and has to be rewritten on
     # change.
-    gating_toggles = sorted({name for names in COOK_GATED.values() for name in names})
+    gating_toggles = sorted(
+        {name for names in COOK_GATED.values() for name in names}
+        | {name for names in COOK_VETOED.values() for name in names})
     callbacks.par.pars = " ".join(["Verbosity", *gating_toggles])
     callbacks.par.valuechange = True
     print("2. Verbosity presets and cook gating wired through %s (%s)"

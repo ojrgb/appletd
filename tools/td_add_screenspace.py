@@ -160,7 +160,8 @@ def main():
         optional = derived_companioned_names() if stream == STREAM_HANDS else []
         built.append(_build_one(td, child, stream, companioned_names(stream),
                                 optional, engaged, failures, stream_xy(NODE),
-                                stream_xy("screen_only_notes")))
+                                stream_xy("screen_only_notes"),
+                                _keep_layout(master)))
 
     callbacks = master.op("screenspace_callbacks") or master.create(
         td.parameterexecuteDAT, "screenspace_callbacks")
@@ -192,8 +193,27 @@ def main():
         print("   counter, confidence and angle.")
 
 
+def _keep_layout(master):
+    """Has the user asked the builders to leave their node arrangement alone?"""
+    par = getattr(master.par, "Keeplayout", None)
+    return bool(par is not None and par.eval())
+
+
+def _place(node, xy, keep, existed):
+    """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
+
+    Rule and caveats in `visionhands.td_layout.placement`.
+    """
+    from visionhands.td_layout import placement
+
+    where = placement(xy, keep, existed)
+    if where is not None:
+        node.nodeX, node.nodeY = where
+    return node
+
+
 def _build_one(td, child, stream, doomed, optional, engaged, failures, node_xy,
-               note_xy):
+               note_xy, keep):
     """Put the Delete CHOP between `merge_out` and `out1`. Returns a report row."""
     merge = child.op("merge_out")
     chop_out = child.op("out1")
@@ -202,10 +222,9 @@ def _build_one(td, child, stream, doomed, optional, engaged, failures, node_xy,
                         % child.path)
         return (stream, 0, 0, 0)
 
-    node = child.op(NODE)
-    if node is None:
-        node = child.create(td.deleteCHOP, NODE)
-    node.nodeX, node.nodeY = node_xy
+    existing = child.op(NODE)
+    node = existing or child.create(td.deleteCHOP, NODE)
+    _place(node, node_xy, keep, existing is not None)
     node.color = (0.5, 0.32, 0.32)
     node.inputConnectors[0].connect(merge)
     node.par.delchannels = True
@@ -226,9 +245,9 @@ def _build_one(td, child, stream, doomed, optional, engaged, failures, node_xy,
     chop_out.inputConnectors[0].connect(node)
     chop_out.nodeX = max(chop_out.nodeX, node_xy[0] + 200)
 
-    note = child.op("screen_only_notes") or child.create(td.textDAT,
-                                                         "screen_only_notes")
-    note.nodeX, note.nodeY = note_xy
+    existing_note = child.op("screen_only_notes")
+    note = existing_note or child.create(td.textDAT, "screen_only_notes")
+    _place(note, note_xy, keep, existing_note is not None)
 
     # A FROZEN stream cannot be verified. `allowCooking = False` on the child COMP
     # blocks a forced cook of anything inside it, so both reads below would be

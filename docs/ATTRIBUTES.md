@@ -440,7 +440,23 @@ Three kinds of toggle, and the label says which:
 |---|---|
 | `Core` `Presence` `Contacts` `Pose` `Twohands` `Gestures` `Descriptor` | `derive()` does not compute the group, and its channels leave the output |
 | `Presence` `Motion` (→ `temporal`), `Triggers` `Gestures` `Events` (→ `latches`), `Coordstx` `Coordspx` (→ `coords/world`, `coords/pixels` in all three streams), `Lmcoordstx` `Lmcoordspx` (→ the face's landmark halves) | the group COMP stops cooking entirely, via `allowCooking`. Its channels stay, holding their last value |
-| `Landmarks` `Triggers` `Motion` `Events` | nothing on their own — advisory, and the LABEL says "channels only". Closing that needs an exact channel-to-group map |
+| `Temporal` `Latches` | a VETO: off freezes the group whatever the toggles above say. See below |
+| `Landmarks` `Triggers` `Motion` `Events` | nothing on their own — advisory, and the LABEL says "channels only". Closing that needs an exact channel-to-group map, and `DESIGN.md` §2.14 explains why it still would not help |
+
+**`Temporal` and `Latches` are master switches, and they needed a second
+mechanism.** The table above is an OR — "any of these toggles being on keeps the
+group alive" — which is right for `Presence` and `Motion`, because either one needs
+`temporal` cooking. It cannot express *off*: adding `Temporal` to that list would
+mean turning it ON keeps the group alive, the opposite of a switch. So a veto:
+
+    cooking = any(COOK_GATED) and all(COOK_VETOED)
+
+**Turning `Temporal` off takes `latches` with it.** The latch bank gates on
+`temporal`'s presence signal, and a frozen gate either arms every latch for ever or
+disarms them for ever with nothing to say which — which is the silent failure the
+whole dependency exists to prevent. So the veto wins over that dependency rather
+than being overridden by it, and the builder prints when it does. VERIFIED by cook
+count: `Temporal` off froze all 74 operators in `temporal` and all 53 in `latches`.
 
 **The stream toggles on the Sidecar page gate cooking too**, since 2026-08-21:
 `Streamhands`/`Streampose`/`Streamface` are launch flags for the sidecar AND
