@@ -116,7 +116,7 @@ def sample():
         channel = hands.chan("seq")
         seq = None if channel is None else channel[0]
     _store().append({"frame": absTime.frame, "seq": seq,
-                     "ops": _snapshot(comp)})
+                     "clock": absTime.seconds, "ops": _snapshot(comp)})
 
 
 def start(frames):
@@ -155,6 +155,14 @@ def report():
     seqs = [s["seq"] for s in samples if s["seq"] is not None]
     moved = len(set(seqs)) > 1
     span_frames = samples[-1]["frame"] - samples[0]["frame"]
+    # The ACHIEVED frame rate, and it belongs in every report. MEASURED the hard
+    # way: a set of figures taken while a browser was using 60%% of the machine put
+    # the whole COMP at 12.8 ms and the cook rate at 26 frames in 89, and every
+    # per-operator number in that run was inflated with it. cookTime is wall-clock,
+    # so a profile taken at 24 fps is not comparable to one taken at 60 - and
+    # nothing in the numbers themselves says which you have.
+    elapsed = samples[-1]["clock"] - samples[0]["clock"]
+    fps = (span_frames / elapsed) if elapsed > 0 else 0.0
 
     rows = {}
     for path in samples[0]["ops"]:
@@ -190,7 +198,7 @@ def report():
 
     out = {"frames": span_frames, "samples": len(samples),
            "seq_moved": moved, "seq_distinct": len(set(seqs)),
-           "ops": rows}
+           "fps": fps, "elapsed_s": elapsed, "ops": rows}
     try:
         with open(REPORT_PATH, "w") as handle:
             json.dump(out, handle, indent=1)
@@ -202,8 +210,25 @@ def report():
               "was arriving." %% span_frames)
         print("[profile] Every cookTime below would be the last value from "
               "whenever the stream stopped.")
-    print("[profile] %%d samples over %%d frames, seq moved: %%s"
-          %% (len(samples), span_frames, moved))
+    print("[profile] %%d samples over %%d frames at %%.1f fps, seq moved: %%s"
+          %% (len(samples), span_frames, fps, moved))
+    if fps < 45.0:
+        print("[profile] SLOW: %%.1f fps. Every duration below is wall-clock, so "
+              "they are all inflated." %% fps)
+        print("[profile] Check what else is using the machine before comparing "
+              "these to anything.")
+    # A DAT that COMPILED during the window reports the compile as its cookTime,
+    # with a cook count of one against everything else's hundred. Summing it into a
+    # group total is how this tool nearly reported a 3x win as a 74%% loss.
+    busiest = max((row["cooks"] for row in rows.values()), default=0)
+    oneshots = sorted((path for path, row in rows.items()
+                       if 0 < row["cooks"] <= max(1, busiest // 10)
+                       and row["ms_med"] > 0.05), key=lambda p: p or "")
+    if oneshots:
+        print("[profile] ONE-OFF, do not sum into a group: %%s"
+              %% ", ".join(oneshots[:5]))
+        print("[profile] These cooked once or twice while others cooked %%d times - "
+              "a DAT compiling looks exactly like this." %% busiest)
     ranked = sorted(rows.items(),
                     key=lambda kv: -max(kv[1]["ms_med"], kv[1]["inner_med"]))
     for path, row in ranked[:14]:

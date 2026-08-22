@@ -2503,3 +2503,53 @@ the write-off next to the rule it suspends, with the date and who decided it, an
 the gate resumes at the next milestone. A standard skipped seven times running is
 not a standard — so it either runs from here or it gets deleted, and the user chose
 for it to run.
+
+## The Script CHOP question, answered — and two traps that nearly reversed it
+
+*2026-08-21. Asked whether a chain like `temporal` could be collapsed into one Script
+CHOP for efficiency, and whether we would actually get any.*
+
+**Yes, 2.9x on that group. No, do not ship it.** 74 native operators at ~0.225 ms
+against 4 at ~0.078, alternating A/B on the same live stream so neither side carries
+the other's machine conditions. The saving is 0.147 ms: 6% of the COMP, 0.9% of a
+frame.
+
+Not shipping it is not timidity. `docs/ATTRIBUTES.md` gave three reasons memory
+belongs in native CHOPs and all three survived measurement, the third decisively: a
+`TemporalState` in operator storage is hidden Python state that a project reload
+treats unpredictably. And `temporal` is already freezable — the whole attribute layer
+off is 0.6031 ms — so a project that does not want presence and velocity already pays
+nothing. Trading 74 verified operators for 200 lines of Python to save 0.147 ms from
+the case that does want them is a bad deal.
+
+The prototype stays, frozen and attached to nothing. If the attribute layer ever
+grows enough for 0.147 to become 1.5, both the measurement and the code are here.
+
+### The part worth writing down
+
+I reported the wrong answer twice on the way, and both times the numbers were
+internally consistent.
+
+**First: "the prototype is SLOWER, 0.3605 against 0.2069."** My group rollup summed
+`proto_callbacks` at 0.2874 ms — a DAT reporting its own COMPILE, with **one** cook
+against everything else's eighty-nine. The Script CHOP itself was 0.0689 all along. A
+cook COUNT next to every duration is what caught it, and it is the same lesson as
+`cookTime` being a last-value gauge, one level up: the count is not decoration, it is
+what makes the duration mean anything.
+
+**Second: "the whole COMP is 12.8 ms and the cook rate has collapsed."** It had — to
+26 frames in 89. Not because of the prototype. A browser was using 60% of the machine,
+`cookTime` is wall-clock, and every figure in that run was inflated together, in
+proportion, with nothing anywhere to say so. I went looking for the bug in my own code
+first and found a plausible suspect — a `store()` on every cook — fixed it, remeasured,
+and got the same 12.8. Which is the only reason I looked outside.
+
+`tools/td_profile.py` now reports the ACHIEVED FRAME RATE and warns under 45 fps, and
+flags any operator whose cook count is a small fraction of the busiest as a one-off
+not to be summed. **A performance figure in this repo without an fps beside it should
+be treated as suspect**, including the ones I have already written down.
+
+The `store()` suspicion was wrong about the symptom and right about the practice, so
+the fix stayed: `absTime.stepSeconds` is how a Script CHOP should learn its own `dt`,
+and operator storage is not a per-cook scratchpad. `derive_chop` gets away with it
+only because it writes when the channel set changes, which is almost never.

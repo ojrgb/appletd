@@ -987,3 +987,70 @@ master switches off:
 `face/coords/lm_world` is 0.8241 of that, which is the landmark transform doing the
 only work asked of it. There was no hidden dependency to fix: `lm_world` composes
 through the bounding box from `filter`, not from `coords/world`.
+
+## Step 12 — one Script CHOP against 74 native operators — MEASURED, NOT SHIPPED
+
+The user's question: *can a processing chain like `temporal` be reorganised into a
+single Script CHOP for efficiency gains, and would we actually get them?*
+
+**Yes, about 2.9x on that group. No, do not ship it.** Both halves are measured.
+
+### The numbers
+
+Alternating A/B on the same live stream, `temporal_proto` and `temporal` swapped one
+at a time so neither run carries the other's machine conditions:
+
+| | native `temporal` | `temporal_proto` | whole COMP |
+|---|---|---|---|
+| pair 1 | 0.2305 ms | 0.0780 ms | 2.335 / 2.279 |
+| pair 2 | 0.2196 ms | 0.0775 ms | 2.252 / 2.279 |
+
+**74 operators at ~0.225 ms against 4 at ~0.078.** The saving is **0.147 ms** — 6% of
+the COMP and 0.9% of a 16.6 ms frame. The prototype's spread is also far tighter
+(0.0775–0.0780 against 0.2196–0.2305), which is what one operator versus 74 should
+look like.
+
+### Why it is not shipped
+
+The saving is real and small, and `docs/ATTRIBUTES.md` already gave three reasons
+memory belongs in native CHOPs. All three survived being measured, and the third
+decides it:
+
+1. **A Trail CHOP's window is a window whatever the cook rate does.** The prototype
+   counts its windows in COOKS (`ASSUMED_COOK_FPS`), which is the same thing only
+   while nothing cooks twice in a frame or skips one.
+2. **74 operators can be inspected** in the network with a hand in front of the
+   camera. A `TemporalState` in operator storage cannot.
+3. **Hidden Python state that a project reload treats unpredictably.** Every
+   recurrence lives in an object a save/load knows nothing about, so a reloaded
+   project resumes with whatever was there, or with nothing, and the difference is
+   invisible. That is the failure this project has spent the most effort avoiding.
+
+And the practical argument: `temporal` is already freezable. With the attribute layer
+off the whole COMP is **0.6031 ms** (DESIGN.md 2.14), so a project that does not want
+presence and velocity already pays nothing. Replacing 74 verified operators with 200
+lines of Python to save 0.147 ms from the case that does want them is the wrong
+trade.
+
+**The prototype stays, frozen**, as `visionhands/temporal.py` (pure, 16 tests) plus
+`tools/td_add_temporal_proto.py`. It is attached to nothing downstream. If the
+attribute layer ever grows enough that 0.147 ms becomes 1.5, the measurement and the
+code are both already here.
+
+### Two measurement traps this turned up, and both nearly reversed the verdict
+
+**A DAT that COMPILES during the window reports the compile as its `cookTime`.**
+`proto_callbacks` showed **0.2874 ms with 1 cook** while everything else cooked 89
+times, and summing it into the group total made the prototype look 74% SLOWER than
+the native version instead of 2.9x faster. `tools/td_profile.py` now flags any
+operator whose cook count is under a tenth of the busiest as "ONE-OFF, do not sum".
+
+**`cookTime` is wall-clock, so external load inflates everything.** A set of readings
+taken while a browser was using 60% of the machine put the whole COMP at **12.8 ms**
+and the achieved rate at 26 frames in 89 — and nothing in the numbers said so. The
+profiler now reports the ACHIEVED FRAME RATE and prints a warning below 45 fps. The
+clean runs above are all at 60.0.
+
+That second one is the more dangerous, because every figure in the run is
+self-consistently wrong. Any figure in this repo not accompanied by an fps should be
+treated as suspect.

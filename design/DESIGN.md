@@ -736,6 +736,21 @@ Against the running instance (099), not read anywhere:
   which is the number that decides whether a feature is affordable. It is why 696
   face-landmark coordinate channels through two operators each cost 1.2 ms, and why
   the answer was a toggle rather than a cleverer network.
+- **A DAT that COMPILES during a profiling window reports the compile as its
+  `cookTime`.** `proto_callbacks` read 0.2874 ms with ONE cook while every other
+  operator cooked 89 times. Summed into a group total it made a Script CHOP that is
+  2.9x faster than the CHOP chain it replaces look 74% slower. Any operator whose
+  cook COUNT is a small fraction of the busiest is a one-off, not a cost.
+- **`cookTime` is wall-clock, so anything else using the machine inflates every
+  figure at once - self-consistently, with nothing in the numbers to say so.** A run
+  taken while a browser was using 60% of the CPU put this COMP at 12.8 ms against a
+  real 2.26, and the achieved cook rate at 26 frames in 89. `tools/td_profile.py`
+  reports the ACHIEVED FRAME RATE for exactly this reason and warns below 45 fps. A
+  performance figure without an fps beside it is not a measurement.
+- **`absTime.stepSeconds` is how a Script CHOP learns its own `dt`.** Keeping a
+  clock in operator storage and diffing it works and is the wrong instinct: `store()`
+  is not a per-cook scratchpad, and `derive_chop` only gets away with storage because
+  it writes when the channel SET changes, which is almost never.
 - **`td.run`, not the bare `run`, and `op(path).module`, not `mod(path)`.** The MCP
   bridge's exec context has neither `run` nor `mod` in it - "name 'run' is not
   defined" - while a Text DAT's does. A builder that has to work both ways uses the
