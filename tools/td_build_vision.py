@@ -74,6 +74,16 @@ import signal
 import subprocess
 
 SIDECAR_PYTHON = %(python)r
+# Where the sidecar's stdout and stderr go. Everything it prints about itself - which
+# streams actually started, which model it compiled, why a request refused to build -
+# used to go to /dev/null, which made "why did depth not start" a question nobody could
+# answer. See `start()`.
+SIDECAR_LOG = "/tmp/visionhands_sidecar.log"
+
+# Interpolated from the module-level REQUEST_TOGGLES below, NOT written out here.
+# One definition, so the launcher's loop and the builder's check cannot disagree -
+# which is the whole bug this table exists to prevent.
+REQUEST_TOGGLES = %(request_toggles)r
 REPO_ROOT = %(repo)r
 PORT = %(port)d
 MATCH = "visionhands.sidecar"
@@ -176,15 +186,15 @@ def start():
     # command line; the sidecar validates the list and refuses an empty one.
     # A stream that is OFF still has all of its channels in TouchDesigner, as
     # zeros - what the toggle saves is the inference (DESIGN.md 6.4).
-    streams = []
-    for name, par_name in (("hands", "Streamhands"), ("pose", "Streampose"),
-                           ("face", "Streamface"),
-                           # SEGMENT is a request, not a stream: it has no port and
-                           # publishes its mask to the shared buffer instead. Same
-                           # launch-flag mechanism, different transport.
-                           ("segment", "Streamsegment")):
-        if comp is None or bool(getattr(comp.par, par_name).eval()):
-            streams.append(name)
+    # ONE TABLE, and it is the only place a request's name meets its toggle. Built
+    # from REQUEST_TOGGLES rather than written out here, because writing it out here is
+    # exactly how `depth` came to be missing: the parameter was created, the extra
+    # command-line arguments were added, the report line was added - and this loop was
+    # not, so `--streams hands` went out while the panel said depth was on. The argv
+    # block below is guarded by `"depth" in streams`, so it never fired and nothing
+    # complained. Only `sc_depth` reading 0 said anything, and it said it correctly.
+    streams = [name for name, par_name in REQUEST_TOGGLES
+               if comp is None or bool(getattr(comp.par, par_name).eval())]
     if not streams:
         # Checked here rather than left to the sidecar, so the message lands in
         # the Textport next to the button that was pressed. A sidecar with no
@@ -212,14 +222,42 @@ def start():
         pins = str(comp.par.Depthpins.eval()).strip()
         if pins:
             argv += ["--depth-pins", pins]
+    # A LOG FILE, not /dev/null. Changed 2026-08-22 after "the depth map did not
+    # update and I cannot tell you why" - which was unanswerable, because everything
+    # the sidecar said about itself was being discarded. A separate process whose
+    # output goes nowhere can only ever be diagnosed by guessing.
+    #
+    # Truncated per launch rather than appended: the question is always "what happened
+    # THIS time", and a growing file makes somebody scroll past four old sessions to
+    # find out. The previous run is kept as .prev, which is the one other thing
+    # anybody wants - "it worked a minute ago".
+    try:
+        if os.path.exists(SIDECAR_LOG):
+            os.replace(SIDECAR_LOG, SIDECAR_LOG + ".prev")
+        log = open(SIDECAR_LOG, "w")
+    except OSError as problem:
+        # Not fatal: a sidecar with no log is worse than one with a log, but far
+        # better than no sidecar. Say so and carry on.
+        print("[visionhands] could not open %%s (%%s) - starting without a log"
+              %% (SIDECAR_LOG, problem))
+        log = subprocess.DEVNULL
     process = subprocess.Popen(
         argv, cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Line-buffered on the child's side already (`flush=True` at every print in
+        # sidecar.py), so the log is readable while it runs rather than only after.
+        stdout=log, stderr=subprocess.STDOUT)
+    if log is not subprocess.DEVNULL:
+        # Closed HERE, in the parent: the child has its own descriptor now, and a
+        # handle left open in TouchDesigner would keep the file alive across every
+        # restart for the life of the application.
+        log.close()
     print("[visionhands] capture started, pid %%d, camera=%%s, slots=%%s, "
           "streams=%%s"
           %% (process.pid, camera or "(default)",
               "chirality (h0=right, h1=left)" if assign else "off",
               ",".join(streams)))
+    print("[visionhands]   log: %%s   (previous run: %%s.prev)"
+          %% (SIDECAR_LOG, SIDECAR_LOG))
     # The ports each stream lands on, printed because "which port is pose on" is
     # the first question when the pose COMP shows no channels.
     print("[visionhands]   hands -> %%d   pose -> %%d   face -> %%d  (base + 0/1/2)"
@@ -384,6 +422,19 @@ COMP_NAME = "vision"
 # The Global OP Shortcut every nested expression uses. Capitalised because that is
 # how `op.Vision` reads at a call site, and it must not collide with anything else
 # in the project - TD shortcuts are global.
+# Every Vision request the sidecar can run, and the toggle that asks for it, in the
+# order they run on the capture queue - cheapest and most-read first, `depth` last
+# because it is 23 ms against hands' 3.41.
+#
+# ONE table, interpolated into the launcher DAT and checked against the COMP's actual
+# parameters in main(). It exists because a request was once added to the parameters,
+# the command-line extras and the report - but not to the loop that turns toggles into
+# `--streams`, so the sidecar was launched without it while the panel said it was on.
+# Nothing complained; only `sc_depth` reading 0 said anything.
+REQUEST_TOGGLES = (("hands", "Streamhands"), ("pose", "Streampose"),
+                   ("face", "Streamface"), ("segment", "Streamsegment"),
+                   ("depth", "Streamdepth"))
+
 OP_SHORTCUT = "Vision"
 
 # Master-level operators this script must NOT destroy, and who does own each one.
@@ -847,6 +898,27 @@ def main():
             continue
         getattr(comp.par, name).val = value
 
+    # EVERY `Stream*` toggle must be in the launcher's table, or it is a control that
+    # cannot reach the process it claims to control. MEASURED as a real failure on
+    # 2026-08-22: `Streamdepth` existed, was on, had its own command-line arguments and
+    # its own report line - and was absent from the one loop that turns toggles into
+    # `--streams`, so the sidecar was launched with `hands` while the panel said
+    # otherwise. The argv extras were guarded by `"depth" in streams`, so they never
+    # ran and nothing complained.
+    #
+    # Checked HERE, in the builder, because this is the only place that can see both
+    # the parameters and the table. It is the cheapest possible guard against adding a
+    # request to two places out of three.
+    launcher_toggles = {par_name for _name, par_name in REQUEST_TOGGLES}
+    orphan_toggles = sorted(
+        par.name for par in comp.customPars
+        if par.name.startswith("Stream") and par.name not in launcher_toggles)
+    if orphan_toggles:
+        raise RuntimeError(
+            "these Stream* toggles are not in REQUEST_TOGGLES, so pressing Active "
+            "would launch the sidecar WITHOUT them while the panel says they are on: "
+            "%s" % ", ".join(orphan_toggles))
+
     if retired_pars:
         # Reported because it is destructive and idempotent: the FIRST run after the
         # page reorganisation removes these, and every run after it finds nothing.
@@ -1039,7 +1111,7 @@ def main():
     control.nodeX, control.nodeY = master_xy("sidecar_control")
     control.text = SIDECAR_CONTROL_SOURCE % {
         "python": SIDECAR_PYTHON, "repo": REPO_ROOT, "port": OSC_PORT,
-        "comp": comp.path}
+        "comp": comp.path, "request_toggles": REQUEST_TOGGLES}
 
     callbacks = comp.create(td.parameterexecuteDAT, "sidecar_callbacks")
     callbacks.nodeX, callbacks.nodeY = master_xy("sidecar_callbacks")

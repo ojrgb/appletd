@@ -3150,3 +3150,65 @@ The live camera. Everything is fixture replay plus a writer in a second process;
 TouchDesigner side was verified against real model output flowing through the real
 buffer at 1280x720, and the readouts populate correctly - but no sidecar has run depth
 off the camera yet, because the camera needs asking for.
+
+## `--streams hands`, and the two lines that were missing
+
+The user turned `Streamdepth` on, pressed Active, and got no depth. The answer was in
+one line of a log that did not exist yet.
+
+### First, the log
+
+`start()` launched the sidecar with `stdout=DEVNULL, stderr=DEVNULL`. Everything a
+separate process says about itself - which streams it started, which model it compiled,
+why a request refused to build - was being thrown away. So "why did depth not start"
+was a question nobody could answer, including me, and I had shipped it that way.
+
+`/tmp/visionhands_sidecar.log` now, truncated per launch with the previous run kept as
+`.prev`. Its first line is the streams it actually started. With that in place the
+diagnosis took one `cat`:
+
+    visionhands sidecar -> 127.0.0.1 at 60 Hz | streams: hands
+
+### Then, the bug
+
+`--streams hands`. Not `hands,depth`. And the panel said depth was on.
+
+I had added `Streamdepth` to the parameter table, added its `--depth-path` and
+`--depth-pins` arguments, and added its line to the startup report - and never added
+`("depth", "Streamdepth")` to the one loop that turns toggles into `--streams`. Three
+places out of four.
+
+The reason it was silent is the part worth keeping: the argv block I *did* write is
+guarded by `if "depth" in streams`, so it never ran. A missing entry in the list made
+the code that depended on it quietly skip itself. Nothing errored, nothing warned, and
+the panel showed a toggle that was on.
+
+**The only thing that said anything was `sc_depth` reading 0** - the status channel
+whose entire purpose is to report what the sidecar ACTUALLY started rather than what was
+asked for. It was right, it was there from the moment I added the request, and I did not
+read it until the third diagnostic step. That channel exists because of a note in
+DESIGN.md 6.4 saying a panel showing a stream on after somebody flipped it without
+restarting "is simply lying". It earned its place today.
+
+### What I changed so it cannot recur
+
+One table, `REQUEST_TOGGLES`, defined once in the builder and interpolated into the
+launcher DAT - so the loop and the argv extras and the report all read the same thing.
+Plus a check in the builder that RAISES if any `Stream*` parameter on the COMP is absent
+from that table:
+
+    these Stream* toggles are not in REQUEST_TOGGLES, so pressing Active would launch
+    the sidecar WITHOUT them while the panel says they are on
+
+That is the cheapest possible guard against adding a request to some of its places, and
+it is the second time this week the fix has been "one table instead of three lists".
+
+### Verified live, on the camera
+
+`--streams hands,depth`, `sc_depth = 1`, and the depth map arriving in `outdepth` at
+1280x720 from the actual camera. One number worth recording from it: the camera holds
+30 fps but `age_ms` sits at **~35 ms** rather than the ~6 ms it reads without depth.
+That is the 23 ms of inference showing up as latency, exactly as DESIGN.md 2.22 said it
+would - the frames keep coming, they are just older. It is now in the DEPTH.md
+troubleshooting table next to "hands got choppy", because that is what somebody will
+notice first.

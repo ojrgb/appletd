@@ -203,7 +203,13 @@ stops poisoning the whole frame.
 | `buffer version N, this reader speaks M` | a stale buffer from an older build. The message names the file — delete it |
 | the map is there but `Depthfitpins` is 0 | no pins set, or they were refused. The sidecar prints why at startup |
 | `Depthfitresidual` is 0.000 and looks perfect | check `Depthfitchecked`. With two pins it is meaningless |
-| depth arrives but hands got choppy | expected. 23 ms of inference on a 33 ms frame interval — see §2 |
+| depth arrives but hands got choppy | expected. 23 ms of inference on a 33 ms frame interval — see §2. MEASURED live: the camera holds 30 fps but every frame arrives ~35 ms old |
+| `sc_depth` reads 0 while `Streamdepth` is on | the sidecar was launched without it. Read `/tmp/visionhands_sidecar.log` — its first line lists the streams it actually started |
+
+**The sidecar writes a log**, and it is the first place to look for anything on this
+page: `/tmp/visionhands_sidecar.log`, truncated per launch with the previous run kept
+as `.prev`. Its first line is the streams it actually started, which is the difference
+between "the toggle did not reach the process" and "the model failed to load".
 
 Ref: `design/DESIGN.md` 2.22 (the measurements), `visionhands/depth.py` (the model),
 `visionhands/pins.py` (the solve and its limits), `tools/depth_probe.py` (the check).
