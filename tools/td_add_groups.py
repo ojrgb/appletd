@@ -230,14 +230,53 @@ MERGE_CHOP = "merge_streams"
 # `HOUSEKEEPING` goes to a Null CHOP inside the component instead - `housekeeping`,
 # next to the output - so it is one click away rather than gone.
 #
-# WHAT IS DELIBERATELY NOT HERE: `*_conf_median`. "All conf channels" would take it,
-# but it is not a per-joint confidence - it is the SUMMARY, and DESIGN.md 6.2 tells
-# people to gate on it ("gate on `h<i>_conf_median`, never on `found` alone"). Taking
-# the channel the documentation recommends off the output would be a trap. The 80
-# per-joint `*_conf` channels do go.
+# `*_conf_median` USED TO BE EXEMPT, on the grounds that DESIGN.md 6.2 tells people
+# to "gate on `h<i>_conf_median`, never on `found` alone", so taking the channel the
+# documentation recommends off the output would be a trap. That reasoning stands and
+# is why the hand scalars go to `housekeeping` rather than being dropped: the channel
+# is still there to gate on, one click inside the COMP. It is off the OUTPUT because
+# a beginner reading the list should not meet three quality scalars per hand before
+# they meet a fingertip. The 80 per-joint `*_conf` channels are dropped outright -
+# those nobody inspects.
 PER_JOINT_CONF = ("*_conf",)
 HOUSEKEEPING = ("sc_*", "seq", "*_seq", "age_ms", "*_age_ms")
-NEVER_ON_OUTPUT = PER_JOINT_CONF + HOUSEKEEPING
+
+# Per-hand identity and quality scalars. Off the OUTPUT 2026-08-23 by request, and
+# routed to `housekeeping` rather than dropped, which is the point: DESIGN.md 6.2
+# tells people to "gate on `h<i>_conf_median`, never on `found` alone", so the
+# channel that documentation names has to stay reachable. One click inside the COMP
+# instead of a line in the output list.
+#
+# `h?_` and not `*_`: this is a HANDS decision. Pose and face keep their own score.
+HAND_SCALARS = ("h?_score", "h?_conf_median", "h?_chirality")
+
+NEVER_ON_OUTPUT = PER_JOINT_CONF + HOUSEKEEPING + HAND_SCALARS
+# What the `housekeeping` Null CHOP carries: everything the output does not, except
+# the per-joint confidences - 80 channels of them, which is a list nobody inspects.
+INSPECTABLE = HOUSEKEEPING + HAND_SCALARS
+
+# Two OUTPUT-ONLY toggles, asked for 2026-08-23. Neither gates any cooking, and that
+# is forced rather than lazy: the fifteen non-tip joints feed every curl, spread and
+# angle `derive()` computes, and the bounding boxes feed `hands_overlap`. The work
+# happens either way, so these remove second copies from the output - which is what
+# somebody reading the channel list for the first time actually wants.
+FINGERTIPS_TOGGLE = "Fingertipsonly"
+HANDBOX_TOGGLE = "Handbox"
+
+# The fifteen joints that are neither a fingertip nor the wrist. A LITERAL list,
+# because everything between the TRIM SCOPE markers is copied verbatim into a DAT
+# and may import nothing but the standard library. `_check_joint_split()` below the
+# markers holds it against `appletd.types.JOINT_NAMES`, so it cannot drift.
+#
+# THE WRIST IS KEPT. It is not an mcp, pip or dip, it is the hand's anchor, and
+# `hands_angle` is measured from it - so "fingertips only" leaves six points per
+# hand rather than five.
+NON_TIP_JOINTS = ("thumb_cmc", "thumb_mp", "thumb_ip",
+                  "index_mcp", "index_pip", "index_dip",
+                  "middle_mcp", "middle_pip", "middle_dip",
+                  "ring_mcp", "ring_pip", "ring_dip",
+                  "little_mcp", "little_pip", "little_dip")
+HANDBOX_CHANNELS = ("h?_bbox_*", "h?_size")
 
 
 def _trim_keep(comp, wanted):
@@ -286,6 +325,19 @@ def _trim_keep(comp, wanted):
     # `*_conf_median` survives `*_conf` because fnmatch anchors at both ends.
     drop.update(name for name in names
                 if any(fnmatchcase(name, pattern) for pattern in NEVER_ON_OUTPUT))
+    # The two output-only toggles, read off the COMP the way `_apply_trim` reads
+    # `Deleteempty`: a parameter that is not there yet means "leave it alone"
+    # rather than an exception on a half-built network.
+    optional = []
+    tips = getattr(comp.par, FINGERTIPS_TOGGLE, None)
+    if tips is not None and tips.eval():
+        optional += ["h?_%s_*" % joint for joint in NON_TIP_JOINTS]
+    box = getattr(comp.par, HANDBOX_TOGGLE, None)
+    if box is not None and not box.eval():
+        optional += list(HANDBOX_CHANNELS)
+    if optional:
+        drop.update(name for name in names
+                    if any(fnmatchcase(name, pattern) for pattern in optional))
     if not drop.intersection(names):
         # Nothing to drop: BYPASS rather than name all 1,861 channels. An empty list
         # is free for a Delete CHOP but not for a Select.
@@ -303,8 +355,30 @@ def _housekeeping_names(comp):
     if merged is None:
         return []
     return [chan.name for chan in merged.chans()
-            if any(fnmatchcase(chan.name, pattern) for pattern in HOUSEKEEPING)]
+            if any(fnmatchcase(chan.name, pattern) for pattern in INSPECTABLE)]
 # <<< TRIM SCOPE
+
+
+def _check_joint_split():
+    """`NON_TIP_JOINTS` must be exactly the joints that are neither a tip nor the
+    wrist.
+
+    Why this exists: that list is a LITERAL because it lives inside the TRIM SCOPE
+    markers, and everything in there is copied verbatim into a generated DAT that
+    may import nothing but the standard library. A literal copy of a contract is a
+    second source of truth, and the failure mode is silent - a joint added to
+    `types.JOINT_NAMES` would simply never be trimmed, and `Fingertipsonly` would
+    quietly leave it on the output. So the contract is checked here, at build, where
+    it can raise.
+    """
+    from appletd.types import JOINT_NAMES
+    expected = tuple(name for name in JOINT_NAMES
+                     if name != "wrist" and not name.endswith("_tip"))
+    if tuple(NON_TIP_JOINTS) != expected:
+        raise RuntimeError(
+            "NON_TIP_JOINTS has drifted from types.JOINT_NAMES.\n"
+            "  literal:  %s\n  contract: %s"
+            % (" ".join(NON_TIP_JOINTS), " ".join(expected)))
 
 
 def _trim_source():
@@ -610,6 +684,11 @@ def main():
         del sys.modules[stale]
     from appletd.derive import ALL_GROUPS
 
+    # BEFORE anything is built. A drifted joint list would silently leave a joint on
+    # the output that `Fingertipsonly` claims to remove, and there is no point
+    # building a network around a trim list that is already wrong.
+    _check_joint_split()
+
     master = op(MASTER_PATH)
     comp = op(COMP_PATH)
     if master is None or comp is None:
@@ -668,6 +747,10 @@ def main():
         # `Deleteempty` gates nothing's cooking - it bypasses the trim - but it goes
         # through the same callback, so it is in the same list.
         | {TRIM_TOGGLE}
+        # The two output-only toggles. Same reason as the attribute toggles below:
+        # the trim is a Select with a KEEP list, so nothing rewriting the list means
+        # a toggle that appears to do nothing at all.
+        | {FINGERTIPS_TOGGLE, HANDBOX_TOGGLE}
         # And EVERY attribute toggle, not just the ones that gate cooking. The trim
         # is a Select with a keep list, so it fails CLOSED: a channel the list does
         # not name is gone. `Descriptor`, `Depth` and `Tilt` gate no group's cooking,

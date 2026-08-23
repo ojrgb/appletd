@@ -3389,3 +3389,65 @@ extra 8 being the derived positions in world space. And `hands/derive_chop` carr
 a **cook dependency loop warning**. It produces correct channels, no operator in
 the COMP is in error, and whether that warning predates today is not known - it was
 not checked before the rebuild, which is the honest answer and also the lesson.
+
+---
+
+## 2026-08-23 — three output toggles, and why two of them cannot gate cooking
+
+Asked for: a `Finger Tips Only` toggle, `h?_score`/`h?_conf_median`/`h?_chirality`
+off the output, and `h?_bbox_*`/`h?_size` behind a toggle of their own. All three go
+through the one Select in front of `out1`.
+
+    baseline                        216 channels
+    Finger Tips Only on              96
+    Hand Box and Size off           200
+    (the scalars, unconditional)    222 -> 216
+
+### Neither new toggle gates any cooking, and that is forced
+
+The obvious implementation is to gate the computation as well as the output. It is
+not available. The fifteen non-tip joints feed every curl, spread and angle
+`derive()` computes, and the bounding boxes feed `hands_overlap` at derive.py:359.
+Gating either would break a two-hand attribute to tidy a channel list. So both are
+output-only, and the comment says so, because "why didn't you gate this properly"
+is the first thing a reader will think.
+
+### The scalars went to `housekeeping` rather than being dropped
+
+`td_add_groups.py` carried an explicit exemption for `*_conf_median`: it is the
+SUMMARY confidence, DESIGN.md 6.2 tells people to gate on it rather than on `found`,
+and taking the channel the documentation recommends off the output would be a trap.
+
+That reasoning is still right, so the fix is not to overrule it - it is to keep the
+channel reachable. All six hand scalars land in the `housekeeping` Null beside
+`out1`, exactly as `seq` and `age_ms` did. The advice in 6.2 does not change; only
+where you read the channel. Both the comment and ATTRIBUTES.md were rewritten,
+because a comment asserting the opposite of the code is worse than no comment.
+
+### A literal list, and the check that stops it drifting
+
+`NON_TIP_JOINTS` has to be a literal: it lives inside the TRIM SCOPE markers, and
+everything in there is copied verbatim into a generated DAT that may import nothing
+but the standard library. A literal copy of a contract is a second source of truth,
+and this one fails silently - a joint added to `types.JOINT_NAMES` would simply
+never be trimmed, and `Finger Tips Only` would quietly leave it on the output.
+
+So `_check_joint_split()` sits below the markers, imports the real contract, and
+raises before anything is built. Same shape as `spaces.py`'s import-time check.
+
+**The wrist is kept.** It is not an mcp, pip or dip, it is the hand's anchor, and
+`hands_angle` is measured from it - so "fingertips only" is six points per hand.
+
+### Both defaults preserve today's output
+
+`Fingertipsonly` off, `Handbox` on. A new toggle that changes what an existing
+project receives is a silent breakage, and the beginner-facing short list is one
+flipped default away when that is wanted deliberately rather than as a side effect.
+
+### And the deferred callback caught me out, again
+
+Setting `Fingertipsonly` and reading `out1` in the same call showed no change at
+all, and it looked like the toggle drove nothing. Parameter Execute callbacks are
+deferred to end of frame - the same fact that reset `Verbosity` in August - so the
+trim list had not been rewritten yet. Read on the next call it was 96 channels.
+Worth writing down because the symptom is identical to a toggle that is not wired.

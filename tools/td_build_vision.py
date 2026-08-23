@@ -757,7 +757,7 @@ VISION_PAGE_ORDER = (
     "Streamhands", "Streampose", "Streamface", "Streamsegment", "Segquality",
     "Streamdepth", "Slotassign",
     "Resw", "Resh", "Renderw", "Renderh", "Orthowidth",
-    "Screenspaceonly", "Deleteempty",
+    "Screenspaceonly", "Deleteempty", "Fingertipsonly", "Handbox",
 )
 
 # Defaults for the aspect and pixel conversions. MEASURED: the sidecar requests and
@@ -1081,6 +1081,21 @@ def main():
         "Deleteempty", label="Delete Empty Channels")[0]
     par_empty.default = True
 
+    # Two OUTPUT-ONLY toggles, asked for 2026-08-23. `tools/td_add_groups.py` owns
+    # what they mean; this only creates them, because every control on this page is
+    # created here so the page order is decided in one place.
+    #
+    # BOTH DEFAULTS PRESERVE TODAY'S OUTPUT - `Fingertipsonly` off, `Handbox` on. A
+    # new toggle that changes what an existing project receives is a silent breakage,
+    # and the beginner-facing short list is one flipped default away when it is
+    # wanted deliberately.
+    par_tips = page.appendToggle(
+        "Fingertipsonly", label="Finger Tips Only")[0]
+    par_tips.default = False
+    par_box = page.appendToggle(
+        "Handbox", label="Hand Box and Size")[0]
+    par_box.default = True
+
     # Whether the builders may move nodes. `appletd.td_layout.placement` has the
     # rule and what it cannot protect - the short version is that it holds the group
     # COMPs, the stream shell and the OSC In CHOPs, and cannot hold operators INSIDE
@@ -1151,6 +1166,7 @@ def main():
              ("Renderw", par_rw), ("Renderh", par_rh),
              ("Orthowidth", par_ortho), ("Screenspaceonly", par_screen),
              ("Keeplayout", par_keep), ("Deleteempty", par_empty),
+             ("Fingertipsonly", par_tips), ("Handbox", par_box),
              ("Segquality", par_quality), ("Maskbuffer", par_mask),
              ("Depthbuffer", par_depthbuf),
              ("Oscport", par_port),

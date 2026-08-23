@@ -525,19 +525,41 @@ channels leave the list. In the shipping configuration that is 258 channels on t
 output rather than 1,863. `Delete Empty Channels` on the Vision page turns the trim
 off if you would rather see everything, frozen values included.
 
-**Four families never reach the output at all**, whatever the toggles say:
+**Five families never reach the output at all**, whatever the toggles say:
 
 | never on the output | where it went | why |
 |---|---|---|
 | the 80 per-joint `*_conf` | nowhere — use `h?_conf_median` | one confidence per joint is 80 channels nobody reads one at a time |
+| `h?_score` `h?_conf_median` `h?_chirality` | the `housekeeping` Null | quality and identity scalars; you should not meet three of them per hand before you meet a fingertip |
 | `sc_uptime_s` `sc_hands` `sc_pose` `sc_face` | the `housekeeping` Null | the capture process's own state, not the hands' |
 | `seq` `pose_seq` `face_seq` | the `housekeeping` Null | frame counters |
 | `age_ms` `pose_age_ms` `face_age_ms` | the `housekeeping` Null | how stale the last datagram is |
 
 `housekeeping` is a Null CHOP inside the component, beside `out1`. Open the COMP and
-look at it — 10 channels, and it costs 0.0037 ms because a Null only cooks when
-something is watching. `h0_conf_median` and `h1_conf_median` DO stay on the output:
-they are the summary confidence, and they are what to gate on (`DESIGN.md` 6.2).
+look at it, and it costs 0.0037 ms because a Null only cooks when something is
+watching.
+
+**`h?_conf_median` moved to `housekeeping` on 2026-08-23 and is still what to gate
+on** (`DESIGN.md` 6.2). That is exactly why it was routed there rather than dropped:
+the advice has not changed, only where you read the channel. Reference it as
+`op('/project1/vision/housekeeping')['h0_conf_median']`, or switch
+`Delete Empty Channels` off to get everything back on `out1`.
+
+#### Two toggles that only change the output
+
+Neither gates any cooking, and that is forced rather than lazy — the fifteen non-tip
+joints feed every curl, spread and angle `derive()` computes, and the bounding boxes
+feed `hands_overlap`. The work happens either way; these remove second copies from
+the list you read.
+
+| toggle | default | does |
+|---|---|---|
+| `Finger Tips Only` | **off** | drops the 15 non-tip joints, leaving `wrist` and the five `*_tip`s — six points per hand instead of 21 |
+| `Hand Box and Size` | **on** | off drops `h?_bbox_*` and `h?_size` |
+
+Both defaults leave the output exactly as it was before they existed. `Finger Tips
+Only` keeps the **wrist**: it is not an mcp, pip or dip, it is the hand's anchor, and
+`hands_angle` is measured from it.
 
 Four toggles are the exception, and they change nothing at all: `Landmarks`,
 `Triggers`, `Motion` and `Events`. Their channels come out of a group that is still
