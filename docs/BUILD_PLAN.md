@@ -1611,34 +1611,92 @@ This is not only a packaging convenience. Fifteen files currently hardcode one
 developer's home directory, so **the project cannot be opened by anybody else at all**
 right now. Step 21 is the step that makes it shippable.
 
-### 21.1 The finding that decides the shape: TouchDesigner's own Python
+### 21.1 REVISED 2026-08-23 — TouchDesigner's own Python cannot run the sidecar
 
-Checked before planning, because it changes what Install has to do:
+**The original 21.1 was wrong, and this is what it said:** TD bundles Python 3.11.15
+with pip and numpy, all nine pyobjc wheels resolve as prebuilt cp311, therefore the
+sidecar can run on TD's interpreter and there is no venv to create. It was written
+with a `pip install --dry-run` as evidence and a note that "resolving is not
+importing" — which is the note that turned out to matter.
 
-    TouchDesigner.app/Contents/Frameworks/Python.framework/Versions/3.11
-        python3.11      3.11.15  (Derivative build, `heads/3.11-Derivative-dirty`)
-        pip3            24.2
-        numpy           2.1.2    already there
-        pyobjc          ABSENT   - the only thing missing
+**Installing works. Importing does not.**
 
-`requirements.txt` already says the cp311 ABI match with TD is deliberate and is the
-reason this project is Python rather than Objective-C++. That match is now worth more
-than an argument: **the sidecar can run on TD's own interpreter, so there is no venv to
-create.** A `pip install --dry-run` against TD's pip resolves all nine packages to
-prebuilt `cp311-macosx_10_9_universal2` wheels - pyobjc-core included - so no compiler is
-needed either.
+    <TD>/bin/python3.11 -m pip install --target <dir> -r requirements.txt
+        -> exit 0, 33 MB, nine packages
 
-    launch:  <TD>/bin/python3.11  -m appletd.sidecar
-    env:     PYTHONPATH=<install>/site-packages:<install>
+    PYTHONPATH=<dir> <TD>/bin/python3.11 -c "import Vision"
+        -> ImportError: dlopen(objc/_objc.cpython-311-darwin.so):
+           code signature not valid for use in process:
+           mapping process and mapped file (non-platform) have
+           different Team IDs
 
-**Never install into TD's own `site-packages`.** The app is code-signed with the hardened
-runtime, it lives in `/Applications`, and anything put inside it is destroyed by the next
-TouchDesigner update. `pip install --target <install>/site-packages` keeps our packages
-ours, and the same interpreter guarantees the ABI by construction rather than by a pin
-somebody has to remember.
+**Why**, and the distinction is the whole thing:
 
-This collapses the install story from *clone, venv, pip, fetch, point two parameters* to
-*press Install*. It is the single largest reason to do this step at all.
+| | flags | Team ID | loads a third-party `.so` |
+|---|---|---|---|
+| `TouchDesigner.app` | has `com.apple.security.cs.disable-library-validation` | Derivative | **yes** |
+| `<TD>/bin/python3.11` | `0x10000(runtime)`, **no entitlements** | Z7MPGSMXH2 | **no** |
+| `~/.venvs/appletd/bin/python` | `0x20002(adhoc,linker-signed)` | not set | yes |
+
+The entitlement that lets pyobjc load is on **the app**, not on the interpreter
+inside it. Run as a standalone subprocess, that interpreter is an ordinary
+hardened-runtime binary and macOS library validation refuses to map a library signed
+by anyone else into it.
+
+Nothing about this is fixable from our side. Signing the wheels needs a developer
+certificate the user does not have; stripping the signature from a copy of
+Derivative's binary is not something to ship to strangers.
+
+**So the venv stays.** The install story keeps a Python step, and the Install button
+cannot conjure an interpreter out of nothing.
+
+### 21.1b The part that got BETTER, and it was hiding behind the same mistake
+
+`requirements.txt` says the cp311 pin exists because "these wheels are cp311 and
+TouchDesigner ships Python 3.11, so they load in TD's process". That reason belongs
+to the **retired in-process route**. The sidecar is a separate OS process — the whole
+point of DESIGN.md 2.8 — so its ABI has nothing to do with TouchDesigner's.
+
+Measured on this machine, with the cp311 wheels installed to a target directory:
+
+    /usr/bin/python3                     3.9   platform    cannot - wrong ABI
+    pyenv    3.11.9                      3.11  adhoc       CAN
+    homebrew 3.12                        3.12  adhoc       cannot - wrong ABI
+    ~/.venvs/appletd/bin/python          3.11  adhoc       CAN
+
+Both failures are ABI, not signing. `pip install` fetches wheels for whichever
+interpreter runs it, so **any** Python 3.11+ that is not hardened-with-library-
+validation will do — 3.12 and 3.13 included, as long as pip and the sidecar are the
+same interpreter. The pin is "what the benchmarks were taken against", not a
+constraint.
+
+### 21.1c The new step 0, and why it is a subprocess and not a check
+
+**Install must LOCATE AND VERIFY an interpreter before it does anything else**, and
+verification means running `import objc` in a subprocess of the candidate. Not a
+version check, not a path check, not a signature check:
+
+  * `pip install --dry-run` resolved all nine. Green.
+  * `pip install --target` installed all nine, exit 0. Green.
+  * the version was right. Green.
+  * `codesign -dv` showed hardened runtime, which I read and did not act on.
+
+Four signals agreed and the thing did not work. Only actually importing it in the
+process that will do the importing tells the truth — which is the same lesson as the
+`../render1` expression whose fallback equalled the answer, one layer down the stack.
+
+Candidate order for the probe, first that verifies wins:
+
+    1. `Sidecarpython`, if somebody has set it
+    2. ~/.venvs/appletd/bin/python          the documented convention
+    3. python3.11 / python3 on PATH
+    4. /opt/homebrew/bin/python3.*, ~/.pyenv/versions/*/bin/python3
+
+If a candidate runs but has no pyobjc: `pip install --target
+<install>/site-packages` with THAT interpreter, then verify again. If nothing
+verifies, the status text says which of the two things is missing — a Python, or
+pyobjc for it — and gives the one command that fixes it. **That is the honest
+ceiling: the button gets everything except the interpreter.**
 
 ### 21.2 Portable paths — one resolution point, and two roots on purpose
 
@@ -1694,6 +1752,9 @@ destroys. That is the intended behaviour, not a bug to fix later.
 
 ### 21.4 Install, in order, with the failure named at each step
 
+0. **locate and verify an interpreter** - see 21.1c. A subprocess `import objc`, not
+   a version or a signature check, because four other signals agreed while the thing
+   did not work. If none verifies, stop here and say which piece is missing.
 1. **write the source** - 19 files to `<install>/appletd/`, plus `INSTALLED.json`
    carrying the version stamp. Local, fast, cannot fail except on permissions.
 2. **`pip install --target <install>/site-packages -r` the pinned pyobjc** - needs
@@ -1748,19 +1809,24 @@ packages, re-download the model. `fetch_models.sh` currently skips anything alre
 present and big enough - that re-runnability is deliberate and is the repair path for an
 interrupted download - so it needs a `--force` flag rather than a change of default.
 
-### 21.7 Verify these first, because two of them can undo the design
+### 21.7 The three things to verify first — ALL ANSWERED 2026-08-23
 
-1. **A `cp311-macosx` wheel actually loading in TD's Derivative-patched CPython.** The
-   dry-run resolves; resolving is not importing. `import Vision` in a subprocess of
-   TD's own `python3.11` with `PYTHONPATH` set is the whole test, and it costs a minute.
-2. **Camera permission.** TCC attributes the prompt to the responsible process. Changing
-   the sidecar's interpreter from `~/.venvs/appletd/bin/python` to TD's bundled one
-   may reset the grant, or may attribute it to TouchDesigner - which would be *better*,
-   since TD is already trusted. Genuinely unknown, and needs the camera, so it needs
-   asking for.
-3. `pip install --target` alongside TD's populated `site-packages` - `--target` does no
-   conflict resolution, and pyobjc-core landing in the target while numpy stays in TD's
-   bundle is the arrangement to confirm, not assume.
+This section did its job. The first item killed the original 21.1 and the other two
+went with it, before any of the Install button existed.
+
+1. ~~A `cp311-macosx` wheel actually loading in TD's Derivative-patched CPython.~~
+   **IT DOES NOT.** `pip install --target` succeeds with exit 0 and 33 MB on disk;
+   the import then fails on library validation. See 21.1. One minute of checking
+   against a whole Install button built on a dead premise.
+2. ~~Camera permission when the sidecar's interpreter changes.~~ **MOOT** - the
+   interpreter is not changing. Worth remembering if an install ever moves somebody
+   between venvs, but off the critical path.
+3. ~~`pip install --target` alongside TD's populated `site-packages`.~~ **MOOT** for
+   the same reason. `--target` is still how pyobjc arrives, but against the user's
+   own interpreter, where it is unremarkable.
+
+**Nothing remains that can undo the design**, because the design is now the
+interpreter probe in 21.1c rather than an assumption about which interpreter.
 
 ### 21.8 A simplification this enables
 

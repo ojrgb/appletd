@@ -3809,3 +3809,57 @@ them. Untested: a `render1` created after the build - binding happens, firing on
 creation probably does not, and testing it means deleting the user's render. And a
 render whose size comes from a fraction or its input can move `.width` without
 `resolutionw` moving, which would not fire.
+
+---
+
+## 2026-08-23 — 21.7 earned its place: TD's own Python cannot run the sidecar
+
+The install design rested on one claim: TouchDesigner bundles Python 3.11 with pip, so
+the sidecar can run on it and there is no venv. Step 21.7 said verify that first
+because it could undo the design. It did.
+
+    <TD>/bin/python3.11 -m pip install --target <dir> -r requirements.txt
+        exit 0, 33 MB, nine packages
+
+    PYTHONPATH=<dir> <TD>/bin/python3.11 -c "import Vision"
+        ImportError: dlopen(objc/_objc.cpython-311-darwin.so): code signature
+        not valid for use in process: mapping process and mapped file
+        (non-platform) have different Team IDs
+
+**`TouchDesigner.app` carries `com.apple.security.cs.disable-library-validation`. The
+interpreter inside it does not.** The app can load unsigned libraries - which is why
+pyobjc works in TD's process at all, and why this project pinned cp311 in the first
+place - but the bundled `python3.11` is `flags=0x10000(runtime)` with no entitlements
+of its own, Team ID Z7MPGSMXH2. As a standalone subprocess it is an ordinary hardened
+binary, and macOS will not map a library signed by anybody else into it.
+
+Nothing to be done about it. Signing the wheels needs a certificate the user has not
+got; stripping the signature off a copy of Derivative's binary is not a thing to ship
+to strangers. **The venv stays**, and the Install button's ceiling is everything
+except the interpreter.
+
+### Four green signals and a broken thing
+
+`pip install --dry-run` resolved all nine. `pip install --target` installed all nine
+and exited 0. The version was correct. And `codesign -dv` printed
+`flags=0x10000(runtime)` in output I had already read, in this session, without acting
+on it.
+
+The only check that told the truth was running `import objc` **in a subprocess of the
+interpreter that would be doing the importing**. That is now step 0 of the install and
+the design's actual foundation: not an assumption about which interpreter, but a probe
+that proves one. Same shape as the `../render1` expression whose fallback happened to
+equal the right answer - the check agreed with the broken state.
+
+### And one thing got better while hiding behind the same mistake
+
+`requirements.txt` justified the cp311 pin as "these wheels are cp311 and TD ships
+3.11, so they load in TD's process". That reason belongs to the **retired in-process
+route**. The sidecar is a separate OS process - the entire point of DESIGN.md 2.8 - so
+its ABI has nothing to do with TouchDesigner's.
+
+Measured across four interpreters: both failures were ABI, not signing, and `pip`
+fetches wheels for whichever interpreter runs it. So **any** Python 3.11+ that is not
+hardened-with-library-validation will do, 3.12 and 3.13 included. The pin is now
+honestly labelled as "what the benchmarks were taken against" rather than a
+constraint, which widens what the Install button can accept.

@@ -48,11 +48,13 @@ The pyobjc wheels are pinned to **cp311** deliberately: TouchDesigner ships Pyth
 3.11, and a pyobjc that disagrees with its ABI is a crash inside TD rather than an
 `ImportError`.
 
-> **Status.** This runs on one machine today — fifteen files hardcode an absolute
-> path, so a fresh clone will not open yet. The fix is designed
-> ([`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) step 21) and turns out to be simpler
-> than expected: TouchDesigner bundles its own Python 3.11 with pip and numpy, so
-> the venv above may disappear in favour of one Install button.
+> **Status.** The paths are portable now, so a fresh clone should open — though
+> nobody has yet proved that on a second machine. An Install button to replace the
+> steps above is designed in [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) step 21. The
+> venv is **not** going away: TouchDesigner's bundled Python has the hardened runtime
+> without the entitlement that would let it load pyobjc, so it cannot run the sidecar
+> (21.1 has the measurement). The button can do everything except conjure an
+> interpreter.
 
 ---
 
