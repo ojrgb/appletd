@@ -429,7 +429,39 @@ actually *importing* in TD's Derivative-patched CPython (resolving is not import
 whether changing the sidecar's interpreter resets the camera TCC grant - that one needs
 the camera, so it needs asking for.
 
-### 6. Smaller, and each is self-contained
+### 6. `render1` added AFTER the COMP does not propagate — OPEN, reported 2026-08-23
+
+`Renderw`/`Renderh` are expressions:
+
+    op('render1').width if op('render1') is not None else 1280
+
+They track a **resize** correctly — verified against a 1920x1080 render. They do not
+track `render1` being **added to the network afterwards**: the values stay on the
+1280/720 fallback and the COMP never learns it needs to cook.
+
+**This is TouchDesigner behaving as designed.** A parameter expression takes its
+dependencies from what it actually touched while evaluating, and `op('render1')`
+returning `None` touches nothing — so there is no dependency on a future operator of
+that name, and nothing dirties the parameter when one appears.
+
+**Why it is not cosmetic.** `_ty` is scaled by the render's aspect, so every
+world-space y is wrong by the ratio between the real render and 1280x720. And those
+are often the same numbers, which is exactly the trap that hid the broken
+`../render1` expression for a whole session: a fallback equal to the truth is
+invisible.
+
+**No fix chosen.** The precedent is `reconcile_source_size()` in
+`tools/td_build_vision.py` — a value WRITTEN at known moments (sidecar start, build)
+rather than expressed, because an expression in the pixel path measured +0.27 ms. The
+likely answer is the same shape: reconcile the render size at those moments, plus a
+visible `Refresh` pulse, and/or have `Capturestate` report a stale render size the way
+it reports `Requires Restart`.
+
+**Do not reach for a per-frame poll.** Main-thread Python every frame is the thing
+this architecture exists to avoid, and it would be a lot of cook for a number that
+changes when somebody edits their network.
+
+### 7. Smaller, and each is self-contained
 
 - **`face/coords/lm_world` is 0.83–1.08 ms** and it is the most expensive thing in
   the COMP when it is on. I looked for a cheaper native shape and there is not one:
