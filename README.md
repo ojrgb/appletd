@@ -339,11 +339,13 @@ mistaken for first.
 - **No tracking IDs.** Vision returns hands in arbitrary order; slots are assigned
   by chirality then wrist proximity, which is not a tracker.
 - **Depth and `accurate` segmentation cannot both hold 30 fps.**
-- **Depth's metric claim is unverified against a real room.** The solve is tested
-  against synthetic frames whose true relationship is known; three tape-measured
-  points on stationary geometry is the check that needs a human with a tape measure.
-- **No live-camera timings are quoted anywhere.** They track what is in shot, and
-  the same configuration measured an 8× spread.
+- **Depth's metric numbers are checked against a real room** (2026-08-23) and the
+  solve is tested against synthetic frames whose true relationship is known. No
+  tape-measured figures are recorded in `docs/BENCHMARKS.md` yet, so treat the
+  accuracy as "it reads sensibly in a room somebody measured", not as a specification.
+- **No live-camera timings are quoted anywhere**, deliberately: they track what is in
+  shot, and the same configuration measured an 8× spread. Every stream including depth
+  has been run off a live camera; what is not quoted is a *timing* from one.
 
 ---
 

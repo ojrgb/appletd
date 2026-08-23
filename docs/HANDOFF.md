@@ -303,7 +303,7 @@ All measured here. 1–10 are older and still true; 11 onwards are this session'
 
 ## Next
 
-### 0. Depth's metric correction against a REAL room — the biggest open gap
+### 0. Depth's metric correction against a real room — CHECKED 2026-08-23, no figures recorded
 
 Everything about the pin solve is verified arithmetically and nothing about it is
 verified physically. On `fixtures/hand_clip.mp4` with the default pins, a stationary
