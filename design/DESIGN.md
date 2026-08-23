@@ -602,7 +602,7 @@ Against the running instance (099), not read anywhere:
   the COMP itself. This is the third distinct way `.inputs` has lied.
 - **A Global OP Shortcut resolves from a nested network**, VERIFIED: a COMP with
   `par.opshortcut = 'VisionProbe'` and a custom parameter was read by a Constant
-  CHOP two levels down through `op.VisionProbe.par.Testval`, returning 0.375 with no
+  CHOP two levels down through `op.AppletdProbe.par.Testval`, returning 0.375 with no
   error. That is what makes shared parameters possible without `parent(N)`, which
   has to be counted per operator and breaks the next time anything moves. The
   shortcut namespace is global to the project.
@@ -1155,7 +1155,7 @@ still raises, because that one really is a mistake.
 ### 2.20 The mask into TouchDesigner — the Script TOP, measured
 
 `tools/td_add_segmentation.py` builds `seg_mask` (Script TOP) → `seg_fit` (Fit TOP) →
-`outmask` (Out TOP) inside `/project1/vision`. VERIFIED live against a writer in
+`outmask` (Out TOP) inside `/project1/appletd`. VERIFIED live against a writer in
 another process publishing real Vision masks.
 
 | operator | what it does | cost |
@@ -1239,7 +1239,7 @@ family it was first seen in rather than under the behaviour.
 **The fix is a custom parameter whose value changes every frame**, which is what
 dirties an operator:
 
-    seg_mask.par.Tick.expr = "absTime.frame if op.Vision.par.Streamsegment else 0"
+    seg_mask.par.Tick.expr = "absTime.frame if op.Appletd.par.Streamsegment else 0"
 
 VERIFIED both ways. With `Streamsegment` on, `totalCooks` climbs — 151 to 640 in a
 few seconds, `null5` from 3 to 103, and the reader appears in the callback's cache.
@@ -1897,7 +1897,7 @@ Restructured 2026-08-21, after the third stream landed and made the shape obviou
 Collapsed to a single output 2026-08-22 (§2.15).
 
 ```
-/project1/vision                    every user parameter; Global OP Shortcut "Vision"
+/project1/appletd                    every user parameter; Global OP Shortcut "Vision"
   hands_osc  10000  ->  hands  --+                              505 channels
   pose_osc   10001  ->  pose   --+-> merge_streams -> trim_empty  -> out1
   face_osc   10002  ->  face   --+   1,863 chans     306 kept
@@ -1912,7 +1912,7 @@ into world and pixel space. Three Filter pages, three Ortho Widths to keep in st
 and three Start buttons for one process would all have been wrong. So every
 parameter lives on the master, once, and every stream reads it.
 
-**`op.Vision.par.X`, not `parent(2).par.X`.** A group is now two levels below the
+**`op.Appletd.par.X`, not `parent(2).par.X`.** A group is now two levels below the
 parameters instead of one, so a relative reference would have to be counted per
 operator and would break the next time anything moved. A Global OP Shortcut is
 depth-independent and survives a rename; VERIFIED to resolve from a nested network
@@ -1922,7 +1922,7 @@ which is the one cost.
 **Each stream is exposed on its own output connector**, because a TouchDesigner
 connection joins siblings and an operator outside the master cannot wire to a
 nested one. Expressions can still reach inside:
-`op('/project1/vision/hands')['h0_index_tip_tx']`.
+`op('/project1/appletd/hands')['h0_index_tip_tx']`.
 
 **One filter group per stream, not one shared operator.** Each stream arrives on its
 own port with its own time-slicing; merging them would make every stream cook when
