@@ -1698,6 +1698,45 @@ verifies, the status text says which of the two things is missing — a Python, 
 pyobjc for it — and gives the one command that fixes it. **That is the honest
 ceiling: the button gets everything except the interpreter.**
 
+### 21.1d THERE IS A WAY ROUND IT — a downloaded interpreter, measured 2026-08-23
+
+21.1 concluded "the venv stays". That was right about TD's Python and wrong about the
+conclusion. **Install does not need a system Python at all: it can download one.**
+
+Measured, in this order, end to end:
+
+    curl a relocatable CPython             26 MB, 1.3 s
+      astral-sh/python-build-standalone, cpython-3.11.16, aarch64-apple-darwin
+      install_only. Signed adhoc,linker-signed - the class that CAN load pyobjc
+    pip install -r requirements.txt        our exact pins, 12.2.2, all wheels
+    import Vision, CoreML, AVFoundation    all import
+    -m appletd.sidecar --list-cameras      four devices listed
+    the full test suite                    544 passed on that interpreter
+
+So the whole install is four downloads and no terminal:
+
+| step | size | note |
+|---|---|---|
+| relocatable CPython | 26 MB | unpacks to `<install>/python/` |
+| pyobjc + numpy | ~35 MB | `pip install` with THAT interpreter |
+| the 19 modules | 399 KB | written from the embedded DATs |
+| Depth Anything V2 | 47 MB | only if depth is wanted |
+
+**No Command Line Tools, no Homebrew, no system Python, no venv, no terminal.** The
+interpreter probe in 21.1c stays exactly as designed - it just gains a last resort
+that always works, instead of a status message telling somebody to go and install
+Python.
+
+**The trade to state plainly**: it is a third-party binary download, from
+`astral-sh/python-build-standalone` (what `uv` uses). That is a trust decision and it
+belongs in the README next to the model download, not buried. `Sidecarpython` still
+overrides it for anyone who would rather point at their own interpreter, and the probe
+prefers an existing working one over downloading anything.
+
+**Apple's `/usr/bin/python3` was tried first and does not work**: it is 3.9.6, and
+`pyobjc-core` has no cp39 wheel at any version we would want - pip falls back to the
+source tarball and needs a compiler. Not a route.
+
 ### 21.2 Portable paths — one resolution point, and two roots on purpose
 
 Today: fifteen files each carry `REPO_ROOT = "/Users/omer/..."` as a literal.

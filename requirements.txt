@@ -21,3 +21,23 @@ pyobjc-framework-libdispatch==12.2.2
 # extra, because a missing framework that only surfaces when somebody flips a toggle is
 # the worst place to discover a dependency. docs/DEPTH.md
 pyobjc-framework-CoreML==12.2.2
+
+# CoreMedia, imported DIRECTLY by engine.py. It arrives transitively as a
+# dependency of AVFoundation today, which is why nothing has broken - but a package
+# we import by name belongs in the file that says what we need, not in the set of
+# things that happen to come along.
+pyobjc-framework-CoreMedia==12.2.2
+
+# NUMPY IS A RUNTIME DEPENDENCY, and it was in requirements-dev.txt until
+# 2026-08-23. `pins.py`, `maskbuf.py` and `depth.py` all import it at module scope,
+# so `pip install -r requirements.txt` produced a sidecar that died on its first
+# import - MEASURED against a clean interpreter, which is the only way this shows up.
+#
+# It hid because the dev file's reasoning was right about the OLD design: TouchDesigner
+# bundles numpy, so an in-process Script CHOP always had it. The sidecar is a separate
+# process and has to be told.
+#
+# Pinned, not floored: BENCHMARKS.md's fp16 findings are numpy behaviour - "no fast
+# path for fp16 reductions", thirty times slower than float32 - and that is exactly
+# the kind of thing a minor release changes. 544 tests pass on 2.2.6.
+numpy==2.2.6

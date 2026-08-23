@@ -3863,3 +3863,59 @@ fetches wheels for whichever interpreter runs it. So **any** Python 3.11+ that i
 hardened-with-library-validation will do, 3.12 and 3.13 included. The pin is now
 honestly labelled as "what the benchmarks were taken against" rather than a
 constraint, which widens what the Install button can accept.
+
+---
+
+## 2026-08-23 — "no way around it?" — there was, and the search found a shipping bug
+
+The question was whether the user must open a terminal. The answer is no, and getting
+there needed three attempts.
+
+**Apple's `/usr/bin/python3` — no.** It is unhardened (`flags=0x0`), so the signing
+problem does not apply, and all 27 modules compile on it. But it is 3.9.6, and
+`pyobjc-core` has no cp39 wheel at any version worth having: pip falls back to
+`pyobjc_core-12.0.tar.gz` and needs a compiler. Compiling is not importing, and
+neither is installing.
+
+**A venv from TouchDesigner's Python — no**, for the reason established an hour
+earlier: the interpreter it copies carries the hardened runtime.
+
+**A downloaded interpreter — yes.** Measured end to end:
+
+    curl a relocatable CPython (astral-sh/python-build-standalone)  26 MB, 1.3 s
+    pip install -r requirements.txt   our exact pins, all wheels
+    import Vision, CoreML             fine
+    -m appletd.sidecar --list-cameras four devices
+    the full test suite               544 passed on that interpreter
+
+`adhoc,linker-signed`, which is the class that can load pyobjc. So the install is four
+downloads and no terminal: 26 MB of Python, ~35 MB of pyobjc and numpy, 399 KB of our
+own source, and the 47 MB model if depth is wanted. No Command Line Tools, no
+Homebrew, no system Python, no venv.
+
+It is a third-party binary download and that is a trust decision, so it goes in the
+README beside the model rather than being buried. `Sidecarpython` still overrides it,
+and the probe prefers a working interpreter over downloading anything.
+
+### The bug the search turned up, which mattered more
+
+**`numpy` was a runtime dependency declared only in `requirements-dev.txt`.**
+`pins.py`, `maskbuf.py` and `depth.py` import it at module scope, so `pip install -r
+requirements.txt` produced a sidecar that died on its first import. Every install we
+have ever done was a dev install, so nothing ever hit it.
+
+The dev file even carried a comment asserting the opposite - "NEVER imported at module
+scope by the package" - and that comment was RIGHT about the design it was written
+for: TouchDesigner bundles numpy, so an in-process Script CHOP always had it. The
+sidecar is a separate process. The comment aged into a false claim without anybody
+touching it, which is the failure mode this project keeps meeting.
+
+`pyobjc-framework-CoreMedia` was the same shape, one notch milder: imported by name in
+`engine.py`, declared nowhere, and working only because AVFoundation drags it in.
+
+Both are in `requirements.txt` now, numpy PINNED rather than floored - BENCHMARKS.md's
+fp16 findings are numpy behaviour and a minor release is exactly what changes them.
+
+**Proved rather than argued**: a fresh interpreter with only `requirements.txt`
+installed now runs `--list-cameras`. That test did not exist this morning, and it is
+the one that would have caught this on day one.

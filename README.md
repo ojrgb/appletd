@@ -50,11 +50,13 @@ The pyobjc wheels are pinned to **cp311** deliberately: TouchDesigner ships Pyth
 
 > **Status.** The paths are portable now, so a fresh clone should open — though
 > nobody has yet proved that on a second machine. An Install button to replace the
-> steps above is designed in [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) step 21. The
-> venv is **not** going away: TouchDesigner's bundled Python has the hardened runtime
-> without the entitlement that would let it load pyobjc, so it cannot run the sidecar
-> (21.1 has the measurement). The button can do everything except conjure an
-> interpreter.
+> steps above is designed in [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) step 21, and
+> it can do the whole job with **no terminal**: measured, it downloads a relocatable
+> CPython (26 MB), pip-installs pyobjc into it, writes the package out and fetches
+> the model — and the full test suite passes on that interpreter. TouchDesigner's own
+> bundled Python cannot be used, for a reason worth knowing if you were about to try
+> it: hardened runtime without the entitlement, so macOS refuses to load pyobjc into
+> it (21.1).
 
 ---
 

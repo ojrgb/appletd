@@ -1,9 +1,14 @@
-# Dev-only. NEVER imported at module scope by the package - TouchDesigner's
-# bundled Python has numpy but not cv2 or PIL, so anything here that leaks into
-# an import path breaks the CHOP at cook time. Debug overlays and the fixture
-# tools import these lazily, inside the function that needs them.
+# Dev-only, and the rule is real: nothing HERE may be imported at module scope by
+# the package. TouchDesigner's bundled Python has neither cv2 nor PIL, so anything
+# here that leaks into an import path breaks at cook time. Debug overlays and the
+# fixture tools import these lazily, inside the function that needs them.
+#
+# `numpy` USED TO BE IN THIS FILE and was wrong to be: `pins.py`, `maskbuf.py` and
+# `depth.py` import it at module scope, so a runtime install without it produced a
+# sidecar that died on its first import. It sat here unnoticed because the old
+# reasoning held for the in-process route - TD bundles numpy - and the sidecar is a
+# separate process. Moved to requirements.txt 2026-08-23.
 -r requirements.txt
-numpy==2.2.6
 opencv-python==4.11.0.86
 pillow==11.3.0
 pytest==8.4.1
