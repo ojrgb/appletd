@@ -4,8 +4,16 @@
 segmentation and metric depth — as CHOP channels and TOPs, with no Python running
 in your cook.**
 
-Vision*.framework* and Core ML — the computer-vision APIs that ship in macOS. Not
-Vision Pro. Nothing here needs a headset.
+TouchDesigner is a leading platform for quick and reliable interactive visual
+effects. Running on-device neural networks in a way that does **not** block
+TouchDesigner's main thread opens up a lot of it — and that "not blocking" is the
+whole engineering problem, because doing the obvious thing is 28× slower. See
+[Why it is built this way](#why-it-is-built-this-way).
+
+Maintained with ❤️ by **Omer Jacoby** —
+[x](https://x.com/jacodesby) ·
+[instagram](https://www.instagram.com/ojrgb/) ·
+[linkedin](https://www.linkedin.com/in/omer-jacoby-12a12886/)
 
 <!-- ────────────────────────────────────────────────────────────────────────
      GIFs go here. Drop the files in docs/media/ and delete the comment markers.
@@ -288,6 +296,20 @@ mistaken for first.
   points on stationary geometry is the check that needs a human with a tape measure.
 - **No live-camera timings are quoted anywhere.** They track what is in shot, and
   the same configuration measured an 8× spread.
+
+---
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
+
+One caveat worth reading before you ship a product on the depth stream:
+**Depth Anything V2 is not ours and is not in this repository.**
+`./tools/fetch_models.sh` downloads it at run time from Apple's Hugging Face
+account, and its terms are its own. [NOTICE.md](NOTICE.md) says what to check. The
+other four streams — hands, body, face and segmentation — use Apple's Vision
+framework, which ships in macOS with no model file, so none of that applies to
+them.
 
 ---
 
