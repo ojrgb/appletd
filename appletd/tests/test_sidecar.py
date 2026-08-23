@@ -17,6 +17,8 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -227,3 +229,166 @@ def test_stop_is_safe_and_stops_the_source(receiver: socket.socket) -> None:
     sidecar.stop()
     assert sidecar.running is False
     assert source.running is False
+
+
+# ---------------------------------------------------------------------------
+# run() - the main loop
+#
+# WHY THIS SECTION EXISTS. Everything above tests `send_once`, `stop` and the
+# parent watch as separate pieces, and they all passed while `run()` itself had no
+# test at all - which is the loop the whole process is. Five mutations survived a
+# green suite, including one where the loop sent nothing whatsoever, and that is
+# not a gap you can see by reading: the pieces are individually correct and the
+# assembly is what breaks.
+#
+# The loop is driven to a real exit rather than cut off with a timer: a dead
+# parent pid is a condition `run()` genuinely checks, so the test exercises the
+# same break the shipping code takes when TouchDesigner quits.
+# ---------------------------------------------------------------------------
+def _bounded(sidecar: Sidecar, seconds: float = 3.0) -> list[str]:
+    """Stop `sidecar` from outside after `seconds`. Returns a list that is non-empty
+    only if it had to intervene.
+
+    WHY EVERY run() TEST NEEDS THIS. These tests end the loop by giving it a dead
+    parent pid, so they all depend on the very `break` they are meant to be
+    checking. Deleting that break was tried as a mutation: the suite HUNG rather
+    than failed, and a test whose failure mode is a hang is worse than no test at
+    all in CI.
+
+    This bound is independent of the code under test, so the loop always ends - and
+    asserting the list is empty turns "it never exited on its own" into an ordinary
+    failure with a readable message.
+    """
+    fired: list[str] = []
+
+    def guillotine() -> None:
+        time.sleep(seconds)
+        if sidecar.running:
+            fired.append("the loop was still running after %.1fs" % seconds)
+            sidecar.running = False
+
+    threading.Thread(target=guillotine, daemon=True).start()
+    return fired
+
+
+def _dead_pid() -> int:
+    """A pid that genuinely existed and genuinely does not now.
+
+    Spawned and reaped rather than invented, for the reason the parent-watch test
+    above gives: this is the case that actually happens when TD exits.
+    """
+    child = subprocess.Popen([sys.executable, "-c", ""])
+    pid = child.pid
+    child.wait()
+    return pid
+
+
+def test_run_sends_frames_and_returns_when_the_parent_goes(
+        receiver: socket.socket, monkeypatch: pytest.MonkeyPatch) -> None:
+    """THE test the loop did not have. A mutation that stopped `send_once` being
+    called at all left every other test in this file passing.
+
+    Both halves matter: datagrams have to arrive, and the loop has to end by
+    itself. A loop that sends and never exits is the orphan holding the camera.
+    """
+    monkeypatch.setattr("appletd.sidecar.PARENT_CHECK_INTERVAL_S", 0.02)
+    sidecar, source = _sidecar_for(receiver, lambda seq: _frame(seq))
+    sidecar.send_interval_s = 0.002
+    sidecar.parent_pid = _dead_pid()
+    overran = _bounded(sidecar)
+
+    assert sidecar.run() == 0
+    assert not overran, overran
+
+    receiver.settimeout(0.5)
+    payload, _ = receiver.recvfrom(65535)
+    assert decode_bundle(payload)                 # a real, decodable bundle
+    assert sidecar.n_sent > 0
+    assert source.running is False                # the finally ran
+
+
+def test_running_is_set_before_start_so_a_stop_during_warm_up_is_not_lost(
+        receiver: socket.socket, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`self.running = True` sits ABOVE `self.start()`, and the order is the
+    behaviour: a signal arriving while the camera warms up sets `running` False,
+    and the loop must then never run. Setting the flag after `start()` threw that
+    request away and the sidecar carried on into the loop.
+
+    Reproduced here by a source that stops the sidecar from inside its own
+    `start()`, which is exactly the shape of a signal landing during warm-up.
+
+    THE DEAD PARENT PID IS NOT DECORATION. Without it, moving `running = True`
+    below `start()` makes this loop run for ever and the test HANGS instead of
+    failing - verified by making that exact mutation, which froze the suite rather
+    than reporting anything. A test whose failure mode is a hang is worse than no
+    test in CI, so the loop is given a way out and the assertion is on `n_sent`:
+    zero if the request was honoured, non-zero if it was thrown away.
+    """
+    monkeypatch.setattr("appletd.sidecar.PARENT_CHECK_INTERVAL_S", 0.02)
+    sidecar, source = _sidecar_for(receiver, lambda seq: _frame(seq))
+    sidecar.send_interval_s = 0.002
+    sidecar.parent_pid = _dead_pid()
+    real_start = source.start
+
+    def start_then_ask_to_stop() -> None:
+        real_start()
+        sidecar.running = False
+
+    source.start = start_then_ask_to_stop         # type: ignore[method-assign]
+    overran = _bounded(sidecar)
+
+    assert sidecar.run() == 0
+    assert not overran, overran
+    assert sidecar.n_sent == 0, "the loop ran despite being asked to stop"
+    assert source.running is False
+
+
+def test_a_start_that_raises_still_stops_everything(
+        receiver: socket.socket) -> None:
+    """`start()` is inside a try whose except calls `stop()` and re-raises. Without
+    it a raising start left the socket open and the source never stopped - and
+    `HandSource` promises `stop()` is safe whether or not `start()` succeeded
+    precisely so this path can lean on it.
+    """
+    sidecar, source = _sidecar_for(receiver, lambda seq: _frame(seq))
+    stopped: list[bool] = []
+    real_stop = source.stop
+
+    def boom() -> None:
+        raise RuntimeError("camera did not open")
+
+    def record_stop() -> None:
+        stopped.append(True)
+        real_stop()
+
+    source.start = boom                           # type: ignore[method-assign]
+    source.stop = record_stop                     # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="camera did not open"):
+        sidecar.run()
+    assert stopped, "a raising start() left the source running"
+    assert sidecar.running is False
+
+
+def test_the_status_line_names_the_streams_that_are_on(
+        receiver: socket.socket, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    """The status line is the only window into a running sidecar, and it has been
+    wrong twice: it reported hands' `age` and a hands-derived rate while hands was
+    disabled, which read as a catastrophe and measured nothing (2026-08-22).
+
+    So: `sends` is always there, and `age`/`hands` only when hands is actually on.
+    """
+    monkeypatch.setattr("appletd.sidecar.STATUS_INTERVAL_S", 0.02)
+    monkeypatch.setattr("appletd.sidecar.PARENT_CHECK_INTERVAL_S", 0.08)
+    sidecar, _ = _sidecar_for(receiver, lambda seq: _frame(seq))
+    sidecar.send_interval_s = 0.002
+    sidecar.parent_pid = _dead_pid()
+    overran = _bounded(sidecar)
+
+    assert sidecar.run() == 0
+    assert not overran, overran
+    out = capsys.readouterr().out
+    status = [line for line in out.splitlines() if line.startswith("sends ")]
+    assert status, "no status line was printed at all"
+    assert "age" in status[0] and "hands" in status[0]    # hands is on by default

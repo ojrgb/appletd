@@ -3662,3 +3662,46 @@ that survives the thing it describes is the defect this project keeps finding.
 
 Verified: 16 toggles swept individually with gating applied synchronously, no errors,
 no residue. 540 tests pass.
+
+---
+
+## 2026-08-23 — `Sidecar.run()` finally has tests, and they are mutation-checked
+
+`run()` is the loop the whole process is, and it had no test. Everything around it
+did - `send_once`, `stop`, the parent watch, all covered - which is exactly why the
+gap was invisible: the pieces are individually correct and the ASSEMBLY is what
+breaks. Four tests now, and each was verified by breaking the code on purpose:
+
+    running set AFTER start            CAUGHT
+    no stop() when start raises        CAUGHT
+    no finally: stop()                 CAUGHT
+    status line never printed          CAUGHT
+    parent check never breaks          CAUGHT
+
+### The mutation run changed the tests, twice
+
+**Moving `running = True` below `start()` hung the suite** instead of failing it. The
+test asked the source to stop during warm-up and then had no way out of the loop,
+because it exits by giving `run()` a dead parent pid - so it depended on the very
+behaviour it was checking. Fixed by giving that test a dead pid too.
+
+**Deleting the parent-check `break` still hung**, for the same reason one level up:
+every one of these tests ends the loop through that break. So `_bounded()` stops the
+sidecar from outside after 3 s and RETURNS WHETHER IT HAD TO. The assertion is
+`assert not overran` - the loop must end on its own - which turns "never exited" from
+a frozen CI job into an ordinary failure with a readable message.
+
+That is the general lesson and it is worth more than the tests: **a test that ends
+the thing under test using the thing under test cannot fail, it can only hang.** The
+bound has to come from outside.
+
+### What each test pins
+
+- datagrams actually leave and the loop actually returns 0. A mutation that stopped
+  `send_once` being called left every other test in the file passing.
+- `running = True` sits ABOVE `start()`, so a stop arriving during camera warm-up is
+  honoured rather than thrown away.
+- a raising `start()` still reaches `stop()`. It previously left the socket open and
+  the source running.
+- the status line carries `sends`, and `age`/`hands` only when hands is on - the
+  distinction that made "why is depth not working" unanswerable in August.
