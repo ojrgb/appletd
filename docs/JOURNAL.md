@@ -4032,3 +4032,67 @@ fixed order and two orders are two different embeds.
 have deleted them this morning. `src` is in `OTHER_BUILDERS_OWN` for the same reason:
 destroying it would throw away the only copy of the source a `.toe` has when there is
 no repository behind it.
+
+---
+
+## 2026-08-23 — the installer is a shell script, and it works from nothing in six seconds
+
+`appletd.install.render_script()`. Measured, into an empty directory with no
+interpreter named:
+
+    STEP downloading Python (26 MB)
+    STEP unpacking Python
+    STEP installing Python packages
+    STEP checking the packages import
+    DONE installed to .../fresh_install          6.1 s, 151 MB on disk
+
+Then the 19 modules placed as TouchDesigner will place them, and
+`python -m appletd.sidecar --list-cameras` run exactly as the launcher will run it:
+four devices. `probe()` reports `installed` and finds the interpreter the script
+installed.
+
+### /bin/sh, because the thing being installed is a Python
+
+Anything needing a Python to bootstrap would be circular, and relying on whatever
+Python the machine has is the assumption that failed twice today. `sh`, `curl`,
+`shasum` and `tar` are on every macOS and need nothing.
+
+One subprocess rather than four: TouchDesigner writes the 19 modules itself - 402 KB
+of local writes, fast enough inline - and hands everything that touches the network to
+this. Every line starts `STEP`, `DONE` or `FAIL` so the panel shows the last one
+without parsing.
+
+### Two generator bugs from the same root, in one session
+
+Both times I wrote a code generator whose OUTER string was not raw:
+
+  * the shell's `\` line continuations were eaten, silently joining two lines. Harmless
+    here, caught by a line-length rule rather than by anything that mattered.
+  * `\n` inside a generated test became real newlines, producing an unterminated
+    string literal.
+
+The second one failed loudly. The first did not, and that is the one to remember: a
+non-raw string generating code containing backslashes will quietly change it.
+
+### Seven mutations, and TWO OF MY TESTS WERE WRONG
+
+First run: five caught, two survived.
+
+**"stamp written early" survived because my mutation was wrong**, not the test - I
+inserted the early write after the pip line rather than before it. But fixing the
+mutation showed the test WAS weak in a different way: it checked ORDER only, and an
+extra early stamp leaves the last one exactly where it was. It asserts
+`count(...) == 1` now.
+
+**"skip the checksum comparison" survived because the test was text**: asserting
+`shasum -a 256` appears passes over a script whose comparison is `if false`. Same for
+the arm64 guard, which survived even the second round.
+
+Both are behavioural now: the script is RUN with stub `curl`, `shasum`, `tar` and
+`uname` on PATH, and the assertions are on exit codes - 3 for a bad hash, 2 for a
+non-arm machine, and that neither leaves a stamp or a directory behind. No network,
+about 30 ms.
+
+Text assertions about generated code test the generator's vocabulary, not its
+behaviour. Three tests in this file were that, and a mutation run is the only thing
+that told me.

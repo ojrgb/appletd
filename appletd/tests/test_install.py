@@ -325,6 +325,180 @@ def test_the_version_of_the_real_package_is_stable_across_calls() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The generated installer
+# ---------------------------------------------------------------------------
+def _script(**kwargs: Any) -> str:
+    defaults: dict[str, Any] = {"root": "/tmp/r", "version": "v1",
+                                "requirements": ["pkg==1.0"]}
+    defaults.update(kwargs)
+    return install.render_script(**defaults)
+
+
+def test_the_rendered_script_is_valid_shell() -> None:
+    """`sh -n` parses without executing. A template with an unbalanced `if` renders
+    fine, writes fine, and fails at the moment somebody presses Install - which is
+    the worst time to find a typo in a heredoc."""
+    done = subprocess.run(["/bin/sh", "-n", "/dev/stdin"], input=_script(),
+                          capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr
+
+
+def test_every_placeholder_is_filled() -> None:
+    """A `%(name)s` left in the output is a shell script containing a Python format
+    specifier, which `sh` will happily run and get wrong."""
+    rendered = _script()
+    assert "%(" not in rendered
+
+
+def test_no_interpreter_means_download_one_and_a_path_means_do_not() -> None:
+    """The whole point of the probe upstream: somebody who already has a working
+    interpreter must not be handed 26 MB they do not need."""
+    assert 'PYTHON=""' in _script()
+    assert 'PYTHON="/usr/local/bin/python3"' in _script(python="/usr/local/bin/python3")
+
+
+def test_the_download_is_pinned_and_checksummed_in_the_script() -> None:
+    rendered = _script()
+    assert install.PYTHON_URL in rendered
+    assert install.PYTHON_SHA256 in rendered
+    assert "shasum -a 256" in rendered
+
+
+def test_the_model_is_only_fetched_when_asked_for() -> None:
+    """Depth is optional and 47 MB. Nobody should pay for it by default."""
+    with_model = _script(want_model=True)
+    without = _script(want_model=False)
+    assert install.MODEL_PACKAGE in with_model
+    assert 'WANT_MODEL="yes"' in with_model
+    assert 'WANT_MODEL="no"' in without
+    for relative in install.MODEL_FILES:
+        assert relative in with_model
+
+
+def test_the_stamp_is_written_once_and_last() -> None:
+    """Its job is to answer "is this install complete". A stamp written before the
+    packages would say yes about a half-finished install, which is worse than no
+    stamp - `probe()` would report `installed` over a broken tree.
+
+    ONCE is half the assertion, and it is the half a weaker version of this test
+    missed: an extra early write leaves the last one exactly where it was, so
+    checking only the order passes over a script that stamps twice.
+    """
+    rendered = _script()
+    assert rendered.count(install.STAMP_NAME) == 1
+    assert rendered.index("pip install") < rendered.index(install.STAMP_NAME)
+    assert rendered.index("import objc") < rendered.index(install.STAMP_NAME)
+
+
+def _stub_tools(directory: Path, *, sha: str) -> dict[str, str]:
+    """A PATH with fake `curl`, `shasum` and `tar`, so the download path can be RUN.
+
+    Behaviour, not text: asserting that "shasum -a 256" appears in the script passes
+    over a script whose comparison has been replaced by `if false`, which is exactly
+    what a mutation run demonstrated. This costs no network and about 30 ms.
+    """
+    (directory / "curl").write_text("#!/bin/sh\nwhile [ $# -gt 1 ]; do "
+                                    "[ \"$1\" = \"-o\" ] && echo x > \"$2\"; "
+                                    "shift; done\nexit 0\n")
+    (directory / "shasum").write_text("#!/bin/sh\necho '%s  -'\n" % sha)
+    (directory / "tar").write_text("#!/bin/sh\nexit 0\n")
+    for name in ("curl", "shasum", "tar"):
+        (directory / name).chmod(0o755)
+    return {"PATH": "%s:/usr/bin:/bin" % directory}
+
+
+def test_a_bad_checksum_stops_the_install(tmp_path: Path) -> None:
+    """THE security-relevant guard. It is a third-party binary download, and the hash
+    is the one the suite was run against - a mismatch has to stop, not warn."""
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    environment = _stub_tools(stubs, sha="0" * 64)
+    script = _script(root=str(tmp_path / "root"))
+    done = subprocess.run(["/bin/sh", "/dev/stdin"], input=script,
+                          capture_output=True, text=True, env=environment,
+                          check=False, timeout=30)
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert "does not match its checksum" in done.stdout
+    assert not (tmp_path / "root" / install.STAMP_NAME).exists(), \
+        "a failed install left a stamp behind"
+
+
+def test_a_good_checksum_gets_past_the_download(tmp_path: Path) -> None:
+    """The other half: the guard must not reject the thing it is supposed to accept.
+    A test that only proves rejection passes on a script that rejects everything."""
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    environment = _stub_tools(stubs, sha=install.PYTHON_SHA256)
+    script = _script(root=str(tmp_path / "root"))
+    done = subprocess.run(["/bin/sh", "/dev/stdin"], input=script,
+                          capture_output=True, text=True, env=environment,
+                          check=False, timeout=30)
+    # It gets past the checksum and then fails on there being no real interpreter,
+    # which is the next step and a different exit code.
+    assert "does not match its checksum" not in done.stdout
+    assert done.returncode == 4, done.stdout + done.stderr
+    assert "no interpreter at" in done.stdout
+
+
+def test_the_script_refuses_a_non_arm_machine(tmp_path: Path) -> None:
+    """RUN with a `uname` that lies, because asserting "arm64" appears in the text
+    passes over a script whose refusal branch has been deleted - demonstrated by a
+    mutation run, which is the only reason this is not a text check."""
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    (stubs / "uname").write_text("#!/bin/sh\necho x86_64\n")
+    (stubs / "uname").chmod(0o755)
+    done = subprocess.run(
+        ["/bin/sh", "/dev/stdin"], input=_script(root=str(tmp_path / "root")),
+        capture_output=True, text=True, check=False, timeout=30,
+        env={"PATH": "%s:/usr/bin:/bin" % stubs})
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "Apple Silicon only" in done.stdout
+    assert not (tmp_path / "root").exists(), "it made a directory before refusing"
+
+
+def test_requirements_are_read_and_quoted(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text(
+        "\n".join(["# a comment", "", "pkg==1.2.3", "other==4.5", ""]))
+    lines = install.requirement_lines(str(tmp_path))
+    assert lines == ["pkg==1.2.3", "other==4.5"]
+    assert '"pkg==1.2.3"' in _script(requirements=lines)
+
+
+def test_an_include_in_requirements_is_refused(tmp_path: Path) -> None:
+    """`-r requirements-dev.txt` followed quietly would put pytest, opencv and pillow
+    into a user's install. Refused loudly instead."""
+    (tmp_path / "requirements.txt").write_text(
+        "\n".join(["-r requirements-dev.txt", "pkg==1", ""]))
+    with pytest.raises(RuntimeError, match="will not follow an include"):
+        install.requirement_lines(str(tmp_path))
+
+
+def test_the_real_requirements_file_parses_and_names_pyobjc_and_numpy() -> None:
+    """Against the actual file. numpy was declared only in the dev requirements until
+    2026-08-23, which made every non-dev install produce a sidecar that died on its
+    first import."""
+    lines = install.requirement_lines(str(Path(install.__file__).parent.parent))
+    joined = " ".join(lines).lower()
+    assert "pyobjc-framework-vision" in joined
+    assert "numpy" in joined
+    assert all("==" in line for line in lines), "an unpinned runtime requirement"
+
+
+def test_the_shell_model_fetcher_agrees_with_these_constants() -> None:
+    """`tools/fetch_models.sh` is the terminal path and the generated installer is the
+    button path, and they download the same thing. Two sets of URLs typed twice is two
+    answers to "where does the model come from"."""
+    repo_root = Path(install.__file__).parent.parent
+    shell = (repo_root / "tools" / "fetch_models.sh").read_text()
+    assert install.MODEL_REPO in shell
+    assert install.MODEL_PACKAGE in shell
+    assert str(install.MODEL_WEIGHT_MIN_BYTES) in shell
+    for relative in install.MODEL_FILES:
+        assert relative in shell, "%s is not in fetch_models.sh" % relative
+
+
+# ---------------------------------------------------------------------------
 # Scope
 # ---------------------------------------------------------------------------
 def test_arm64_is_required_and_this_machine_qualifies() -> None:
