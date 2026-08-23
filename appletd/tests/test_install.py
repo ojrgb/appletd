@@ -280,6 +280,51 @@ def test_a_stamp_that_is_not_an_object_reads_as_absent(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The content version, which is what makes `stale` detectable
+# ---------------------------------------------------------------------------
+def test_the_version_is_deterministic() -> None:
+    """Same input, same answer, in any process. The embed builder stamps it into the
+    `.toe` and an install records it into `INSTALLED.json`, and those two runs are
+    weeks and machines apart - so a hash that varied by run would make every install
+    read as stale for ever."""
+    pairs = [("a", "one"), ("b", "two")]
+    assert install.content_version(pairs) == install.content_version(list(pairs))
+    assert len(install.content_version(pairs)) == install.VERSION_CHARS
+
+
+def test_changing_a_module_changes_the_version() -> None:
+    """One character of one module. If this did not hold, an install would never
+    know it was out of date."""
+    assert install.content_version([("a", "one")]) != \
+        install.content_version([("a", "ONE")])
+
+
+def test_renaming_a_module_changes_the_version_even_with_identical_text() -> None:
+    """The subtle one, and the reason the name is hashed as well as the text: a
+    rename means the install has to write DIFFERENT FILES, so it is a different
+    install even though not one line changed."""
+    assert install.content_version([("slots", "x")]) != \
+        install.content_version([("plots", "x")])
+
+
+def test_order_is_part_of_the_identity() -> None:
+    """`RUNTIME_MODULES` has a fixed order and `module_sources` follows it, so two
+    different orders are two different embeds and should not claim to be the same."""
+    assert install.content_version([("a", "1"), ("b", "2")]) != \
+        install.content_version([("b", "2"), ("a", "1")])
+
+
+def test_the_version_of_the_real_package_is_stable_across_calls() -> None:
+    """Against the actual files, not synthetic pairs - the thing the builder hashes."""
+    package_dir = Path(install.__file__).parent
+    sources = [(name, (package_dir / (name + ".py")).read_text())
+               for name in install.RUNTIME_MODULES]
+    first = install.content_version(sources)
+    assert first == install.content_version(sources)
+    assert len(first) == install.VERSION_CHARS
+
+
+# ---------------------------------------------------------------------------
 # Scope
 # ---------------------------------------------------------------------------
 def test_arm64_is_required_and_this_machine_qualifies() -> None:

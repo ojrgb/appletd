@@ -3985,3 +3985,50 @@ The download is PINNED, not resolved through the GitHub API: an install that wor
 yesterday must not break because an asset was renamed. The hash is our own, of the
 exact tarball that ran the full suite, and the constant says so rather than implying a
 vendor checksum.
+
+---
+
+## 2026-08-23 — the package is inside the .toe now, byte for byte
+
+`tools/td_embed_package.py`: 19 Text DATs in a `src` container on the master COMP,
+402 KB, version `86c97cde53bb`. The chain's last layer, and the only one that cannot
+change a channel - it writes into a container nothing is wired to.
+
+### One deviation from the plan, and it is the whole point
+
+21.3 said the DATs would "carry a header saying so". They do not. **The text is
+byte-identical to the file**, because what Install writes out has to be exactly what
+was tested - a header means different bytes, a different hash, and a version stamp
+that compares against nothing at all. The warning lives on each DAT's `comment` and
+in the container's `notes`, where it is just as visible and costs nothing.
+
+Whether TouchDesigner round-trips DAT text unchanged was a real risk - trailing
+newlines especially - so the builder reads every DAT back and compares it to the file,
+and says which one differs and whether it is only whitespace. It does not: 19 of 19
+identical.
+
+### Proved by doing what Install will do
+
+    19 DATs written out to a temp directory      19/19 byte-identical to the repo
+    imported on the downloaded interpreter       every entry point
+    python -m appletd.sidecar --list-cameras     four devices
+
+That last line is the one that matters. The package went source -> DAT -> disk ->
+running process, on an interpreter downloaded an hour ago, and enumerated cameras.
+
+### `content_version` moved into the package before it was used twice
+
+It started in the builder, which cannot be imported outside TouchDesigner - so it
+could not be tested, and the install side would have needed its own copy. Two copies
+of a hash function is two answers to "is this install current". It is in
+`appletd/install.py` now with five tests, including the two subtle ones: a RENAME
+changes the version even with identical text, because the install has to write
+different files; and ORDER is part of the identity, because `RUNTIME_MODULES` has a
+fixed order and two orders are two different embeds.
+
+### And the keep-set change earned itself
+
+`renderchange` and `camchange` both survived a full chain run - the thing that would
+have deleted them this morning. `src` is in `OTHER_BUILDERS_OWN` for the same reason:
+destroying it would throw away the only copy of the source a `.toe` has when there is
+no repository behind it.

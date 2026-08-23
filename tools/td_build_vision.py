@@ -792,6 +792,10 @@ OTHER_BUILDERS_OWN = {
     "outdepth": "td_add_depth.py",
     "depth_callbacks": "td_add_depth.py",
     "depth_par_callbacks": "td_add_depth.py",
+    # The embedded package. 19 Text DATs in one container, written by the embed
+    # builder and read by the Install button - destroying it would throw away the
+    # only copy of the source a .toe has when there is no repository behind it.
+    "src": "td_embed_package.py",
 }
 # How a nested operator reaches a parameter on this COMP. Same form every builder
 # uses, and it is depth-independent - see the module docstring.

@@ -30,11 +30,13 @@ Ref: docs/BUILD_PLAN.md step 21, docs/ARCHITECTURE.md.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
 import shutil
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Final, NamedTuple
 
@@ -79,6 +81,10 @@ PYTHON_BIN: Final = os.path.join(PYTHON_DIRNAME, "bin", "python3")
 DEFAULT_INSTALL_ROOT: Final = os.path.expanduser(
     "~/Library/Application Support/appletd")
 
+# Twelve hex characters: enough that a collision is not a thing to think about,
+# short enough to read off a panel and compare by eye.
+VERSION_CHARS: Final = 12
+
 STAMP_NAME: Final = "INSTALLED.json"
 SITE_PACKAGES: Final = "site-packages"
 MODELS_DIRNAME: Final = "models"
@@ -120,6 +126,33 @@ RUNTIME_MODULES: Final[tuple[str, ...]] = (
 # `appletd.pins` is imported and then dies.
 _VERIFY_IMPORTS: Final = "import objc, numpy"
 _VERIFY_TIMEOUT_S: Final = 30.0
+
+
+def content_version(sources: Iterable[tuple[str, str]]) -> str:
+    """A short, deterministic hash of `(name, text)` pairs. Same input, same answer.
+
+    This is the version the whole two-copies problem turns on. `tools/td_embed_package
+    .py` stamps it into `Sourceversion` when it carries the package into the `.toe`;
+    `write_stamp` records it when an install writes the package out; `probe` compares
+    them. A newer `.toe` over an older install is otherwise invisible - it runs the
+    old `derive` on every cook, with no error and wrong channels.
+
+    Over NAMES as well as text, so a renamed module changes the version even when no
+    line changed: the install has to write different files, so it is a different
+    install.
+
+    It lives HERE rather than in the builder so that one definition serves both sides
+    and can be tested. No git: a hash of the content answers "is what is on disk what
+    is in the file", which is the actual question, and works in a downloaded zip with
+    no repository behind it.
+    """
+    digest = hashlib.sha256()
+    for name, text in sources:
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(text.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()[:VERSION_CHARS]
 
 
 def require_arm64() -> None:

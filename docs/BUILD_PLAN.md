@@ -1783,6 +1783,18 @@ fresh interpreter", not "are the modules the walk named present".
 A new builder - `tools/td_embed_package.py` - reads each file and writes one Text DAT
 into a container inside the COMP. ~399 KB of text is a rounding error on a `.toe`.
 
+**BUILT 2026-08-23, with one deviation from what is written below.** The DATs do NOT
+carry a generated-by header in their text. The text is **byte-identical** to the file,
+because what Install writes out has to be what was tested - a header means different
+bytes, a different hash, and a version stamp that compares against nothing. The warning
+lives on each DAT's `comment` and in the container's `notes` instead.
+
+Verified end to end rather than asserted: 19 DATs written, all 19 byte-identical to
+their files, written back out to a temporary directory, and
+`python -m appletd.sidecar --list-cameras` run against that copy on the downloaded
+interpreter. `Sourceversion` = a 12-character content hash, matching what the package
+computes from the repo.
+
 **The DATs are a build artefact and must never become the source.** 539 tests, ruff and
 mypy all run against files; source that lives in a binary `.toe` cannot be diffed,
 tested or linted. So the embed builder overwrites every DAT unconditionally, the DATs

@@ -137,6 +137,9 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "renderchange": (-1 * COL_W, -4 * MASTER_ROW_H - 2 * ROW_H),
     "camchange": (-1 * COL_W, -4 * MASTER_ROW_H - 4 * ROW_H),
     "notes": (-5 * COL_W, MASTER_ROW_H),
+    # The embedded package container. Off to one side: nothing wires to it and
+    # nothing cooks it - the Install button reads it on demand.
+    "src": (-7 * COL_W, MASTER_ROW_H),
 }
 
 
