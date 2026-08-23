@@ -433,25 +433,30 @@ signature of the pose, for gesture matching or as features for a model.
 
 | group | channels | default |
 |---|---|---|
-| `Landmarks` — the raw 137 from the sidecar | 137 | on |
 | `Coordstx` — `_tx`/`_ty` for all 42 joints | 84 | on |
 | `Coordspx` — `_px`/`_py` for all 42 joints | 84 | **on** |
 | `Core` | 20 | on |
 | `Presence` | 10 | on |
 | `Contacts` | 28 | on |
-| `Triggers` — thumb-to-fingertip grid | 40 | on |
 | `Pose` | 22 | on |
-| `Motion` | 14 | on |
 | `Twohands` | 14 | on |
 | `Gestures` — held states | 18 | on |
-| `Events` — momentary pulses | 34 | on |
 | `Descriptor` | 84 | off |
 | `Depth` — `h{i}_z` and five per-finger | 12 | **off** |
 | `Tilt` — `h{i}_tilt` and `h{i}_tilt_axis` | 4 | **off** |
 
-Presets on the `Verbosity` menu: **Minimal** = Landmarks + Coordstx (221),
-**Interaction** = everything except the pixel spaces and Descriptor (421),
-**Everything** = all of it (589).
+**Always on, with no toggle of their own** — the raw 137 landmark channels from the
+sidecar (137), the thumb-to-fingertip trigger grid (40), the motion channels (14) and
+the momentary event pulses (34). Each had a toggle until 2026-08-23 and none of them
+worked: removing a group's channels from the output needs an exact channel-to-group
+map, and a wildcard cannot separate the raw `h0_wrist_x` from the derived
+`h0_palm_x`. They were removed rather than left on the page pretending. Use
+`Finger Tips Only` to cut the landmark channels down, and `Temporal`/`Latches` to
+freeze the subsystems those channels come from.
+
+Presets on the `Level of Detail` menu: **Minimal** = Coordstx only,
+**Interaction** = everything except the pixel spaces and Descriptor,
+**Everything** = all of it.
 
 **OFF FREEZES, IT DOES NOT REMOVE — and the label says so now.** Turning `Coordspx`
 off stops `coords/pixels` cooking; the `_px`/`_py` channels stay on the COMP output
@@ -498,8 +503,7 @@ belong to - a page you have to scroll is a page nobody tunes.
 
 | parameter | type | default | what it does |
 |---|---|---|---|
-| `Verbosity` | menu | Interaction | Minimal / Interaction / Everything. Sets the toggles below in one click |
-| `Landmarks` | toggle | on | publish the raw 137 from the sidecar |
+| `Level of Detail` | menu | Interaction | Minimal / Interaction / Everything. Sets the toggles below in one click |
 | `Coordstx` | toggle | on | `_tx`/`_ty`, EVERY stream, wire contract AND derived. Freezes `coords/world` and `coords/dv_world` |
 | `Coordspx` | toggle | on | `_px`/`_py`, the same. Freezes `coords/pixels` and `coords/dv_pixels` |
 | `Lmcoordstx` | toggle | on | `_tx`/`_ty` for the 174 FACE landmark points |
@@ -508,11 +512,10 @@ belong to - a page you have to scroll is a page nobody tunes.
 | `Presence` | toggle | on | |
 | `Contacts` | toggle | on | |
 | `Pose` | toggle | on | |
-| `Motion` | toggle | on | |
 | `Twohands` | toggle | on | |
-| `Gestures` | toggle | on | held states |
-| `Events` | toggle | on | momentary pulses |
+| `Gestures` | toggle | on | held states. Also what gates `latches` cooking |
 | `Descriptor` | toggle | off | 84-channel pose signature |
+| `Hand Box and Size` | toggle | on | off drops `h?_bbox_*` and `h?_size` from the output |
 
 A disabled `derive` group's channels are excluded from the output. A disabled
 NATIVE group has `allowCooking` off, so it costs nothing and its channels are left
@@ -561,11 +564,13 @@ Both defaults leave the output exactly as it was before they existed. `Finger Ti
 Only` keeps the **wrist**: it is not an mcp, pip or dip, it is the hand's anchor, and
 `hands_angle` is measured from it.
 
-Four toggles are the exception, and they change nothing at all: `Landmarks`,
-`Triggers`, `Motion` and `Events`. Their channels come out of a group that is still
-cooking — `Motion` shares `temporal` with `Presence`, and the other three share
-`latches` — so nothing can tell them apart from the channels beside them. See the
-table below.
+**Every toggle on the page now changes something.** Four that could not —
+`Landmarks`, `Triggers`, `Motion` and `Events` — were removed on 2026-08-23 rather
+than left there pretending. What removing `Motion` specifically cost: it was an OR
+term alongside `Presence` on `temporal`, so `Motion` on with `Presence` off used to
+mean "cook temporal for its velocity half, not its presence half". There is no way to
+say that now — `Presence` off freezes the whole group. `Presence` ships on, so the
+common case is unaffected.
 
 #### What the toggles gate, and the one thing to know about switching one off
 
@@ -574,9 +579,9 @@ Three kinds of toggle, and the label says which:
 | toggles | what switching it off saves |
 |---|---|
 | `Core` `Presence` `Contacts` `Pose` `Twohands` `Gestures` `Descriptor` | `derive()` does not compute the group, and its channels leave the output |
-| `Presence` `Motion` (→ `temporal`), `Triggers` `Gestures` `Events` (→ `latches`), `Coordstx` `Coordspx` (→ `coords/world`, `coords/pixels` in all three streams), `Lmcoordstx` `Lmcoordspx` (→ the face's landmark halves) | the group COMP stops cooking entirely, via `allowCooking`. Its channels stay, holding their last value |
+| `Presence` (→ `temporal`), `Gestures` (→ `latches`), `Coordstx` `Coordspx` (→ `coords/world`, `coords/pixels` in all three streams), `Lmcoordstx` `Lmcoordspx` (→ the face's landmark halves) | the group COMP stops cooking entirely, via `allowCooking`. Its channels stay, holding their last value — which is why `trim_empty` removes them from the output |
 | `Temporal` `Latches` | a VETO: off freezes the group whatever the toggles above say. See below |
-| `Landmarks` `Triggers` `Motion` `Events` | nothing on their own — advisory, and the LABEL says "channels only". Every OTHER toggle now also removes its channels from the output, because `trim_empty` is generated from the frozen groups; these four name channels inside a group that is still cooking, so telling them apart needs an exact channel-to-group map. `DESIGN.md` §2.15 |
+| `Finger Tips Only` `Hand Box and Size` | the OUTPUT only. Neither gates cooking and neither can: the 15 non-tip joints feed every curl and spread `derive()` computes, and the bounding boxes feed `hands_overlap` |
 
 **`Temporal` and `Latches` are master switches, and they needed a second
 mechanism.** The table above is an OR — "any of these toggles being on keeps the

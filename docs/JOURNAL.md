@@ -3613,3 +3613,52 @@ All 20 Attributes toggles, each flipped individually with gating applied
 synchronously and the whole project force-cooked: no other toggle produces an error,
 and none left residue behind. The two other guarded sites were found by grepping for
 the construct rather than by waiting for someone to hit them.
+
+---
+
+## 2026-08-23 — removed the four toggles that could not do what they said
+
+`Landmarks`, `Triggers`, `Motion`, `Events`. They sat on the Attributes page looking
+like controls and could not remove their own channels from the output, because that
+needs an exact channel-to-group map and a wildcard cannot separate the raw
+`h0_wrist_x` from the derived `h0_palm_x`.
+
+### They were not equally dead, and the difference mattered
+
+`Landmarks` gated nothing anywhere - not one entry in `COOK_GATED`, `COOK_VETOED` or
+`COOK_REQUIRES`. Genuinely inert.
+
+The other three were **OR terms in `COOK_GATED`**: `("Presence", "Motion")` on
+`hands/temporal` and `("Triggers", "Gestures", "Events")` on `hands/latches`. So each
+did nothing on its own and something in combination - which is worse than dead,
+because it is a control that works only when another control is in a particular
+state.
+
+### What removing `Motion` cost, stated rather than discovered later
+
+`Motion` on with `Presence` off was the only way to express "cook `temporal` for its
+velocity half, not its presence half". There is no way to say that now: `Presence` off
+freezes the whole group, verified. `Presence` ships on so the common case is
+unaffected, and putting the term back is one word in `COOK_GATED`.
+
+The trade was taken because a toggle that does nothing alone and something in
+company is harder to explain to a beginner than one capability fewer. That reasoning
+is in `COOK_GATED` next to the change, not only here.
+
+### Removing the code that creates a parameter does not remove the parameter
+
+For the third time in this project. `td_add_groups.py` had no retire mechanism at
+all, so it grew `RETIRED_PARS` and destroys those four before anything else in
+`_page` - before the relabel pass and before `existing` is built, so a name being
+retired cannot also be relabelled or counted as present.
+
+### Five documents were asserting the opposite
+
+The module docstring, the builder's own closing report, and three separate passages
+of `ATTRIBUTES.md` - the channel-budget table, the parameter reference and the
+"what the toggles gate" table - all described the four as advisory-and-known. Every
+one now describes what is actually there, including the `Motion` trade. A comment
+that survives the thing it describes is the defect this project keeps finding.
+
+Verified: 16 toggles swept individually with gating applied synchronously, no errors,
+no residue. 540 tests pass.

@@ -34,10 +34,11 @@ is left stale there.
 value, whether the group is frozen by `allowCooking` or not gated at all. That is
 deliberate rather than a gap: a channel that VANISHES breaks every reference to it
 with no error anywhere (DESIGN.md 6.2), which is worse than a stale number on a
-toggle somebody just turned off. The genuinely un-gated toggles are the remaining
-`native` ones - `Landmarks`, `Triggers`, `Motion`, `Events` - and closing those needs
-an exact channel-to-group map; see the note at the end of this file for why wildcard
-patterns cannot provide one.
+toggle somebody just turned off. Four toggles that could NOT be closed this way -
+`Landmarks`, `Triggers`, `Motion`, `Events` - were removed on 2026-08-23 rather than
+left on the page pretending: closing them needs an exact channel-to-group map, and
+wildcards cannot provide one because `h?_*_x` matches both the raw `h0_wrist_x` and
+the derived `h0_palm_x`. See RETIRED_PARS.
 
 MEASURED, the `allowCooking` question step 3 could not proceed without: a Feedback
 counter and a Cook Type = Always Null inside a base COMP, with `allowCooking` set
@@ -75,7 +76,6 @@ COMP_PATH = MASTER_PATH + "/hands"
 # LABEL says so, so nobody switches one off expecting a saving that is not there.
 GROUPS = (
     # name          default  gated
-    ("Landmarks",   True,  "native"),
     ("Coordstx",    True,  "native"),
     # ON, and the default CHANGED on 2026-08-21 when this toggle stopped being
     # advisory. It used to ship off and gate nothing, so the `_px`/`_py` channels
@@ -100,12 +100,9 @@ GROUPS = (
     # because the existing toggles could not express "off". See COOK_VETOED.
     ("Temporal",    True,  "native"),
     ("Latches",     True,  "native"),
-    ("Triggers",    True,  "native"),
     ("Pose",        True,  "derive"),
-    ("Motion",      True,  "native"),
     ("Twohands",    True,  "derive"),
     ("Gestures",    True,  "derive"),
-    ("Events",      True,  "native"),
     ("Descriptor",  False, "derive"),
     # 3D inferred from a 2D projection, added 2026-08-21. Both OFF: the numbers are
     # honest but uncalibrated, and `Palmarea`/`Zreference` on the Tuning page are what
@@ -152,8 +149,17 @@ COOK_GATED = {
     "hands": ("Streamhands",),
     "pose": ("Streampose",),
     "face": ("Streamface",),
-    "hands/temporal": ("Presence", "Motion"),
-    "hands/latches": ("Triggers", "Gestures", "Events"),
+    # `Motion` was a second term here and `Triggers`/`Events` on the line below,
+    # removed 2026-08-23 with the rest of the advisory toggles. WHAT THAT COST, said
+    # plainly: `Motion` on with `Presence` off was the only way to express "cook
+    # temporal for its velocity half, not its presence half", and there is now no way
+    # to say that - `Presence` off freezes the whole group. `Presence` ships on, so
+    # the common case is unaffected, and putting the term back is one word here.
+    #
+    # The trade was made because a toggle that does nothing on its own and something
+    # in combination is harder to explain than one capability fewer.
+    "hands/temporal": ("Presence",),
+    "hands/latches": ("Gestures",),
     # The coordinate spaces, split into a world half and a pixel half by
     # tools/td_add_coords.py precisely so these two toggles can freeze them. They
     # were labelled "channels only, gates no cost yet" from the day they were added;
@@ -399,7 +405,10 @@ def _trim_source():
 # The presets from docs/ATTRIBUTES.md. Verbosity sets the toggles in one click; it
 # is not a fourth state, and moving a toggle afterwards does not fight it.
 PRESETS = {
-    "Minimal": ("Landmarks", "Coordstx"),
+    # `Landmarks` was here until 2026-08-23. It gated nothing anywhere - not one
+    # entry in COOK_GATED, COOK_VETOED or COOK_REQUIRES - so the raw landmark
+    # channels were always on and "Minimal" is what it always actually was.
+    "Minimal": ("Coordstx",),
     # Excluded from Interaction for the same reason each ships OFF: `Coordspx` and
     # `Lmcoordspx` are channel volume nobody asked for, `Descriptor` is 84 channels,
     # and `Depth`/`Tilt` are UNCALIBRATED - `Palmarea` and `Zreference` are still set
@@ -639,6 +648,22 @@ def _apply_trim(comp, wanted, verbose=False):
     return report
 
 
+# Parameters this script used to create and must now DESTROY. Removing the code that
+# creates a parameter does not remove the parameter - it survives in the .toe for ever,
+# looking exactly like a working control (DESIGN.md 2.11). Same mechanism as
+# RETIRED_PARS in tools/td_build_vision.py.
+#
+# All four were advisory: they appeared on the Attributes page and could not do what
+# their names promised, because removing a group's channels from the output needs an
+# exact channel-to-group map and wildcards cannot provide one - `h?_*_x` matches both
+# the raw `h0_wrist_x` and the derived `h0_palm_x`.
+#
+# `Landmarks` gated nothing at all, anywhere. The other three were OR terms in
+# COOK_GATED, so each did something in combination and nothing on its own, which is
+# harder to explain to a beginner than one capability fewer. See COOK_GATED for what
+# removing `Motion` specifically cost.
+RETIRED_PARS = ("Landmarks", "Triggers", "Motion", "Events")
+
 # name -> the label it should now have. See the note in `_page`: labels on existing
 # parameters are left alone by default, so a rename has to be listed here or it only
 # ever applies to somebody building the network from scratch.
@@ -679,6 +704,14 @@ def _page(comp, name="Attributes"):
     # So: append only what is absent. Nothing that exists is touched except its
     # `default`, which is not a value. Labels on existing parameters are left alone
     # too - a rebuild must not overwrite a label somebody edited.
+    # RETIRED FIRST, so a name that is being retired cannot also be relabelled or
+    # counted as existing further down.
+    for name in RETIRED_PARS:
+        for par in list(comp.customPars):
+            if par.name == name:
+                print("   retired %s (was on the %s page)" % (name, par.page.name))
+                par.destroy()
+
     existing = {par.name: par for par in comp.customPars}
 
     # DELIBERATE RELABELS. `_page` never touches an existing parameter's label,
@@ -901,20 +934,16 @@ def main():
         print("\nverified: every derive group has a toggle, and flipping one "
               "changes what derive() computes.")
 
-    print("\nNOT DONE, deliberately, and what each needs:")
-    print("  Four toggles still change nothing: `Landmarks`, `Triggers`, `Motion`")
-    print("  and `Events`. Everything else is now trimmed off the single output by")
-    print("  `%s`, which is generated from the FROZEN groups - so a toggle" % TRIM_CHOP)
-    print("  that gates a group's cooking also removes its channels. These four do")
-    print("  not gate a group: `Motion` shares `temporal` with `Presence` and the")
-    print("  other three share `latches`, so their channels come out of a COMP that")
-    print("  is still cooking, and wildcards cannot partition them - `h?_*_x`")
-    print("  matches both the raw `h0_wrist_x` (Landmarks) and the derived")
-    print("  `h0_palm_x` (Core). It needs an exact channel-to-group map, and the")
-    print("  sound way to get one is a registry in the package: derive() can already")
-    print("  report a group's channels by being called with just that group, and the")
-    print("  latch table would move from tools/td_add_latches.py into appletd/")
-    print("  so both can import it. Worth doing carefully rather than quickly.")
+    print("\nEVERY TOGGLE ON THIS PAGE NOW CHANGES SOMETHING.")
+    print("  `Landmarks`, `Triggers`, `Motion` and `Events` were removed on")
+    print("  2026-08-23 - they could not remove their own channels from the output,")
+    print("  because that needs an exact channel-to-group map and a wildcard cannot")
+    print("  partition `h?_*_x` into the raw `h0_wrist_x` and the derived")
+    print("  `h0_palm_x`. If they are ever wanted back, the sound way to get that")
+    print("  map is a registry in the package: derive() can already report a group's")
+    print("  channels by being called with just that group, and the latch table")
+    print("  would move out of tools/td_add_latches.py into appletd/ so both can")
+    print("  import it. RETIRED_PARS destroys the old parameters.")
     print("")
     print("  `filter` is still not a gating candidate: it is in the data path, and")
     print("  its Smoothing toggle gates its cost through the bypass flag instead.")
