@@ -628,8 +628,9 @@ THE SIX PAGES
   Attributes the group toggles and the Verbosity presets
 
 THE STREAM TOGGLES DO TWO THINGS. They are LAUNCH FLAGS for the sidecar, read once
-when the process starts - hence "restart to apply" - and they also drive
-`allowCooking` on the stream's child COMP, which takes effect at once. A disabled
+when the process starts - so `Capturestate` reads "Requires Restart" until you do -
+and they also drive `allowCooking` on the stream's child COMP, which takes effect at
+once. A disabled
 stream keeps every channel it has, reading zero, because a channel that VANISHES
 breaks its consumers with no error anywhere (DESIGN.md 6.2).
 
@@ -745,7 +746,11 @@ MOVED_PARS = ("Slotassign", "Streamhands", "Streampose", "Streamface",
               "Camera",
               # `Keeplayout` moved from Vision to Advanced: it is a build-time
               # preference, not something anybody touches while running.
-              "Keeplayout")
+              "Keeplayout",
+              # `Handbox` moved from Vision to Attributes the day after it was
+              # added: it decides which attribute channels reach the output, which
+              # is what every other toggle on that page does.
+              "Handbox")
 RETIRED_PAGES = ("Sidecar",)
 
 # The order the Vision page reads in: is it running, what is it looking at, what is
@@ -757,8 +762,16 @@ VISION_PAGE_ORDER = (
     "Streamhands", "Streampose", "Streamface", "Streamsegment", "Segquality",
     "Streamdepth", "Slotassign",
     "Resw", "Resh", "Renderw", "Renderh", "Orthowidth",
-    "Screenspaceonly", "Deleteempty", "Fingertipsonly", "Handbox",
+    "Screenspaceonly", "Deleteempty", "Fingertipsonly",
 )
+
+# The three live defaults. `op('..')` because these expressions are evaluated on the
+# vision COMP, and `render1`/`cam1` are its SIBLINGS at /project1 - `op('render1')`
+# from here searches the COMP's own children and finds nothing.
+RENDER_W_EXPR = "op('../render1').width if op('../render1') is not None else 1280"
+RENDER_H_EXPR = "op('../render1').height if op('../render1') is not None else 720"
+ORTHO_EXPR = ("op('../cam1').par.orthowidth.eval() "
+              "if op('../cam1') is not None else 1")
 
 # Defaults for the aspect and pixel conversions. MEASURED: the sidecar requests and
 # receives 1280x720 (DESIGN.md 2.6), and Vision is fastest there.
@@ -977,14 +990,14 @@ def main():
     # reports them in (appletd/slots.py). NOTE the consequence: with this on, a
     # single LEFT hand puts nothing in h0, so every h0_* channel reads zero.
     par_slots = page.appendToggle(
-        "Slotassign", label="Assign Slots (restart to apply)")[0]
+        "Slotassign", label="Assign Slots")[0]
     par_slots.default = True
 
     # Which Vision requests the sidecar runs. LAUNCH FLAGS, read once when the
-    # process starts (DESIGN.md 6.4) - hence "restart to apply". What they save is
-    # INFERENCE, not channels: a disabled stream keeps every channel it has, reading
-    # zero, because a channel that vanishes breaks its consumers silently
-    # (DESIGN.md 6.2).
+    # process starts (DESIGN.md 6.4), which is what `Capturestate` reports. What
+    # they save is INFERENCE, not channels: a disabled stream keeps every channel it
+    # has, reading zero, because a channel that vanishes breaks its consumers
+    # silently (DESIGN.md 6.2).
     #
     # TWO effects since 2026-08-21, and the label says so. The flag reaches the
     # sidecar only on a restart, but `tools/td_add_groups.py` also binds
@@ -1018,7 +1031,7 @@ def main():
                                    ("depth", "Depth Map  (23 ms/frame)", False)):
         par = stream_pars.setdefault(stream, page.appendToggle(
             "Stream" + stream,
-            label="%s (off freezes it; restart to apply)" % label)[0])
+            label=label)[0])
         par.default = default
 
     # The mask's quality: a LAUNCH FLAG, like the toggles above, because the request
@@ -1034,7 +1047,7 @@ def main():
     # appletd/streams.py so the sidecar's command line and this menu cannot
     # disagree about what a level is called.
     par_quality = page.appendMenu(
-        "Segquality", label="Mask Quality (restart to apply)")[0]
+        "Segquality", label="Mask Quality")[0]
     par_quality.menuNames = list(SEGMENT_QUALITIES)
     par_quality.menuLabels = [
         "%s  (%s)" % (name.capitalize(), note) for name, note in zip(
@@ -1050,11 +1063,19 @@ def main():
     # its default says - both measured, both in DESIGN.md 2.11. `previous` is the
     # record of what existed, so it answers the only question that matters here.
     par_w.default, par_h.default = DEFAULT_WIDTH, DEFAULT_HEIGHT
+    # THESE THREE DEFAULT TO AN EXPRESSION, not a number, and that is the point:
+    # `_ty` is scaled by the RENDER's aspect, so a render resized after the build
+    # used to leave the transform on last build's numbers - a wrong position with
+    # nothing to see. An expression tracks it. `is not None` rather than a bare
+    # `or`, because a render of width 0 is a real reading and should not fall back.
     par_rw = page.appendInt("Renderw", label="Render Width")[0]
     par_rh = page.appendInt("Renderh", label="Render Height")[0]
     par_rw.default, par_rh.default = DEFAULT_WIDTH, DEFAULT_HEIGHT
+    par_rw.defaultExpr = RENDER_W_EXPR
+    par_rh.defaultExpr = RENDER_H_EXPR
     par_ortho = page.appendFloat("Orthowidth", label="Camera Ortho Width")[0]
     par_ortho.default = DEFAULT_ORTHO_WIDTH
+    par_ortho.defaultExpr = ORTHO_EXPR
 
     # The output shaping: what LEAVES the COMP, as opposed to what it computes.
     par_screen = page.appendToggle(
@@ -1092,9 +1113,6 @@ def main():
     par_tips = page.appendToggle(
         "Fingertipsonly", label="Finger Tips Only")[0]
     par_tips.default = False
-    par_box = page.appendToggle(
-        "Handbox", label="Hand Box and Size")[0]
-    par_box.default = True
 
     # Whether the builders may move nodes. `appletd.td_layout.placement` has the
     # rule and what it cannot protect - the short version is that it holds the group
@@ -1119,7 +1137,7 @@ def main():
     # at once while the sidecar keeps sending to the old one until it is restarted.
     # The visible symptom of that gap is `sc_uptime_s` freezing, which is the same
     # signal as a dead sidecar - so the label says restart.
-    par_port = advanced.appendInt("Oscport", label="OSC Base Port (restart to apply)")[0]
+    par_port = advanced.appendInt("Oscport", label="OSC Base Port")[0]
     par_port.default = OSC_PORT
 
     advanced.appendPulse("Printstatus", label="Print Status")
@@ -1166,7 +1184,7 @@ def main():
              ("Renderw", par_rw), ("Renderh", par_rh),
              ("Orthowidth", par_ortho), ("Screenspaceonly", par_screen),
              ("Keeplayout", par_keep), ("Deleteempty", par_empty),
-             ("Fingertipsonly", par_tips), ("Handbox", par_box),
+             ("Fingertipsonly", par_tips),
              ("Segquality", par_quality), ("Maskbuffer", par_mask),
              ("Depthbuffer", par_depthbuf),
              ("Oscport", par_port),
@@ -1177,28 +1195,43 @@ def main():
         if name not in previous:
             parameter.val = parameter.default
 
-    # Read the render's real resolution and the camera's real ortho width when they
-    # are there to read, so the common case needs no tuning at all.
-    render = parent.op("render1")
-    if render is not None:
-        par_rw.val = int(render.par.resolutionw.eval())
-        par_rh.val = int(render.par.resolutionh.eval())
-        print("   (took render %dx%d from %s)"
-              % (par_rw.eval(), par_rh.eval(), render.path))
-    camera = parent.op("cam1")
-    if camera is not None and camera.par.projection.eval() == "ortho":
-        par_ortho.val = float(camera.par.orthowidth.eval())
-        print("   (took Orthowidth %.3f from %s)" % (par_ortho.eval(), camera.path))
+    # A NEW parameter is put into EXPRESSION mode, so the render's size and the
+    # camera's ortho width are read live rather than copied once at build. This
+    # replaced three one-shot `.val =` reads on 2026-08-23: they were correct at the
+    # moment the builder ran and silently stale the moment somebody resized the
+    # render, and a wrong `_ty` looks exactly like a right one.
+    #
+    # UNCONDITIONALLY, not just when new, and that is not a lost value: the code
+    # this replaces overwrote all three from `render1` and `cam1` on EVERY build, so
+    # any constant sitting in one of them was put there by a builder and not by a
+    # person. Type a number over the expression and the next rebuild takes it back -
+    # exactly as it always did.
+    for name, parameter, expression in (("Renderw", par_rw, RENDER_W_EXPR),
+                                        ("Renderh", par_rh, RENDER_H_EXPR),
+                                        ("Orthowidth", par_ortho, ORTHO_EXPR)):
+        # Assigning `.expr` switches the parameter into expression mode by itself.
+        # `ParMode` is deliberately not named here: it is not reachable as a bare
+        # global or off `td` in every context a builder runs in, and reaching for it
+        # cost two failed builds on 2026-08-23.
+        parameter.expr = expression
+        print("   %-11s %-56s -> %s" % (name, expression, parameter.eval()))
 
-    # Anything the user had tuned wins, except where the render and camera just gave
-    # a better answer.
+    # Anything the user had tuned wins - except a parameter now driven by an
+    # expression, where the expression IS the better answer. That test replaced a
+    # hardcoded list of three names checked against `render`/`camera` being present:
+    # asking the parameter what mode it is in cannot fall out of step with the block
+    # above, and a name list can. (It already did - deleting those two variables on
+    # 2026-08-23 left the list referring to them, `main()` raised here, and three
+    # parameters were left reading 0.)
     for name, value in previous.items():
         if not hasattr(comp.par, name):
             continue                    # a parameter a later builder owns
-        if name in ("Orthowidth", "Renderw", "Renderh") and (
-                render is not None or camera is not None):
+        parameter = getattr(comp.par, name)
+        # A non-empty `.expr` IS "this parameter is driven by an expression", and it
+        # needs no enum to ask.
+        if parameter.expr:
             continue
-        getattr(comp.par, name).val = value
+        parameter.val = value
 
     # EVERY `Stream*` toggle must be in the launcher's table, or it is a control that
     # cannot reach the process it claims to control. MEASURED as a real failure on

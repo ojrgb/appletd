@@ -144,10 +144,11 @@ COOK_GATED = {
     # coordinate spaces for people who are not there.
     #
     # NOTE the one confusing consequence, and it is worth the trade: these toggles
-    # are LAUNCH FLAGS for the sidecar and say "restart to apply", but freezing
-    # takes effect immediately. Turning a stream on therefore stops the freeze at
-    # once and starts the inference at the next restart. Freezing a stream nobody is
-    # producing is right either way round.
+    # are LAUNCH FLAGS for the sidecar, but freezing takes effect immediately.
+    # Turning a stream on therefore stops the freeze at once and starts the
+    # inference at the next restart. Freezing a stream nobody is producing is right
+    # either way round. The labels no longer say "restart to apply" - `Capturestate`
+    # says "Requires Restart" instead, which is one place rather than five.
     "hands": ("Streamhands",),
     "pose": ("Streampose",),
     "face": ("Streamface",),
@@ -590,6 +591,25 @@ def _apply_trim(comp, wanted, verbose=False):
     toggle = getattr(comp.par, TRIM_TOGGLE, None)
     on = True if toggle is None else bool(toggle.eval())
     keep = _trim_keep(comp, wanted)
+    # AN EMPTY KEEP LIST IS NOT "KEEP NOTHING". It means every group reported
+    # disabled - which is what happens when all the `Stream*` toggles are off - and
+    # writing "" to a Select that is not bypassed empties the output in total
+    # silence: no error, no warning, `out1` at 0 channels and every consumer
+    # downstream reading nothing.
+    #
+    # MEASURED on 2026-08-23, and it took four queries to find: two builder runs
+    # aborted midway, which left every parameter in MOVED_PARS at 0 because those
+    # are destroyed and re-appended on every build and the restore pass never ran.
+    # The next build then faithfully restored the zeros, every stream read disabled,
+    # and the trim dropped all 1,786 channels while reporting "0 of 1786 kept" as
+    # though that were a normal result.
+    #
+    # So: bypass, and say why. A component with everything switched off should show
+    # you everything frozen, not nothing at all.
+    if keep is not None and not keep:
+        report.append("%s: every group reports disabled - BYPASSED rather than "
+                      "emitting nothing. Check the Stream toggles." % TRIM_CHOP)
+        keep = None
     if keep is not None:
         trim.par.channames = " ".join(keep)
     trim.bypass = keep is None or not on
@@ -617,6 +637,16 @@ def _apply_trim(comp, wanted, verbose=False):
             name, _, detail = line.partition(": ")
             print("   %-15s %s" % (name, detail))
     return report
+
+
+# name -> the label it should now have. See the note in `_page`: labels on existing
+# parameters are left alone by default, so a rename has to be listed here or it only
+# ever applies to somebody building the network from scratch.
+RELABELLED = {
+    # "Verbosity" is a word about the CODE. What the menu actually chooses is how
+    # much the component computes, which is a level of detail.
+    "Verbosity": "Level of Detail",
+}
 
 
 def _page(comp, name="Attributes"):
@@ -651,9 +681,30 @@ def _page(comp, name="Attributes"):
     # too - a rebuild must not overwrite a label somebody edited.
     existing = {par.name: par for par in comp.customPars}
 
+    # DELIBERATE RELABELS. `_page` never touches an existing parameter's label,
+    # for the good reason in the block above - a rebuild must not overwrite a label
+    # somebody edited. That also means renaming one is impossible without saying so
+    # explicitly, which is what this table is: name -> the label it should now have.
+    # Applied to parameters that already exist, and only to these names.
+    for name, label in RELABELLED.items():
+        par = existing.get(name)
+        if par is not None and par.label != label:
+            print("   relabelled %s: %r -> %r" % (name, par.label, label))
+            par.label = label
+
+    # `Handbox` lives here rather than on Vision, where it was born on 2026-08-23:
+    # it decides which attribute channels reach the output, which is exactly what
+    # every other toggle on this page does. `td_build_vision.py` lists it in
+    # MOVED_PARS and destroys the old one first, because TouchDesigner will not hold
+    # one custom parameter name on two pages.
+    if HANDBOX_TOGGLE not in existing:
+        box = page.appendToggle(HANDBOX_TOGGLE, label="Hand Box and Size")[0]
+        box.default = True
+        box.val = True
+
     menu = existing.get("Verbosity")
     if menu is None:
-        menu = page.appendMenu("Verbosity", label="Verbosity")[0]
+        menu = page.appendMenu("Verbosity", label="Level of Detail")[0]
         menu.val = "Interaction"
     menu.menuNames = list(PRESETS)
     menu.menuLabels = list(PRESETS)

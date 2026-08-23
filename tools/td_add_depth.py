@@ -435,7 +435,14 @@ def main():
     on_par = existing.get("Depthpinson")
     if on_par is None:
         on_par = page.appendToggle(
-            "Depthpinson", label="Use Pins  (metric depth; restart to apply)")[0]
+            "Depthpinson", label="Use Pins  (metric depth)")[0]
+    else:
+        # A DELIBERATE RELABEL. Existing parameters keep their labels - a rebuild
+        # must not overwrite one somebody edited - so dropping "restart to apply"
+        # from this label on 2026-08-23 needed saying explicitly or it would only
+        # ever have applied to a network built from scratch. `Capturestate` reports
+        # "Requires Restart" now, in one place instead of five labels.
+        on_par.label = "Use Pins  (metric depth)"
         on_par.val = True
     on_par.default = True
 

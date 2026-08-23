@@ -3451,3 +3451,60 @@ all, and it looked like the toggle drove nothing. Parameter Execute callbacks ar
 deferred to end of frame - the same fact that reset `Verbosity` in August - so the
 trim list had not been rewritten yet. Read on the next call it was 96 channels.
 Worth writing down because the symptom is identical to a toggle that is not wired.
+
+---
+
+## 2026-08-23 — six small panel changes, and the silent failure they uncovered
+
+`Handbox` moved to Attributes. "restart to apply" and "off freezes it" gone from
+every label. `Renderw`, `Renderh` and `Orthowidth` are EXPRESSIONS now.
+`Verbosity` reads "Level of Detail". The buffer paths were already
+`/tmp/appletd_*.buf` - the rename did that on its own.
+
+### Three one-shot reads became three expressions
+
+The builder used to read `render1` and `cam1` once and copy the numbers in. Correct
+at the moment it ran, silently stale the moment somebody resized the render - and
+`_ty` is scaled by the render's aspect, so a wrong position looks exactly like a
+right one. They are `op('../render1').width if op('../render1') is not None else
+1280` and friends.
+
+`op('../render1')`, not `op('render1')`. The expression evaluates on the vision
+COMP, so the bare form searches the COMP's own children and finds nothing at all.
+
+### Three failures on the way, each teaching the same thing
+
+**`ParMode` is not reachable.** Not as a bare global, not off `td`. Two builds died
+on it. Assigning `.expr` switches the parameter into expression mode by itself, and
+a non-empty `.expr` is a better test for "driven by an expression" than any enum -
+so `ParMode` is not named anywhere now.
+
+**Deleting a variable left a dangling reference eight lines down.** Removing the
+`render`/`camera` reads broke `if name in ("Orthowidth", "Renderw", "Renderh") and
+(render is not None or camera is not None)` in the restore loop below. `main()`
+raised there, halfway through. That check is now `if parameter.expr: continue` -
+asking the parameter what it is cannot fall out of step with the block above, and a
+hardcoded list of three names can, and did.
+
+**A relabel has to be deliberate.** `_page` never touches an existing parameter's
+label, for the good reason that a rebuild must not overwrite one somebody edited.
+So renaming `Verbosity` did nothing at all until a `RELABELLED` table was added.
+`Depthpinson` needed the same treatment in `td_add_depth.py`.
+
+### And the real find: an empty keep list emptied the output in silence
+
+Those two aborted builds left every parameter in `MOVED_PARS` at 0 - they are
+destroyed and re-appended on every build, and the restore pass never ran. The next
+build then faithfully restored the zeros. Every `Stream*` toggle read False, so
+every group reported disabled, so the trim dropped all 1,786 channels and wrote an
+empty keep list to a Select that was not bypassed.
+
+`out1` went to **0 channels**. No error. No warning. No operator in the COMP
+flagged. The builder printed "trim_empty  0 of 1786 channels kept" as though that
+were a normal reading, and it took four queries to work out why.
+
+`_apply_trim` now treats an empty keep list as a fault rather than an instruction:
+bypass, and say "every group reports disabled - check the Stream toggles". A
+component with everything switched off should show you everything frozen, not
+nothing at all. That is the same principle as DESIGN.md 6.2 on vanishing channels,
+one operator further downstream.
