@@ -11,12 +11,18 @@ Hugging Face account at run time, and `models/` is gitignored.
 - Conversion: [apple/coreml-depth-anything-v2-small](https://huggingface.co/apple/coreml-depth-anything-v2-small)
 - Upstream: [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2)
 
-**Check the upstream licence before shipping a product built on the depth
-stream.** Depth Anything V2's smaller checkpoints and its larger ones have not
-always carried the same terms, and "it downloaded without asking me anything" is
-not a licence grant. The other four streams — hands, body pose, face and person
-segmentation — use Apple's Vision framework, which ships in macOS and needs no
-model file, so nothing here applies to them.
+**Both are Apache-2.0**, read off the Hugging Face model cards on 2026-08-23:
+Apple's Core ML conversion and the upstream `depth-anything/Depth-Anything-V2-Small`.
+So the depth stream is usable commercially, with attribution, like this repository.
+
+**The SMALL model only.** Depth Anything V2's Base and Large checkpoints are
+CC-BY-NC-4.0 — non-commercial. Swap one in for accuracy and you inherit its terms,
+and `tools/fetch_models.sh` fetching something without asking you anything is not a
+licence grant.
+
+The other four streams — hands, body pose, face and person segmentation — use Apple's
+Vision framework, which ships in macOS and needs no model file, so none of this
+applies to them.
 
 ## pyobjc
 
