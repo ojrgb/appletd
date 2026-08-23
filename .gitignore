@@ -31,3 +31,9 @@ Backup/
 # The local MCP bridge config. No secrets in it, but it is a dev-environment file -
 # it describes how THIS machine drives TouchDesigner, not anything a user needs.
 .mcp.json
+
+# The author's own spikes. Untracked on purpose - they are personal working files,
+# not part of the component, and they were committed once by accident on 2026-08-23
+# by a `git add -A tools` and stripped back out of history before any push.
+tools/vision_landmarks.py
+tools/vision_landmarks_live.py

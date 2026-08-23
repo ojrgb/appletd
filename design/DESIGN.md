@@ -602,7 +602,7 @@ Against the running instance (099), not read anywhere:
   the COMP itself. This is the third distinct way `.inputs` has lied.
 - **A Global OP Shortcut resolves from a nested network**, VERIFIED: a COMP with
   `par.opshortcut = 'VisionProbe'` and a custom parameter was read by a Constant
-  CHOP two levels down through `op.AppletdProbe.par.Testval`, returning 0.375 with no
+  CHOP two levels down through `op.VisionProbe.par.Testval`, returning 0.375 with no
   error. That is what makes shared parameters possible without `parent(N)`, which
   has to be counted per operator and breaks the next time anything moves. The
   shortcut namespace is global to the project.
