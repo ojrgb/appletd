@@ -91,6 +91,37 @@ def test_every_named_module_actually_exists() -> None:
     assert missing == []
 
 
+def test_the_panel_module_travels_but_is_not_a_runtime_requirement() -> None:
+    """`install` is embedded so the panel can `mod()` it before any install exists -
+    it has to probe and render with nothing on disk. It is deliberately NOT in
+    RUNTIME_MODULES, which is what `probe()` measures completeness against: the
+    sidecar never imports it."""
+    assert "install" in install.EMBEDDED_MODULES
+    assert "install" not in install.RUNTIME_MODULES
+    assert set(install.RUNTIME_MODULES) < set(install.EMBEDDED_MODULES)
+
+
+def test_the_panel_module_imports_nothing_the_toe_cannot_provide() -> None:
+    """It is read out of a Text DAT by `mod()`, so it may import the standard library
+    and nothing else. A pyobjc or numpy import here would make the panel unusable
+    before the install that provides them - which is the only time it matters.
+
+    Over the AST, not the text. The first version of this test grepped for
+    "import objc" and failed on `_VERIFY_IMPORTS`, which is a STRING telling a
+    subprocess what to import - the same text-versus-behaviour mistake this file
+    corrected in three other tests an hour earlier.
+    """
+    tree = ast.parse(Path(install.__file__).read_text())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    outside = imported - set(sys.stdlib_module_names)
+    assert outside == set(), "install.py imports %s" % sorted(outside)
+
+
 # ---------------------------------------------------------------------------
 # The interpreter probe
 # ---------------------------------------------------------------------------
@@ -483,6 +514,19 @@ def test_the_real_requirements_file_parses_and_names_pyobjc_and_numpy() -> None:
     assert "pyobjc-framework-vision" in joined
     assert "numpy" in joined
     assert all("==" in line for line in lines), "an unpinned runtime requirement"
+
+
+def test_the_pinned_requirements_literal_matches_the_file() -> None:
+    """`REQUIREMENTS` is a literal because an install has no repository behind it -
+    a `.toe` on somebody else's machine has no `requirements.txt` to read. So the
+    file is the source of truth and this holds the literal against it.
+
+    Without this, a bumped pin in the file installs one thing from the terminal and
+    another from the button, and the difference is invisible until something breaks
+    on a machine you cannot see.
+    """
+    repo_root = str(Path(install.__file__).parent.parent)
+    assert list(install.REQUIREMENTS) == install.requirement_lines(repo_root)
 
 
 def test_the_shell_model_fetcher_agrees_with_these_constants() -> None:

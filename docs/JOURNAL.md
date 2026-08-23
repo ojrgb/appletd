@@ -4096,3 +4096,57 @@ about 30 ms.
 Text assertions about generated code test the generator's vocabulary, not its
 behaviour. Three tests in this file were that, and a mutation run is the only thing
 that told me.
+
+---
+
+## 2026-08-23 — the Install button works, and it proved its own hardest state by accident
+
+`tools/td_add_install.py`: `Install` and `Installstate` on Vision, `Forceinstall` on
+Advanced, and three DATs - a control module, a Parameter Execute for the pulses, and an
+Execute DAT that probes when the project opens.
+
+Pressed it. It found `~/.venvs/appletd/bin/python`, **downloaded nothing**, pip-installed
+into `<root>/site-packages`, wrote 20 modules, and stamped
+`INSTALLED.json`. `Installstate` reads `Installed - appletd` and the button greys itself
+out. The installed copy runs `-m appletd.sidecar --list-cameras`.
+
+### The panel reads its own logic out of the .toe
+
+It has to probe and render a script BEFORE any install exists - and before one does
+there is no `appletd` package on disk to import. So `install_control` does `mod()` on
+the embedded `install` DAT. That works only because `install.py` imports nothing but
+the standard library, so there is now a test asserting exactly that, **over the AST**.
+
+The first version of that test grepped the text for `import objc` and failed on
+`_VERIFY_IMPORTS` - a STRING telling a subprocess what to import. Third time today
+that a text assertion about code was the wrong instrument.
+
+### `Update needed` fired for real, and I did not arrange it
+
+Between the first install and the second I changed `install.py` - which is embedded,
+so the content hash moved. The panel said, unprompted:
+
+    Update needed - installed 5b63a1da7f21, this file wants 24fc09dfa95a
+
+That is the exact case the version stamp exists for: the package on disk and the
+package in the `.toe` disagreeing, which otherwise runs the OLD `derive` on every cook
+with no error and wrong channels. It demonstrated itself in the course of ordinary
+work, which is the best kind of evidence.
+
+### And the stamp was lying about the interpreter
+
+It recorded `"python_version": "3.11.16"` - the PINNED DOWNLOAD version - for an
+install that had reused a 3.11.9 venv. Nothing was broken by it, and that is why it is
+worth writing down: a stamp that misreports what it installed is a fact somebody will
+one day rely on. It asks the interpreter now.
+
+Which cost the fourth generator-escaping bug of the day: `print("%d.%d.%d"%...)` inside
+a template consumed by `%` formatting. Ten tests went red at once, which is the good
+version of that mistake.
+
+### Two smaller things worth keeping
+
+`onPulse`, not `onValueChange` - a pulse never fires the latter, and that cost an
+afternoon in August on a different button. And the Vision page is sorted so `Install`
+and `Installstate` come FIRST, because nothing else on the page can work until the
+install is done.

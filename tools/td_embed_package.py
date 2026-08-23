@@ -71,20 +71,20 @@ what was tested, or the version hash means nothing.
 
 
 def module_sources():
-    """`(name, text)` for every runtime module, in `RUNTIME_MODULES` order.
+    """`(name, text)` for every embedded module, in `EMBEDDED_MODULES` order.
 
     Raises on a missing file rather than embedding a short list. A package that is
     missing a module installs cleanly and then fails at its first import, on somebody
     else's machine, which is the worst place to find out.
     """
-    from appletd.install import RUNTIME_MODULES
+    from appletd.install import EMBEDDED_MODULES
 
     out = []
-    for name in RUNTIME_MODULES:
+    for name in EMBEDDED_MODULES:
         path = os.path.join(REPO_ROOT, "appletd", name + ".py")
         if not os.path.exists(path):
             raise RuntimeError(
-                "appletd/%s.py is in RUNTIME_MODULES and not on disk. Either the "
+                "appletd/%s.py is in EMBEDDED_MODULES and not on disk. Either the "
                 "module was renamed and the list was not, or the list is wrong - "
                 "appletd/tests/test_install.py is what normally catches this."
                 % name)
@@ -195,10 +195,10 @@ def main():
                 % (name, len(dat.text), len(text),
                    " - trailing newline" if dat.text.rstrip() == text.rstrip()
                    else ""))
-    from appletd.install import RUNTIME_MODULES
-    if len(sources) != len(RUNTIME_MODULES):
-        failures.append("embedded %d modules, RUNTIME_MODULES names %d"
-                        % (len(sources), len(RUNTIME_MODULES)))
+    from appletd.install import EMBEDDED_MODULES
+    if len(sources) != len(EMBEDDED_MODULES):
+        failures.append("embedded %d modules, EMBEDDED_MODULES names %d"
+                        % (len(sources), len(EMBEDDED_MODULES)))
 
     print()
     if failures:

@@ -140,6 +140,10 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     # The embedded package container. Off to one side: nothing wires to it and
     # nothing cooks it - the Install button reads it on demand.
     "src": (-7 * COL_W, MASTER_ROW_H),
+    # The install panel's three DATs, in their own row below the sidecar's.
+    "install_control": (-5 * COL_W, -4 * MASTER_ROW_H - 5 * ROW_H),
+    "install_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H - 5 * ROW_H),
+    "install_start": (-1 * COL_W, -4 * MASTER_ROW_H - 5 * ROW_H),
 }
 
 

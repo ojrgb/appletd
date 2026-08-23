@@ -57,6 +57,9 @@ LAYERS = (
     # file and touches nothing in the CHOP or TOP networks. Last also means the
     # version it stamps reflects the sources as they are at the end of a chain run.
     ("embed", "td_embed_package.py"),
+    # AFTER embed: the button writes out what embed put in, and its own probe
+    # reads the version embed stamped.
+    ("install", "td_add_install.py"),
 )
 
 # What each layer drags along, and why. Anything listed here is added to the run
@@ -83,6 +86,8 @@ REQUIRES = {
     # NOTHING. `embed` writes Text DATs into a container nothing is wired to, and a
     # parameter nothing cooks. It is the only layer here that cannot change a channel.
     "embed": (),
+    # `install` reads `Sourceversion`, which `embed` writes.
+    "install": ("embed",),
     # Nothing. It owns its own page, its own three operators and its own callbacks,
     # and `td_build_vision.py` no longer destroys any of them (OTHER_BUILDERS_OWN).
     "segmentation": (),

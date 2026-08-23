@@ -144,6 +144,20 @@ RUNTIME_MODULES: Final[tuple[str, ...]] = (
     "types",
 )
 
+# `install` itself, which the PANEL needs and the sidecar does not.
+#
+# The panel has to probe and render before any install exists, so it cannot import
+# this module from disk - there is nothing there yet. It reads it out of the `.toe`
+# with TouchDesigner's `mod()` instead, which works because everything in this file
+# is standard library and nothing here imports pyobjc, numpy or TouchDesigner.
+#
+# Kept OUT of RUNTIME_MODULES on purpose: that tuple is "what the sidecar process
+# needs", and `probe()` measures completeness against it. This one travels so the
+# panel can use it, and is written out with the rest so an install is a whole package
+# rather than the 19 files somebody happened to need.
+PANEL_MODULES: Final[tuple[str, ...]] = ("install",)
+EMBEDDED_MODULES: Final[tuple[str, ...]] = RUNTIME_MODULES + PANEL_MODULES
+
 # What `verify_interpreter` imports. Both matter and neither is optional: `objc` is
 # the whole point, and `numpy` was a runtime dependency declared only in the dev
 # requirements until 2026-08-23 - an interpreter with pyobjc and no numpy runs until
@@ -252,10 +266,15 @@ fi
 # Written only after everything above succeeded, because its whole job is to answer
 # "is this install complete and current". A stamp written early would say yes about a
 # half-finished install, which is worse than no stamp at all.
+# ASKED, not assumed. This used to write the pinned DOWNLOAD version, which is
+# wrong whenever the probe reused an interpreter that was already here - it recorded
+# 3.11.16 for a 3.11.9 venv. A stamp that misreports what it installed is worse than
+# one that omits it.
+PYVER=$("$PYTHON" -c 'import sys;print("%%d.%%d.%%d"%%sys.version_info[:3])')
 cat > "$ROOT/%(stamp)s" <<STAMPEOF
 {
  "python": "$PYTHON",
- "python_version": "%(python_version)s",
+ "python_version": "$PYVER",
  "version": "$VERSION"
 }
 STAMPEOF
@@ -287,7 +306,6 @@ def render_script(root: str, version: str, requirements: Iterable[str],
         "python_url": PYTHON_URL,
         "python_sha": PYTHON_SHA256,
         "python_bin": PYTHON_BIN,
-        "python_version": PYTHON_VERSION,
         "site_packages": SITE_PACKAGES,
         "requirements": " ".join('"%s"' % r for r in requirements),
         "want_model": "yes" if want_model else "no",
@@ -299,6 +317,22 @@ def render_script(root: str, version: str, requirements: Iterable[str],
         "stamp": STAMP_NAME,
         "version": version,
     }
+
+
+# The pins, as a literal, because an install has NO REPOSITORY BEHIND IT. `.toe` in,
+# `requirements.txt` nowhere. `requirement_lines()` below reads the real file and
+# `test_install.py` holds these against it, which is the same literal-plus-check shape
+# as RUNTIME_MODULES - and for the same reason: the copy that ships cannot import the
+# thing it is a copy of.
+REQUIREMENTS: Final[tuple[str, ...]] = (
+    "pyobjc-framework-Vision==12.2.2",
+    "pyobjc-framework-Quartz==12.2.2",
+    "pyobjc-framework-AVFoundation==12.2.2",
+    "pyobjc-framework-libdispatch==12.2.2",
+    "pyobjc-framework-CoreML==12.2.2",
+    "pyobjc-framework-CoreMedia==12.2.2",
+    "numpy==2.2.6",
+)
 
 
 def requirement_lines(repo_root: str) -> list[str]:
@@ -516,7 +550,6 @@ def write_stamp(root: str, version: str, python: str) -> str:
     payload = {
         "version": version,
         "python": python,
-        "python_version": PYTHON_VERSION,
         "modules": list(RUNTIME_MODULES),
     }
     with open(path, "w", encoding="utf-8") as handle:
