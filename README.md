@@ -15,15 +15,14 @@ Maintained with ❤️ by **Omer Jacoby** —
 [instagram](https://www.instagram.com/ojrgb/) ·
 [linkedin](https://www.linkedin.com/in/omer-jacoby-12a12886/)
 
-<video src="https://github.com/ojrgb/appletd/raw/main/docs/media/demo-hands.mp4"
-       autoplay loop muted playsinline width="900"></video>
+[![hands driving instanced geometry, with the CHOP viewer alongside](docs/media/demo-hands.jpg)](https://github.com/ojrgb/appletd/blob/main/docs/media/demo-hands.mp4)
+
+*Click to play. A repo-hosted `.mp4` cannot autoplay inline — GitHub serves it as
+`application/octet-stream`, which no browser will put in a `<video>` element.*
 
 <!-- The depth clip, when it exists: the person mask and the depth map side by side,
-     somebody walking toward the camera. docs/media/README.md has the recipe.
-
-<video src="https://github.com/ojrgb/appletd/raw/main/docs/media/demo-depth.mp4"
-       autoplay loop muted playsinline width="900"></video>
-     -->
+     somebody walking toward the camera. Same pattern - poster jpg, link to the blob.
+     docs/media/README.md has the recipe. -->
 
 ---
 

@@ -7,29 +7,44 @@ Two clips, referenced from the top of `README.md`.
 | `demo-hands.mp4` | a hand driving instanced geometry, **with the CHOP viewer in the same frame** so the channels and the motion are visibly one event. A crop showing only the geometry loses the whole argument. ~12 s loop. |
 | `demo-depth.mp4` | the person mask and the depth map side by side, somebody walking toward the camera so the depth actually changes. |
 
-## Why .mp4 and not .gif
+## How video actually renders on GitHub — MEASURED, because the obvious answer is wrong
 
-H.264 is roughly five to ten times smaller than the same clip as a GIF, with real
-colour instead of 256 dithered ones. For a page that is mostly read on github.com
-there is no reason to pay for a GIF.
+**A `.mp4` in this repository cannot autoplay inline.** Every URL form serves the
+wrong content type, checked on 2026-08-23:
 
-**It has to be a `<video>` tag with an absolute raw URL.** GitHub's Markdown does not
-turn an `.mp4` into a player from a relative `![](…)`:
+    github.com/ojrgb/appletd/raw/main/docs/media/demo-hands.mp4
+    raw.githubusercontent.com/ojrgb/appletd/main/docs/media/demo-hands.mp4
+    github.com/ojrgb/appletd/blob/main/docs/media/demo-hands.mp4?raw=1
 
-```html
-<video src="https://github.com/ojrgb/appletd/raw/main/docs/media/demo-hands.mp4"
-       autoplay loop muted playsinline width="900"></video>
+        all three: 200, content-type: application/octet-stream
+
+No browser will put `application/octet-stream` in a `<video>` element, so the tag
+renders as nothing whatever the `src`. GitHub DOES play video inline - but only for
+files uploaded by dragging them into an issue, a PR or a release, which returns a
+`github.com/user-attachments/assets/<uuid>` URL served as `video/mp4`.
+
+So there are three options and each costs something:
+
+| | inline autoplay | in the repo | notes |
+|---|---|---|---|
+| **poster `.jpg` linked to the blob** | no, one click | **yes** | what this repo does. Self-contained, never breaks |
+| `user-attachments` URL from an issue upload | **yes** | no | the asset lives in GitHub's store, not in a clone |
+| `.gif` | yes | yes | 5-10x the bytes, 256 dithered colours |
+
+**Both is reasonable**: keep the `.mp4` in the repo as the artefact, and additionally
+paste a `user-attachments` URL into the README for the inline player. That is the only
+way to get autoplay without a GIF, and the repo still has the file when GitHub does not.
+
+### The poster
+
+```sh
+ffmpeg -ss 2.2 -i demo-hands.mp4 -frames:v 1 \
+  -vf "scale=900:-1:flags=lanczos" -q:v 3 demo-hands.jpg
 ```
 
-`muted` is not optional — a browser will not autoplay anything with sound. `playsinline`
-stops iOS Safari opening it fullscreen.
-
-**If that does not render**, the always-works fallback is a poster frame that links to
-the video. Uglier, degrades everywhere, never breaks:
-
-```markdown
-[![hands](docs/media/demo-hands.png)](https://github.com/ojrgb/appletd/raw/main/docs/media/demo-hands.mp4)
-```
+JPEG, not PNG: the same frame was 478 KB as a PNG and 56 KB as a JPEG at `-q:v 3`,
+and nobody can tell. Pick a moment where the hand is actually in shot - a poster of
+an empty frame advertises an empty demo.
 
 ## Encoding
 

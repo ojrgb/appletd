@@ -20,9 +20,11 @@ project. These are here to show it doing something.
 
 ## The clip
 
-`.mp4`, not `.gif` — five to ten times smaller for the same thing, in real colour.
-`docs/media/README.md` has the ffmpeg recipe and the `<video>` tag that renders it.
-Under about 3 MB.
+`.mp4` plus a `.jpg` poster frame, and the README links the poster to the video.
+A repo-hosted `.mp4` cannot autoplay inline — GitHub serves it as
+`application/octet-stream` — so a `<video>` tag pointed at it renders nothing.
+`docs/media/README.md` has the measurement, the three options and the ffmpeg recipes.
+Under about 2 MB for the clip.
 
 **The fixture privacy rule applies here too.** Body, clothing and room identify
 somebody perfectly well without a face in shot, and a video entering git history is
