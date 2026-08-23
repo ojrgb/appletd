@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Profile `/project1/vision` HONESTLY: cook time and cook COUNT, across frames.
+"""Profile `/project1/appletd` HONESTLY: cook time and cook COUNT, across frames.
 
     Paste into a Text DAT, Run Script. Then, a second later:
-        op('/project1/vision/profiler').module.report()
+        op('/project1/appletd/profiler').module.report()
     or read the JSON it writes to /tmp/vision_profile.json.
 
 WHY THIS EXISTS, and it is the only reason. `cookTime` is a LAST-VALUE GAUGE: it
@@ -36,7 +36,7 @@ here touches a TD object from anywhere else.
 Ref: DESIGN.md 2.11 (the gauge), docs/BUILD_PLAN.md step 10.
 """
 
-MASTER_PATH = "/project1/vision"
+MASTER_PATH = "/project1/appletd"
 DAT_NAME = "profiler"
 # 90 frames at TouchDesigner's default 60 fps is 1.5 s - long enough to span about
 # 45 data frames at the sidecar's 30 fps, so an operator that cooks on alternate

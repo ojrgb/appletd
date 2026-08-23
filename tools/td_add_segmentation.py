@@ -1,6 +1,6 @@
 """The TouchDesigner side of the segmentation mask: shared memory -> a TOP.
 
-WHAT THIS BUILDS, inside /project1/vision:
+WHAT THIS BUILDS, inside /project1/appletd:
 
     seg_mask (Script TOP)  ->  seg_fit (Fit TOP)  ->  outmask (Out TOP)
        reads the mmap            undoes the             the COMP's only
@@ -59,7 +59,7 @@ import sys
 # TouchDesigner's run(), and by tools/td_rebuild.py before each exec.
 # tools/td_paths.py has the full reasoning and why it is not imported from there.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MASTER_PATH = "/project1/vision"
+MASTER_PATH = "/project1/appletd"
 
 PAGE = "Segmentation"
 
@@ -160,7 +160,7 @@ def _reader(path):
 
 
 def onCook(scriptOp):
-    comp = op.Vision or scriptOp.parent()
+    comp = op.Appletd or scriptOp.parent()
 
     # `Streamsegment`, the SAME toggle that puts `segment` on the sidecar's command
     # line - one control for "am I using the mask", not two. The read side and the
@@ -380,7 +380,7 @@ def main():
     if not hasattr(script.par, "Tick"):
         tick_page.appendInt("Tick", label="Tick (drives the cook - do not set)")
     script.par.Tick.expr = (
-        "absTime.frame if op.Vision.par.Streamsegment else 0")
+        "absTime.frame if op.Appletd.par.Streamsegment else 0")
     script.par.Tick.readOnly = True
     # `mono8fixed`: one byte per pixel on the GPU, which is what a mask is. The
     # default rgba8fixed would carry four and copy three of them for nothing.

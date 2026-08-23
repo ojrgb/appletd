@@ -408,7 +408,7 @@ def box_expressions(branch: BoxBranch, gain: str,
 
               which is the box-relative point composed into image space and then
               into the target space, in one operator. `gain` is the target space's
-              own factor K as an expression - `op.Vision.par.Orthowidth` and
+              own factor K as an expression - `op.Appletd.par.Orthowidth` and
               friends - and `channel` is the accessor template for a channel on the
               group's input.
     Why here: the arithmetic is the part of this that has been wrong twice, both

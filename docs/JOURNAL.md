@@ -4202,3 +4202,39 @@ are ignored BEFORE any example lands - otherwise a repo that ships example proje
 accumulates dozens of near-identical binaries in its history, and removing them later
 is expensive. Checked both ways: `hands.toe` and `demo.gif` are tracked,
 `hands.toe.1` and `Backup/hands.2.toe` are not.
+
+---
+
+## 2026-08-23 — the COMP is `appletd`, and the rename found two things a grep would not
+
+`/project1/vision` -> `/project1/appletd`, and the Global OP Shortcut `Vision` ->
+`Appletd`. 32 files. `.mcp.json` untracked at the same time - no secrets in it, but it
+describes how THIS machine drives TouchDesigner and a user needs none of it.
+
+### Three patterns, and I got two of them
+
+The careful part was deciding what NOT to change: "Vision framework", "Vision page"
+and every `VNDetect*` request name all contain the word and none of them move. So the
+rename was done as three exact patterns rather than one word.
+
+Two of the three were wrong:
+
+**`op.Vision.` with a trailing dot missed `comp = op.Vision`.** Nine files, and the
+symptom was `'td.OPShortcut' object has no attribute 'Vision'` from inside
+`derive_callbacks.onCook` - every Script CHOP in the component, at once.
+
+**`/project1/vision` missed `COMP_NAME = "vision"`.** So `td_build_vision.py` did not
+find a COMP at its new path, did what it is supposed to do, and BUILT A SECOND ONE -
+an 18-child shell at `/project1/vision` beside the real 37-child component.
+
+That one is worth keeping because the builder behaved correctly throughout. A script
+whose job is "create this if absent" will create it if you move it and do not tell the
+script. The stray had 0 channels on `out1` and no `src` container, which is how it was
+identified as the artefact rather than the real thing before anything was destroyed.
+
+### And the version stamp caught its own consequence
+
+The sed touched embedded modules too, so `Sourceversion` moved and the panel said
+`Update needed - installed 24fc09dfa95a, this file wants 88237a5bf626` without being
+asked. Second time today it has reported a real divergence during ordinary work rather
+than in a test.

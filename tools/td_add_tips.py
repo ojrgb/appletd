@@ -2,7 +2,7 @@
 """`/project1/handtips`: fingertip x and y as two channels, paired hand by hand.
 
     Paste into a Text DAT, Run Script. Idempotent. Independent of every other
-    builder - it READS `/project1/vision`'s hands output and writes nothing inside it.
+    builder - it READS `/project1/appletd`'s hands output and writes nothing inside it.
 
     WHAT IT BUILDS
 
@@ -38,7 +38,7 @@ Shuffle wants depends on how it is reshaping:
 Both keep the same paired fingertip order; only the axis grouping changes.
 
 WHY IT IS OUTSIDE THE VISION COMP. Nothing in here is part of the contract - it is a
-view for looking at, and the seven builders that own `/project1/vision` all destroy
+view for looking at, and the seven builders that own `/project1/appletd` all destroy
 and rebuild what they own. A Select living in there would be either destroyed or a
 permanent exception. Out here it is yours: rename it, duplicate it, wire it anywhere,
 and re-running any vision builder cannot touch it.
@@ -71,7 +71,7 @@ import sys
 # tools/td_paths.py has the full reasoning and why it is not imported from there.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARENT_PATH = "/project1"
-VISION_PATH = "/project1/vision"
+VISION_PATH = "/project1/appletd"
 COMP_NAME = "handtips"
 
 # `vision`'s output connector for the hands stream. 0-indexed: out1 is hands,

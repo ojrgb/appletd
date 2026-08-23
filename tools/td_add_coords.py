@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """A `coords` COMP in every stream: world and pixel spaces. Paste, Run. Idempotent.
 
-    WHAT IT BUILDS, in each of `/project1/vision`'s streams, from the normalised
+    WHAT IT BUILDS, in each of `/project1/appletd`'s streams, from the normalised
     values the sidecar sends:
 
         _tx, _ty   world units for an orthographic camera
@@ -16,7 +16,7 @@ EVERY STREAM, ONE SET OF PARAMETERS. This used to be hands-only, inside the hand
 COMP, because hands came first. A body's joints and a face's box want exactly the
 same conversion, and one Ortho Width has to serve all three or they disagree about
 where the world is - which is why the parameters live on the master COMP and every
-stream's branches read them through `op.Vision`.
+stream's branches read them through `op.Appletd`.
 
 WHICH CHANNELS, AND WITH WHAT RULE, comes from `appletd/spaces.py` rather than
 from a pattern written here. Three distinctions it makes that a pattern cannot:
@@ -90,14 +90,14 @@ import sys
 # TouchDesigner's run(), and by tools/td_rebuild.py before each exec.
 # tools/td_paths.py has the full reasoning and why it is not imported from there.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MASTER_PATH = "/project1/vision"
+MASTER_PATH = "/project1/appletd"
 GROUP = "coords"
 
 # Every user parameter lives on the master COMP, reached through its Global OP
 # Shortcut. NOT `parent(2)`: a group is two levels below the parameters now, so a
 # relative reference would have to be counted per operator and would break the next
-# time anything moved. `op.Vision` is depth-independent and survives a rename.
-MASTER_PAR = "op.Vision.par.%s"
+# time anything moved. `op.Appletd` is depth-independent and survives a rename.
+MASTER_PAR = "op.Appletd.par.%s"
 
 # The GAIN each output space applies, by suffix - the `K` in the docstring's
 # arithmetic. The pre-offset and the channel list come from appletd/spaces.py;
@@ -194,7 +194,7 @@ DERIVED_HALVES = (
 
 HALF_NOTES = """%(name)s - the %(space)s half of the coordinate spaces.
 
-Everything in here is gated by op.Vision.par.%(toggle)s. `allowCooking` on this COMP
+Everything in here is gated by op.Appletd.par.%(toggle)s. `allowCooking` on this COMP
 is written by groups_callbacks whenever that toggle changes - an attribute cannot
 take an expression, so it has to be written rather than bound.
 

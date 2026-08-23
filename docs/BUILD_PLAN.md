@@ -629,7 +629,7 @@ Built exactly that. `DESIGN.md` 6.5 has the structure and the reasoning; the sho
 version:
 
 ```
-/project1/vision            every user parameter, six pages, the sidecar control
+/project1/appletd            every user parameter, six pages, the sidecar control
   hands_osc 10000 -> hands -> out1     499 channels
   pose_osc  10001 -> pose  -> out2     275   (was 123: +152 coordinate channels)
   face_osc  10002 -> face  -> out3      39   (was  23: + 16)
@@ -656,7 +656,7 @@ and extents apart, and it also marks face landmark points `box_relative` - they 
 normalised to the bounding box rather than the image, so they are deliberately not
 transformed (DESIGN.md 7).
 
-**Every expression is `op.Vision.par.X` now**, via a Global OP Shortcut, replacing
+**Every expression is `op.Appletd.par.X` now**, via a Global OP Shortcut, replacing
 `parent(2).par.X`. A group sits two levels below the parameters instead of one, so a
 relative reference would have to be counted per operator; the shortcut is
 depth-independent and VERIFIED to resolve from a nested network before anything was
@@ -687,7 +687,7 @@ built on it.
     td_add_latches.py   the proximity latches          (hands)
     td_add_groups.py    the Attributes page and the cook gating
 
-**PATHS CHANGED.** `/project1/appletd` is now `/project1/vision/hands`, and the
+**PATHS CHANGED.** `/project1/appletd` is now `/project1/appletd/hands`, and the
 same for pose and face. The master builder rewires anything that was wired to the
 old COMPs and inherits their tuned parameter values, so a rebuild does not reset
 somebody's Ortho Width - verified: Mincutoff 3.170 and Beta 10.000 survived, both
@@ -1507,7 +1507,7 @@ created the file - published the blank and it served that texture for ever.
 
 Fixed with a `Tick` parameter on the Script TOP:
 
-    absTime.frame if op.Vision.par.Streamsegment else 0
+    absTime.frame if op.Appletd.par.Streamsegment else 0
 
 Verified both directions: cooks climb with the toggle on, settle with it off. Which
 also gives `Streamsegment` real gating, the thing `allowCooking` refused a bare
@@ -1752,7 +1752,7 @@ Two roots, and the distinction is the design:
 | **checkout root** | `tools/td_paths.py`, from its own `__file__` | the builders. Developer tools, run from a git checkout |
 | **install root** | `Installroot`, a parameter on Advanced | the generated DATs and the sidecar. Written by Install |
 
-Every builder imports `td_paths`; every generated DAT reads `op.Vision.par.Installroot`.
+Every builder imports `td_paths`; every generated DAT reads `op.Appletd.par.Installroot`.
 `SIDECAR_PYTHON` goes the same way - a parameter, defaulting to TD's own interpreter,
 with a probe that checks the binary exists rather than letting `Popen` fail.
 

@@ -1,6 +1,6 @@
 """Where every generated operator sits. The one place any of it is decided.
 
-WHY THIS EXISTS. Seven different scripts build the inside of `/project1/vision`, and
+WHY THIS EXISTS. Seven different scripts build the inside of `/project1/appletd`, and
 each one owns a few operators. Every one of them carried its own coordinates, and
 the results were exactly what that arrangement predicts: `tools/td_add_filter.py`
 and `tools/td_add_coords.py` both placed their group at (-400, -300), directly on
@@ -46,7 +46,7 @@ COL_W: Final = 200
 ROW_H: Final = 150
 
 # ---------------------------------------------------------------------------
-# Inside a STREAM (`/project1/vision/hands` and its siblings)
+# Inside a STREAM (`/project1/appletd/hands` and its siblings)
 #
 # The data path runs left to right along row 0; everything that only READS the
 # stream hangs below it, one row each, so the row a node is on says whether it is
@@ -85,7 +85,7 @@ STREAM_NODES: Final[dict[str, tuple[int, int]]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Inside the MASTER COMP (`/project1/vision`)
+# Inside the MASTER COMP (`/project1/appletd`)
 #
 # One row per stream, and the sidecar's own machinery below them all.
 # ---------------------------------------------------------------------------

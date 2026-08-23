@@ -64,7 +64,7 @@ appletd/sequences.py (the sweeps).
 
 # The hands STREAM, inside the master COMP - the latch channels live on its
 # output, not on the master's (which exposes each stream on its own connector).
-COMP_PATH = "/project1/vision/hands"
+COMP_PATH = "/project1/appletd/hands"
 
 # Where the baseline is kept between runs. A Text DAT inside the COMP rather than
 # a module global, because each run of this script is a fresh execution with no

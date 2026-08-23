@@ -545,7 +545,7 @@ watching.
 **`h?_conf_median` moved to `housekeeping` on 2026-08-23 and is still what to gate
 on** (`DESIGN.md` 6.2). That is exactly why it was routed there rather than dropped:
 the advice has not changed, only where you read the channel. Reference it as
-`op('/project1/vision/housekeeping')['h0_conf_median']`, or switch
+`op('/project1/appletd/housekeeping')['h0_conf_median']`, or switch
 `Delete Empty Channels` off to get everything back on `out1`.
 
 #### Two toggles that only change the output
@@ -795,10 +795,10 @@ position, and the box channels are on the wire so either form recovers the other
 ## Where the parameters live: one COMP, three streams
 
 Restructured 2026-08-21. **Every parameter on this page and the ones below belongs
-to `/project1/vision`**, the master COMP, and every stream reads it:
+to `/project1/appletd`**, the master COMP, and every stream reads it:
 
 ```
-/project1/vision   Vision, Filter, Advanced, Tuning, Attributes, Segmentation
+/project1/appletd   Vision, Filter, Advanced, Tuning, Attributes, Segmentation
   hands_osc 10000  ->  hands  --+
   pose_osc  10001  ->  pose   --+->  merge_streams  ->  trim_empty  ->  out1
   face_osc  10002  ->  face   --+          |                             258 chans
@@ -822,12 +822,12 @@ output connector. Channel names still say which stream they came from — `h0_`,
 
 One `Smoothing` toggle drives all three filters; one `Orthowidth` drives all three
 sets of coordinate spaces. Reference a channel as
-`op('/project1/vision')['h0_index_tip_tx']` off the merged output, or
-`op('/project1/vision/hands')['h0_index_tip_tx']` to reach past the trim into a
+`op('/project1/appletd')['h0_index_tip_tx']` off the merged output, or
+`op('/project1/appletd/hands')['h0_index_tip_tx']` to reach past the trim into a
 stream, or wire from the master's one output connector — an operator outside the COMP
 cannot wire to a nested one.
 
-**Paths changed:** `/project1/appletd` is now `/project1/vision/hands`.
+**Paths changed:** `/project1/appletd` is now `/project1/appletd/hands`.
 
 ### Page: Vision — everything operational
 
@@ -1238,7 +1238,7 @@ to match on both sides, not something a consumer of this COMP chooses. The sidec
 writes there and the Script TOP reads there - the same arrangement `Oscport` has.
 
 **If the mask is black**, the first thing to check is that `seg_mask` is cooking:
-`op('/project1/vision/seg_mask').totalCooks` has to be CLIMBING. An input-less Script
+`op('/project1/appletd/seg_mask').totalCooks` has to be CLIMBING. An input-less Script
 TOP is never dirtied on its own, so it is driven by a `Tick` parameter whose
 expression changes every frame - and that expression is gated on `Streamsegment`, so
 with the toggle off the operator correctly stops cooking altogether (`DESIGN.md` 2.21).

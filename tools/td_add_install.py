@@ -42,7 +42,7 @@ import sys
 # tools/td_paths.py has the full reasoning and why it is not imported from there.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-MASTER_PATH = "/project1/vision"
+MASTER_PATH = "/project1/appletd"
 CONTROL = "install_control"
 CALLBACKS = "install_callbacks"
 ON_START = "install_start"

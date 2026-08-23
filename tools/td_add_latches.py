@@ -73,7 +73,7 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The master COMP holds every parameter; the hands STREAM holds this
 # network. Both are named, because this script writes to both.
-MASTER_PATH = "/project1/vision"
+MASTER_PATH = "/project1/appletd"
 COMP_PATH = MASTER_PATH + "/hands"
 # The group this builds. Everything it owns lives inside, so the top-level network
 # shows one node - and since nothing outside reads these channels except through

@@ -26,7 +26,7 @@ entry is what went wrong on the way.
 
 ## What is running
 
-    /project1/vision            every parameter, SEVEN pages, the capture control
+    /project1/appletd            every parameter, SEVEN pages, the capture control
 
       hands_osc 10000  ->  hands  --+                505 channels
       pose_osc  10001  ->  pose   --+-> merge_streams -> trim_empty -> out1  (CHOP)

@@ -2,12 +2,12 @@
 """PROTOTYPE: `temporal` as ONE Script CHOP, beside the 74-operator version.
 
     Paste into a Text DAT, Run Script. Idempotent. Builds
-    `/project1/vision/hands/temporal_proto` with `allowCooking = False`, wired from
+    `/project1/appletd/hands/temporal_proto` with `allowCooking = False`, wired from
     the same two inputs as the real group and attached to NOTHING downstream.
 
     TO A/B IT
-        op('/project1/vision/hands/temporal_proto').allowCooking = True
-        op('/project1/vision/hands/temporal').allowCooking = False
+        op('/project1/appletd/hands/temporal_proto').allowCooking = True
+        op('/project1/appletd/hands/temporal').allowCooking = False
         ...then tools/td_profile.py, and swap them back.
 
 WHAT QUESTION THIS ANSWERS. Whether collapsing a chain of native CHOPs into a single
@@ -17,7 +17,7 @@ channels, and at the measured ~1.2 microseconds per channel per operator
 The verdict is in `docs/BUILD_PLAN.md` step 12.
 
 WHY IT IS BUILT HERE AND NOT IN A DUPLICATED COMP. The obvious way to sandbox this
-is to duplicate `/project1/vision` and freeze the copy - and it would bind port
+is to duplicate `/project1/appletd` and freeze the copy - and it would bind port
 10000 a SECOND TIME. A whole builder was retired for exactly that
 (`td_setup_osc.py`, see `tools/td_build_vision.py`). Two OSC In CHOPs on one port is
 a stream arriving in a CHOP nobody is reading, and it would be indistinguishable from
@@ -49,7 +49,7 @@ import sys
 # TouchDesigner's run(), and by tools/td_rebuild.py before each exec.
 # tools/td_paths.py has the full reasoning and why it is not imported from there.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MASTER_PATH = "/project1/vision"
+MASTER_PATH = "/project1/appletd"
 COMP_PATH = MASTER_PATH + "/hands"
 GROUP = "temporal_proto"
 
@@ -141,7 +141,7 @@ def onCook(scriptOp):
     # almost never. Per-cook `store()` is not a scratchpad.
     dt = max(0.0, float(absTime.stepSeconds))
 
-    comp = op.Vision or scriptOp.parent(2)
+    comp = op.Appletd or scriptOp.parent(2)
     out = advance(values, state, _params(comp), dt)
 
     # The same channel cache derive_chop uses: `len(scriptOp.chans())` because

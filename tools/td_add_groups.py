@@ -68,7 +68,7 @@ from fnmatch import fnmatchcase
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The master COMP holds every parameter; the hands STREAM holds this
 # network. Both are named, because this script writes to both.
-MASTER_PATH = "/project1/vision"
+MASTER_PATH = "/project1/appletd"
 COMP_PATH = MASTER_PATH + "/hands"
 
 # The groups, their defaults, and how each one's toggle reaches what it gates.

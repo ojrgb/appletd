@@ -27,3 +27,7 @@ models/
 *.toe.[0-9]*
 *.tox.[0-9]*
 Backup/
+
+# The local MCP bridge config. No secrets in it, but it is a dev-environment file -
+# it describes how THIS machine drives TouchDesigner, not anything a user needs.
+.mcp.json

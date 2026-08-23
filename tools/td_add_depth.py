@@ -1,6 +1,6 @@
 """The TouchDesigner side of the depth map: shared memory -> a TOP, plus the fit.
 
-WHAT THIS BUILDS, inside /project1/vision:
+WHAT THIS BUILDS, inside /project1/appletd:
 
     depth_map (Script TOP)  ->  depth_fit (Fit TOP)  ->  outdepth (Out TOP)
        reads the fp16 mmap,       undoes the              the COMP's second
@@ -43,7 +43,7 @@ import sys
 # TouchDesigner's run(), and by tools/td_rebuild.py before each exec.
 # tools/td_paths.py has the full reasoning and why it is not imported from there.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MASTER_PATH = "/project1/vision"
+MASTER_PATH = "/project1/appletd"
 
 PAGE = "Depth"
 
@@ -165,7 +165,7 @@ def _reader(path):
 
 
 def onCook(scriptOp):
-    comp = op.Vision or scriptOp.parent()
+    comp = op.Appletd or scriptOp.parent()
 
     # `Streamdepth` - the SAME toggle that puts `depth` on the sidecar's command line.
     # What actually stops the work is the `Tick` expression going constant (see the
@@ -642,7 +642,7 @@ def main():
         tick_page = script.appendCustomPage("Tick")
     if not hasattr(script.par, "Tick"):
         tick_page.appendInt("Tick", label="Tick (drives the cook - do not set)")
-    script.par.Tick.expr = "absTime.frame if op.Vision.par.Streamdepth else 0"
+    script.par.Tick.expr = "absTime.frame if op.Appletd.par.Streamdepth else 0"
     script.par.Tick.readOnly = True
 
     # -- the Fit TOP -------------------------------------------------------

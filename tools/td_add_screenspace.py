@@ -70,7 +70,7 @@ import sys
 # TouchDesigner's run(), and by tools/td_rebuild.py before each exec.
 # tools/td_paths.py has the full reasoning and why it is not imported from there.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MASTER_PATH = "/project1/vision"
+MASTER_PATH = "/project1/appletd"
 NODE = "screen_only"
 PARAMETER = "Screenspaceonly"
 
@@ -107,7 +107,7 @@ NOTES = """SCREEN_ONLY - the one place in this COMP where channels are meant to 
   merge_out -> screen_only -> out1
 
 A Delete CHOP holding the exact list of channels that HAVE a screen-space
-companion. With op.Vision.par.%(parameter)s on, they are removed and only
+companion. With op.Appletd.par.%(parameter)s on, they are removed and only
 TouchDesigner's own world and pixel coordinates leave the stream. With it off this
 operator is BYPASSED - bit-exact, and not computing.
 
