@@ -8,7 +8,24 @@ Every measured figure in this project, in one place.
     12 cores (8 performance, 4 efficiency), 48 GB
     macOS 26.5.2
     TouchDesigner, via the MCP bridge
-    Python 3.11, pyobjc 12.2.2
+    Python 3.11.9 (pyenv, in ~/.venvs/appletd), pyobjc 12.2.2, numpy 2.2.6
+
+**WHICH INTERPRETER, and why it is named.** Every figure below was taken on that
+pyenv 3.11.9 venv. From 2026-08-23 the Install button can instead download a
+relocatable CPython 3.11.16, so the interpreter a user gets is not necessarily the one
+these numbers came from.
+
+Checked on 2026-08-23, both interpreters back to back over the same 60 fixture frames:
+the difference is **0.00 to 0.16 ms** across `fast`, `balanced`, `accurate` and depth -
+under half a percent, and inside run-to-run noise. Which is what the architecture
+predicts: the hot path is Apple framework code on the Neural Engine, the pyobjc C
+extension is the same wheel in both, and numpy is pinned to the same version.
+
+**Those comparison numbers are deliberately not recorded here.** They were taken while
+the machine was under other load (load average 3.0 to 4.6), so they are evidence that
+the two interpreters MATCH and not evidence of what either one costs. Recording them
+would put a figure in this file that `docs/STANDARDS.md` 3 would not accept, next to
+figures that it would.
 
 **Every inference figure here depends on the Neural Engine.** An M1, an Intel Mac or a
 machine where Core ML has quietly fallen back to CPU will not produce these numbers, and
