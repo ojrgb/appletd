@@ -132,6 +132,10 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "depth_callbacks": (-5 * COL_W, -4 * MASTER_ROW_H - 4 * ROW_H),
     "depth_par_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H - 4 * ROW_H),
     "profiler": (-3 * COL_W, -4 * MASTER_ROW_H - 2 * ROW_H),
+    # The two Parameter Execute DATs that watch the render and the camera, beside
+    # the other things that listen rather than control.
+    "renderchange": (-1 * COL_W, -4 * MASTER_ROW_H - 2 * ROW_H),
+    "camchange": (-1 * COL_W, -4 * MASTER_ROW_H - 4 * ROW_H),
     "notes": (-5 * COL_W, MASTER_ROW_H),
 }
 
