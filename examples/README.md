@@ -5,7 +5,7 @@ One folder per example. Each is self-contained and each says what it is for.
     examples/<name>/
         README.md      what it shows, what to press, what to look at
         <name>.toe     the project, openable on its own
-        demo.gif       a short loop of it working
+        demo.mp4       a short loop of it working
 
 `appletd.tox` in the repository root is the component itself — drop it into your own
 project. These are here to show it doing something.
@@ -18,9 +18,11 @@ project. These are here to show it doing something.
   and an example that quietly turns both on is an example that drops frames
 - **anything it assumes**, like a `render1` at a particular resolution
 
-## The GIF
+## The clip
 
-Under about 5 MB. A README that takes ten seconds to paint reads as abandoned.
+`.mp4`, not `.gif` — five to ten times smaller for the same thing, in real colour.
+`docs/media/README.md` has the ffmpeg recipe and the `<video>` tag that renders it.
+Under about 3 MB.
 
 **The fixture privacy rule applies here too.** Body, clothing and room identify
 somebody perfectly well without a face in shot, and a video entering git history is

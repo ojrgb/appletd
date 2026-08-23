@@ -16,11 +16,17 @@ Maintained with ❤️ by **Omer Jacoby** —
 [linkedin](https://www.linkedin.com/in/omer-jacoby-12a12886/)
 
 <!-- ────────────────────────────────────────────────────────────────────────
-     GIFs go here. Drop the files in docs/media/ and delete the comment markers.
-     See docs/media/README.md for what each one should show.
+     Videos go here. Drop the files in docs/media/ and delete the comment markers.
+     docs/media/README.md has the encoding recipe and what each one should show.
 
-![hands](docs/media/demo-hands.gif)
-![mask and depth](docs/media/demo-depth.gif)
+     A <video> tag with an ABSOLUTE raw URL, not a relative ![](). GitHub's Markdown
+     does not turn an .mp4 into a player from a relative image link.
+
+<video src="https://github.com/ojrgb/appletd/raw/main/docs/media/demo-hands.mp4"
+       autoplay loop muted playsinline width="900"></video>
+
+<video src="https://github.com/ojrgb/appletd/raw/main/docs/media/demo-depth.mp4"
+       autoplay loop muted playsinline width="900"></video>
 
      ──────────────────────────────────────────────────────────────────────── -->
 
