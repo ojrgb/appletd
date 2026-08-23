@@ -46,9 +46,14 @@ Ref: docs/ATTRIBUTES.md (Presence and Motion), docs/BUILD_PLAN.md step 2,
 DESIGN.md 2.10 (the clock), 2.11 (the operator behaviours).
 """
 
+import os
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
+# Derived from this file's own location. A literal path here meant the project
+# opened on exactly one machine; `__file__` is set by the shell, by
+# TouchDesigner's run(), and by tools/td_rebuild.py before each exec.
+# tools/td_paths.py has the full reasoning and why it is not imported from there.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The master COMP holds every parameter; the hands STREAM holds this
 # network. Both are named, because this script writes to both.
 MASTER_PATH = "/project1/vision"

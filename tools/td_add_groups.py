@@ -57,10 +57,15 @@ Ref: docs/ATTRIBUTES.md (the group table and the budget), docs/BUILD_PLAN.md ste
 3, DESIGN.md 2.10 (why memory needs a clock).
 """
 
+import os
 import sys
 from fnmatch import fnmatchcase
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
+# Derived from this file's own location. A literal path here meant the project
+# opened on exactly one machine; `__file__` is set by the shell, by
+# TouchDesigner's run(), and by tools/td_rebuild.py before each exec.
+# tools/td_paths.py has the full reasoning and why it is not imported from there.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The master COMP holds every parameter; the hands STREAM holds this
 # network. Both are named, because this script writes to both.
 MASTER_PATH = "/project1/vision"

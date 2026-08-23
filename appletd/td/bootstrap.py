@@ -3,7 +3,7 @@
     HOW TO USE IT, minimally: put this in a Text DAT and run it once.
 
         import sys
-        sys.path.append('/Users/omer/Documents/GitHub/appletd')
+        sys.path.append('/path/to/your/appletd')   # wherever you cloned it
         from appletd.td import bootstrap
         bootstrap.start()
 

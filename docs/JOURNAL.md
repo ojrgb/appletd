@@ -3705,3 +3705,50 @@ bound has to come from outside.
   the source running.
 - the status line carries `sends`, and `age`/`hands` only when hands is on - the
   distinction that made "why is depth not working" unanswerable in August.
+
+---
+
+## 2026-08-23 — the paths derive themselves, and one grep lied about it
+
+Fourteen builders carried `REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"` as a
+literal. All fourteen now compute it:
+
+    REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+That is the whole mechanism. A file inside the checkout knows where the checkout is,
+because it knows where it is.
+
+### Written out fourteen times rather than imported, on purpose
+
+A builder needs the repo root BEFORE it can put the repo on `sys.path`, so it cannot
+import anything from the repo to find out - including a module whose only job would
+be to tell it. `tools/td_paths.py` exists anyway, as the one place the reasoning
+lives and for the things that CAN import it (the probes, the tests).
+
+`__file__` is set in all three ways a builder runs: by the shell, by TouchDesigner's
+`run()`, and by `tools/td_rebuild.py`, which sets `namespace["__file__"] = path`
+before each `exec` - which it already did, so nothing had to change there.
+
+### The grep that lied
+
+The script that inserted `import os` checked `^import os$` first and reported
+`td_build_vision.py` already had one, at line 72. It does not. Line 72 is inside the
+generated launcher TEMPLATE - a triple-quoted string whose contents sit at column
+zero - and the module itself had **no module-level imports at all**, everything
+being imported inside `main()` because `td` does not exist outside TouchDesigner.
+
+So the build raised `name 'os' is not defined`. A regex over source text cannot tell
+code from a string containing code, and this file is 60% strings containing code.
+There is a note next to the real import now saying exactly this.
+
+### What is still a literal, and why it is not the same problem
+
+`SIDECAR_PYTHON`. There is no relationship between where this code lives and which
+Python has pyobjc installed, so there is nothing to compute - it is
+`os.path.expanduser("~/.venvs/appletd/bin/python")`, which removes the username
+without pretending to derive the rest. BUILD_PLAN step 21 is where it stops being a
+convention: TouchDesigner ships its own Python 3.11 with pip, so an Install button
+can put pyobjc beside it and this becomes computable too.
+
+Verified: the full chain runs clean and all four generated DATs carry the derived
+root. 544 tests pass.

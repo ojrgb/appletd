@@ -82,9 +82,14 @@ Ref: DESIGN.md 7 (the coordinate contract), 2.12 (box-relative points),
      docs/BUILD_PLAN.md step 7.3.
 """
 
+import os
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
+# Derived from this file's own location. A literal path here meant the project
+# opened on exactly one machine; `__file__` is set by the shell, by
+# TouchDesigner's run(), and by tools/td_rebuild.py before each exec.
+# tools/td_paths.py has the full reasoning and why it is not imported from there.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MASTER_PATH = "/project1/vision"
 GROUP = "coords"
 

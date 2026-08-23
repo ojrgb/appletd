@@ -26,9 +26,14 @@ exists to stop, so each entry says WHY it is there.
 Ref: docs/BUILD_PLAN.md step 14, docs/JOURNAL.md.
 """
 
+import os
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
+# Derived from this file's own location. A literal path here meant the project
+# opened on exactly one machine; `__file__` is set by the shell, by
+# TouchDesigner's run(), and by tools/td_rebuild.py before each exec.
+# tools/td_paths.py has the full reasoning and why it is not imported from there.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # layer -> the script that owns it, in CHAIN ORDER. The order is the dependency
 # order: `derive` reads `filter`'s output, `latches` reads `temporal`'s, `groups`
