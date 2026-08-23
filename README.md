@@ -15,20 +15,15 @@ Maintained with ❤️ by **Omer Jacoby** —
 [instagram](https://www.instagram.com/ojrgb/) ·
 [linkedin](https://www.linkedin.com/in/omer-jacoby-12a12886/)
 
-<!-- ────────────────────────────────────────────────────────────────────────
-     Videos go here. Drop the files in docs/media/ and delete the comment markers.
-     docs/media/README.md has the encoding recipe and what each one should show.
-
-     A <video> tag with an ABSOLUTE raw URL, not a relative ![](). GitHub's Markdown
-     does not turn an .mp4 into a player from a relative image link.
-
 <video src="https://github.com/ojrgb/appletd/raw/main/docs/media/demo-hands.mp4"
        autoplay loop muted playsinline width="900"></video>
 
+<!-- The depth clip, when it exists: the person mask and the depth map side by side,
+     somebody walking toward the camera. docs/media/README.md has the recipe.
+
 <video src="https://github.com/ojrgb/appletd/raw/main/docs/media/demo-depth.mp4"
        autoplay loop muted playsinline width="900"></video>
-
-     ──────────────────────────────────────────────────────────────────────── -->
+     -->
 
 ---
 
