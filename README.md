@@ -15,10 +15,9 @@ Maintained with ❤️ by **Omer Jacoby** —
 [instagram](https://www.instagram.com/ojrgb/) ·
 [linkedin](https://www.linkedin.com/in/omer-jacoby-12a12886/)
 
-[![hands driving instanced geometry, with the CHOP viewer alongside](docs/media/demo-hands.jpg)](https://github.com/ojrgb/appletd/blob/main/docs/media/demo-hands.mp4)
+[![a hand driving instanced geometry, with the CHOP viewer alongside](docs/media/demo-hands.gif)](https://github.com/ojrgb/appletd/blob/main/docs/media/demo-hands.mp4)
 
-*Click to play. A repo-hosted `.mp4` cannot autoplay inline — GitHub serves it as
-`application/octet-stream`, which no browser will put in a `<video>` element.*
+*Click for the full clip in real colour.*
 
 <!-- The depth clip, when it exists: the person mask and the depth map side by side,
      somebody walking toward the camera. Same pattern - poster jpg, link to the blob.

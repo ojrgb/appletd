@@ -7,46 +7,64 @@ Two clips, referenced from the top of `README.md`.
 | `demo-hands.mp4` | a hand driving instanced geometry, **with the CHOP viewer in the same frame** so the channels and the motion are visibly one event. A crop showing only the geometry loses the whole argument. ~12 s loop. |
 | `demo-depth.mp4` | the person mask and the depth map side by side, somebody walking toward the camera so the depth actually changes. |
 
-## How video actually renders on GitHub — MEASURED, because the obvious answer is wrong
+## What renders inline, and what it costs — MEASURED
 
 **A `.mp4` in this repository cannot autoplay inline.** Every URL form serves the
-wrong content type, checked on 2026-08-23:
+wrong content type, checked 2026-08-23:
 
-    github.com/ojrgb/appletd/raw/main/docs/media/demo-hands.mp4
-    raw.githubusercontent.com/ojrgb/appletd/main/docs/media/demo-hands.mp4
-    github.com/ojrgb/appletd/blob/main/docs/media/demo-hands.mp4?raw=1
-
-        all three: 200, content-type: application/octet-stream
+    github.com/ojrgb/appletd/raw/main/…      200  application/octet-stream
+    raw.githubusercontent.com/…              200  application/octet-stream
+    github.com/…/blob/main/…?raw=1           200  application/octet-stream
 
 No browser will put `application/octet-stream` in a `<video>` element, so the tag
-renders as nothing whatever the `src`. GitHub DOES play video inline - but only for
-files uploaded by dragging them into an issue, a PR or a release, which returns a
-`github.com/user-attachments/assets/<uuid>` URL served as `video/mp4`.
+renders nothing whatever the `src`. GitHub does play video inline, but only for files
+dragged into an issue, a PR or a release, which returns a
+`github.com/user-attachments/assets/<uuid>` URL served as `video/mp4` — and that asset
+is not in a clone.
 
-So there are three options and each costs something:
+**So a GIF is the only repo-tracked format that plays inline.** The cost, from this
+same 5.5 s clip of a CHOP viewer beside moving geometry — which is the worst case for
+a palette, being full-frame detail that changes every frame:
 
-| | inline autoplay | in the repo | notes |
-|---|---|---|---|
-| **poster `.jpg` linked to the blob** | no, one click | **yes** | what this repo does. Self-contained, never breaks |
-| `user-attachments` URL from an issue upload | **yes** | no | the asset lives in GitHub's store, not in a clone |
-| `.gif` | yes | yes | 5-10x the bytes, 256 dithered colours |
+| | size |
+|---|---|
+| the `.mp4`, 1280×720, 30 fps, crf 24 | **1.6 MB** |
+| GIF 900 wide, 15 fps, 256 colours | 13 MB |
+| GIF 720 wide, 12 fps, 256 colours | 7.4 MB |
+| GIF 720 wide, 12 fps, 64 colours | 4.6 MB |
+| GIF 720 wide, 12 fps, 32 colours | 3.4 MB |
+| **GIF 720 wide, 12 fps, 32 colours, trimmed to 3.5 s** | **2.2 MB** |
 
-**Both is reasonable**: keep the `.mp4` in the repo as the artefact, and additionally
-paste a `user-attachments` URL into the README for the inline player. That is the only
-way to get autoplay without a GIF, and the repo still has the file when GitHub does not.
+**Length is the lever, not resolution.** Dropping 900→640 saved 1 MB; trimming 5.5 s
+to 3.5 s saved 1.2 MB on top of that and costs almost nothing, because a loop only has
+to show the idea once. Colours are the second lever and screen UI is mostly flat, so
+32 bands far less than it would on video of a room.
 
-### The poster
+### What this repo does
+
+An inline GIF at 2.2 MB, **linked to the `.mp4`**. Motion on the page, and one click
+for the full length in real colour. The `.mp4` stays in the repository as the
+artefact — it is a fifth of the size and the thing worth keeping.
+
+## Encoding the GIF, in two passes
+
+One pass to build a palette from what CHANGES between frames, one to apply it:
 
 ```sh
-ffmpeg -ss 2.2 -i demo-hands.mp4 -frames:v 1 \
-  -vf "scale=900:-1:flags=lanczos" -q:v 3 demo-hands.jpg
+ffmpeg -y -t 3.5 -i demo-hands.mp4 \
+  -vf "fps=12,scale=720:-1:flags=lanczos,palettegen=max_colors=32:stats_mode=diff" p.png
+
+ffmpeg -y -t 3.5 -i demo-hands.mp4 -i p.png \
+  -lavfi "fps=12,scale=720:-1:flags=lanczos [x]; \
+          [x][1:v] paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" demo-hands.gif
 ```
 
-JPEG, not PNG: the same frame was 478 KB as a PNG and 56 KB as a JPEG at `-q:v 3`,
-and nobody can tell. Pick a moment where the hand is actually in shot - a poster of
-an empty frame advertises an empty demo.
+`stats_mode=diff` matters here: the background is static and the hand is not, so a
+palette built from what MOVES spends its 32 entries where they show. `dither=bayer`
+with a low `bayer_scale` stops flat UI areas crawling between frames — the default
+`sierra2_4a` looks better on photographs and worse on screen recordings.
 
-## Encoding
+## Encoding the mp4
 
 ```sh
 ffmpeg -i in.mov \
