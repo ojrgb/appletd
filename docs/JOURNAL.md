@@ -3573,3 +3573,43 @@ Because 0 there takes every pixel coordinate in the component to zero with no er
 anywhere, and it is reachable: the aborted builds left both at 0. `sc_src_w` reports 0
 for "not stated" and the reconcile refuses to write it, so nothing legitimate wants a
 zero. `clampMin` now makes it unreachable.
+
+---
+
+## 2026-08-23 — disabling `Presence` put the COMP in error
+
+    TypeError: float() argument must be a string or a real number, not 'NoneType'
+    (Parameter: const0value)  /project1/vision/hands/temporal/tmp_ready
+
+`tmp_ready` is a Constant CHOP whose three values are expressions reading
+`h0_active`, `h1_active` and `both_active`. Those are Presence-group channels, so
+switching `Presence` off removes them from `derive_chop` - and **indexing a CHOP for
+a channel that is not there returns `None`**, which `float()` will not take.
+
+That is the same fact measured yesterday when deciding how `Resw` should read
+`sc_src_w`: a missing channel is None, not an error and not zero. There it was the
+convenient half of the behaviour; here it is the expensive half.
+
+### Guarded through a named helper, not three inline `or 0`s
+
+`chan_or_zero()` in `td_add_temporal.py`, used at the three sites that read a channel
+by name. The name is the point - the docstring is where the reasoning lives, and the
+reasoning is not "None is annoying" but **why zero is the right answer at these three
+sites specifically**: every one is a flag or a counter where zero is the honest
+conservative reading. Presence not computed IS not active; motion not computed IS not
+moving; no `seq` yet IS not live. A latch that stays shut because nobody told it a
+hand was there is behaving correctly.
+
+### And where it is deliberately NOT used
+
+`tools/td_add_coords.py` reads `bbox_*` through the identical construct, and it does
+not get the guard. A zero gain there does not mean "unknown" - it collapses the
+transform and puts every point at the origin. A plausible wrong position is worse
+than an error, so that one is left to fail loudly if it ever can.
+
+### Swept the rest rather than fixing the one that was reported
+
+All 20 Attributes toggles, each flipped individually with gating applied
+synchronously and the whole project force-cooked: no other toggle produces an error,
+and none left residue behind. The two other guarded sites were found by grepping for
+the construct rather than by waiting for someone to hit them.

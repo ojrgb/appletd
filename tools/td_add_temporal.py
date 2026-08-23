@@ -60,6 +60,34 @@ COMP_PATH = MASTER_PATH + "/hands"
 GROUP = "temporal"
 PREFIX = "tmp_"
 
+
+def chan_or_zero(operator, channel):
+    """An expression reading one channel by name, safe when the channel is absent.
+
+    WHY IT HAS TO BE GUARDED. Indexing a CHOP for a channel that is not there returns
+    **None**, not an error and not zero (MEASURED 2026-08-23). A Constant CHOP's value
+    parameter then does `float(None)` and the operator goes into error:
+
+        TypeError: float() argument must be a string or a real number, not 'NoneType'
+
+    And the channel really can be absent. `derive()` only emits the groups that are
+    switched on, so turning `Presence` off removes `h0_active`, `h1_active` and
+    `both_active` - and `tmp_ready` read all three. Reported as "disabling Presence
+    shows an error on the COMP", which is exactly what it was.
+
+    WHY ZERO IS THE RIGHT FALLBACK HERE, and it is not a blanket rule. Every channel
+    read through this helper is a flag or a counter where zero is the honest
+    conservative answer: presence not computed IS not active, motion not computed IS
+    not moving, no `seq` yet IS not live. A latch that stays shut because nobody told
+    it a hand was there is correct behaviour.
+
+    It is deliberately NOT used for the coordinate branches in
+    `tools/td_add_coords.py`, which read `bbox_*` through the same construct. A zero
+    gain there does not mean "unknown", it collapses the transform and puts every
+    point at the origin - a plausible wrong position, which is worse than an error.
+    """
+    return "(op('%s')['%s'] or 0)" % (operator, channel)
+
 # Parameters stay on the TOP-LEVEL COMP so all tuning is in one place, so an
 # expression inside the group reaches them through the grandparent.
 # Every user parameter lives on the MASTER COMP now, and a nested operator reaches
@@ -584,7 +612,7 @@ def main():
     live2.seq.const.numBlocks = 2
     for index, hand in enumerate(("h0_active", "h1_active")):
         live2.par["name%d" % index] = hand
-        live2.par["value%d" % index].expr = "op('%slive')['seq']" % PREFIX
+        live2.par["value%d" % index].expr = chan_or_zero(PREFIX + "live", "seq")
     valid = make(td.logicCHOP, "valid")
     wire(valid, valid_raw, live2)
     valid.par.chopop = "and"
@@ -754,8 +782,8 @@ def main():
     gate.seq.const.numBlocks = len(HELD)
     for index, name in enumerate(HELD):
         gate.par["name%d" % index] = name
-        gate.par["value%d" % index].expr = (
-            "op('%smotion')['%s_moving']" % (PREFIX, name.split("_")[0]))
+        gate.par["value%d" % index].expr = chan_or_zero(
+            PREFIX + "motion", "%s_moving" % name.split("_")[0])
 
     not_gate = make(td.logicCHOP, "not_gate", ROW_Y - 900)
     wire(not_gate, gate)
@@ -800,9 +828,9 @@ def main():
     ready = make(td.constantCHOP, "ready", ROW_Y - 1200)
     ready.seq.const.numBlocks = 3
     for index, (name, source_expr) in enumerate((
-            ("h0_valid", "op('%sout_active')['h0_active']" % PREFIX),
-            ("h1_valid", "op('%sout_active')['h1_active']" % PREFIX),
-            ("both_valid", "op('%sboth_active')['both_active']" % PREFIX))):
+            ("h0_valid", chan_or_zero(PREFIX + "out_active", "h0_active")),
+            ("h1_valid", chan_or_zero(PREFIX + "out_active", "h1_active")),
+            ("both_valid", chan_or_zero(PREFIX + "both_active", "both_active")))):
         ready.par["name%d" % index] = name
         ready.par["value%d" % index].expr = source_expr
 
