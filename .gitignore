@@ -20,3 +20,10 @@ fixtures/*.mov
 # them with `./tools/fetch_models.sh`; docs/DEPTH.md is the first-run guide. The
 # compiled .mlmodelc is a build product of the .mlpackage and is equally not ours.
 models/
+
+# TouchDesigner writes a numbered backup beside every .toe on save, and a Backup/
+# folder next to it. Committing those would put dozens of near-identical binaries in
+# the history of a repo that ships example projects.
+*.toe.[0-9]*
+*.tox.[0-9]*
+Backup/

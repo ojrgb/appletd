@@ -4150,3 +4150,55 @@ version of that mistake.
 afternoon in August on a different button. And the Vision page is sorted so `Install`
 and `Installstate` come FIRST, because nothing else on the page can work until the
 install is done.
+
+---
+
+## 2026-08-23 — the .tox would have shipped one person's home directory
+
+Caught by asking one question before an export: what does a `.tox` actually carry?
+
+    derive_callbacks   REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
+    seg_callbacks      same
+    depth_callbacks    same
+    sidecar_control    same, plus SIDECAR_PYTHON = "/Users/omer/.venvs/..."
+    reads Installroot  False, in all four
+
+So a component handed to anybody else fails to `import appletd.derive` at its first
+cook - **even after a successful Install**, because nothing looked at where the install
+had put anything. This was BUILD_PLAN 21.2's unfinished half, recorded this morning as
+"only one of the two roots is real", and it would have shipped.
+
+### The order is the interesting part, and it is the opposite of obvious
+
+`BUILT_AT` - the checkout the DAT was generated from - **wins when it exists**.
+`Installroot` is the fallback.
+
+Preferring the install would mean that on the machine that built the file, a developer
+edits the repo and silently runs the installed copy instead. That is the two-copies
+hazard `Sourceversion` exists to catch one layer up, reintroduced at the layer below
+it. On anybody else's machine `BUILT_AT` does not exist, so `Installroot` is used,
+which is the case that makes a `.tox` work at all.
+
+### Proved without a second machine
+
+The only honest test is "does it work where the checkout is absent", and there is no
+second machine here. So: set `BUILT_AT` to a path that does not exist, in the live
+module, and ask again.
+
+    sidecar_control    -> ~/Library/Application Support/appletd
+    derive_callbacks   -> ~/Library/Application Support/appletd
+    seg_callbacks      -> ~/Library/Application Support/appletd
+    depth_callbacks    -> ~/Library/Application Support/appletd
+
+All four, and the interpreter resolves to the install's own Python when the checkout is
+gone. That is a simulation rather than a second Mac, and it is worth saying so - but it
+exercises the actual branch rather than reasoning about it.
+
+### And the examples folder, with the ignore that had to come first
+
+`examples/<name>/` with a README, a `.toe` and a GIF each. TouchDesigner writes a
+numbered backup beside every `.toe` on save and a `Backup/` folder next to it, so those
+are ignored BEFORE any example lands - otherwise a repo that ships example projects
+accumulates dozens of near-identical binaries in its history, and removing them later
+is expensive. Checked both ways: `hands.toe` and `demo.gif` are tracked,
+`hands.toe.1` and `Backup/hands.2.toe` are not.

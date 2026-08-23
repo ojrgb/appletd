@@ -106,11 +106,17 @@ interpreter and nothing is downloaded.
 
 ## Usage
 
-Open the project, find the **Vision** COMP, and switch `Active` on. That is it —
-the COMP launches the sidecar process itself, and the status light goes green.
+Drop [`appletd.tox`](appletd.tox) into your project, press **Install** on the Vision
+page and wait for `Installstate` to read `Installed` — once per machine, and it
+downloads nothing if you already have a working interpreter. Then switch `Active` on.
+The COMP launches the sidecar process itself and the status goes green.
+
+Working projects to open instead: [`examples/`](examples/).
 
 | parameter | does |
 |---|---|
+| `Install` | writes the package out, installs Python packages, fetches the model. Greys itself out when there is nothing to do |
+| `Installstate` | read-only. `Not installed`, `Installing - <step>`, `Update needed`, `Install failed - <why>`, or `Installed` |
 | `Active` | starts and stops the sidecar |
 | `Camera` | dropdown, refreshable — picks the device |
 | `Restart` | pulse; needed after changing anything the sidecar reads at launch |

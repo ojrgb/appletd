@@ -84,7 +84,52 @@ import signal
 import subprocess
 import time
 
-SIDECAR_PYTHON = %(python)r
+# The interpreter and the package location are both RESOLVED, not baked, and this is
+# what makes a shipped .tox work on somebody else's machine. Until 2026-08-23 both were
+# absolute paths from the machine that ran the builder, so a .tox carried one person's
+# home directory and the sidecar could not start anywhere else.
+#
+# BUILT_AT is the checkout this file was generated from and wins WHEN IT EXISTS - on the
+# machine that built it the repo is the source of truth, and preferring an installed
+# copy would mean silently running stale code. Elsewhere it does not exist, so
+# `Installroot` is used.
+BUILT_AT = %(repo)r
+SIDECAR_PYTHON_DEFAULT = %(python)r
+
+
+def package_root(comp=None):
+    """The directory containing `appletd`, or "" if neither candidate has it."""
+    comp = comp or op(%(comp)r)
+    tried = [BUILT_AT]
+    if comp is not None:
+        par = getattr(comp.par, "Installroot", None)
+        if par is not None:
+            tried.append(str(par.eval()))
+    for root in tried:
+        if root and os.path.isdir(os.path.join(root, "appletd")):
+            return root
+    return ""
+
+
+def sidecar_python(comp=None):
+    """Which interpreter to launch. `Sidecarpython` wins, then the install's own,
+    then the documented convention.
+
+    NOT verified here - `appletd.install.verify_interpreter` does that, by running it,
+    and the Install panel is where that belongs. This only has to pick.
+    """
+    comp = comp or op(%(comp)r)
+    if comp is not None:
+        par = getattr(comp.par, "Sidecarpython", None)
+        if par is not None and str(par.eval()).strip():
+            return os.path.expanduser(str(par.eval()).strip())
+        root = package_root(comp)
+        own = os.path.join(root, "python", "bin", "python3") if root else ""
+        if own and os.path.exists(own):
+            return own
+    return SIDECAR_PYTHON_DEFAULT
+
+
 # Where the sidecar's stdout and stderr go. Everything it prints about itself - which
 # streams actually started, which model it compiled, why a request refused to build -
 # used to go to /dev/null, which made "why did depth not start" a question nobody could
@@ -99,7 +144,6 @@ CAMERA_DEFAULT = "__default__"
 # One definition, so the launcher's loop and the builder's check cannot disagree -
 # which is the whole bug this table exists to prevent.
 REQUEST_TOGGLES = %(request_toggles)r
-REPO_ROOT = %(repo)r
 PORT = %(port)d
 MATCH = "appletd.sidecar"
 
@@ -223,7 +267,7 @@ def start():
               "sidecar would open the camera and run no inference at all.")
         return 0
 
-    argv = [SIDECAR_PYTHON, "-m", "appletd.sidecar",
+    argv = [sidecar_python(comp), "-m", "appletd.sidecar",
             "--port", str(port), "--parent-pid", str(os.getpid()),
             "--slots", "chirality" if assign else "off",
             "--streams", ",".join(streams)]
@@ -265,7 +309,7 @@ def start():
               %% (SIDECAR_LOG, problem))
         log = subprocess.DEVNULL
     process = subprocess.Popen(
-        argv, cwd=REPO_ROOT,
+        argv, cwd=package_root(comp) or None,
         # Line-buffered on the child's side already (`flush=True` at every print in
         # sidecar.py), so the log is readable while it runs rather than only after.
         stdout=log, stderr=subprocess.STDOUT)
@@ -459,8 +503,9 @@ def list_cameras():
     """
     try:
         found = subprocess.run(
-            [SIDECAR_PYTHON, "-m", "appletd.sidecar", "--list-cameras"],
-            cwd=REPO_ROOT, capture_output=True, text=True, timeout=20)
+            [sidecar_python(comp), "-m", "appletd.sidecar", "--list-cameras"],
+            cwd=package_root(comp) or None, capture_output=True, text=True,
+            timeout=20)
     except Exception as exc:
         print("[appletd] could not list cameras: %%r" %% (exc,))
         return []
