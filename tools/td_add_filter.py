@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Add the one-euro position filter to the visionhands COMP. Paste, Run Script.
+"""Add the one-euro position filter to the appletd COMP. Paste, Run Script.
 
     WHAT IT DOES. Smooths the 84 landmark positions - every `h{i}_{joint}_x` and
     `_y` - upstream of everything else, so every derived distance, angle, curl,
@@ -86,7 +86,7 @@ the last bit. Two things follow, and the second matters more than the first:
     anywhere (DESIGN.md 2.11). There is no Select to get wrong now: a scoped
     operator cannot drop a channel it was not asked about.
 
-Which channels get filtered is still decided by `visionhands/spaces.py` rather than
+Which channels get filtered is still decided by `appletd/spaces.py` rather than
 by a pattern written here - positions, extents and angles are smoothed, and
 confidences, counters and flags are not, because a smoothed confidence makes every
 gate that reads it lag behind the thing it gates. `spaces.scope_pattern()` turns
@@ -104,7 +104,7 @@ channels), docs/ATTRIBUTES.md (the smoothing section), docs/BUILD_PLAN.md step 7
 
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 MASTER_PATH = "/project1/vision"
 # The group this builds, as a child COMP of the one above. Everything it owns lives
 # inside, so the top-level network shows one node called `filter` rather than five
@@ -167,7 +167,7 @@ def onValuesChanged(changes):
 FILTER_PARAMETERS = ("Smoothing", "Mincutoff", "Beta")
 
 # ---- layout -----------------------------------------------------------------
-# The group's position inside its stream comes from `visionhands/td_layout.py`,
+# The group's position inside its stream comes from `appletd/td_layout.py`,
 # which is the ONE table for it: this script and td_add_coords.py both used to
 # place their group at (-400, -300), directly on top of each other, and nothing
 # could notice. The positions INSIDE this group are here, next to the code that
@@ -269,11 +269,11 @@ def main():
     # TouchDesigner caches our modules for the life of the process, so an edited
     # contract would otherwise be invisible. DESIGN.md 2.11.
     for stale in [n for n in list(sys.modules)
-                  if n == "visionhands" or n.startswith("visionhands.")]:
+                  if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from visionhands.spaces import passthrough_names, scope_pattern, smoothed_names
-    from visionhands.streams import STREAM_NAMES
-    from visionhands.td_layout import master_xy, stream_xy
+    from appletd.spaces import passthrough_names, scope_pattern, smoothed_names
+    from appletd.streams import STREAM_NAMES
+    from appletd.td_layout import master_xy, stream_xy
 
     master = op(MASTER_PATH)
     if master is None:
@@ -352,11 +352,11 @@ def _keep_layout(master):
 def _place(node, xy, keep, existed):
     """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
 
-    See `visionhands.td_layout.placement` for the rule and for what the flag can
+    See `appletd.td_layout.placement` for the rule and for what the flag can
     and cannot hold - the short version is that it holds this group COMP and not
     the operators inside it, which are regenerated on every run.
     """
-    from visionhands.td_layout import placement
+    from appletd.td_layout import placement
 
     where = placement(xy, keep, existed)
     if where is not None:

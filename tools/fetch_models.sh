@@ -52,4 +52,4 @@ echo "They compile to .mlmodelc on first use - a few seconds, once, and the side
 echo "prints that it is happening. Delete the .mlmodelc to force a rebuild."
 echo
 echo "Check it works, with no camera and no TouchDesigner:"
-echo "    ~/.venvs/visionhands/bin/python tools/depth_probe.py"
+echo "    ~/.venvs/appletd/bin/python tools/depth_probe.py"

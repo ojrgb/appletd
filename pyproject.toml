@@ -94,11 +94,11 @@ show_error_codes = true
 # mypy identifies those files as top-level modules named after the file, and the
 # dotted pattern never matched them. The M0 review found them being checked
 # under full strict mode - 88 errors - i.e. effectively not checked at all.
-# `visionhands.depth` is here for the same reason as `engine`: it is a Core ML and
-# Vision file, and CoreML ships no py.typed marker at all. `visionhands.pins` is NOT
+# `appletd.depth` is here for the same reason as `engine`: it is a Core ML and
+# Vision file, and CoreML ships no py.typed marker at all. `appletd.pins` is NOT
 # here - it is arithmetic over numpy and stays fully strict, which is the point of
 # having it as a separate module.
-module = ["visionhands.engine", "visionhands.depth", "visionhands.td.*", "tools.*",
+module = ["appletd.engine", "appletd.depth", "appletd.td.*", "tools.*",
           "probe_m1_in_td", "record_fixture"]
 disallow_untyped_calls = false
 disallow_any_expr = false
@@ -120,7 +120,7 @@ module = ["objc", "Vision", "Quartz", "AVFoundation", "CoreMedia", "CoreML",
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["visionhands/tests"]
+testpaths = ["appletd/tests"]
 # Fail on an unraisable exception from a background thread. A test that silently
 # swallows a worker-thread crash is worse than no test, and this whole design
 # hinges on a worker thread behaving (DESIGN.md 4.2).

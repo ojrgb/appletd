@@ -32,7 +32,7 @@ three files rather than one archive.
 **Then check it, with no camera and no TouchDesigner:**
 
 ```sh
-~/.venvs/visionhands/bin/python tools/depth_probe.py
+~/.venvs/appletd/bin/python tools/depth_probe.py
 ```
 
 That runs the model over `fixtures/hand_clip.mp4`, publishes the maps through the real
@@ -322,12 +322,12 @@ stops poisoning the whole frame.
 | `Depthfitresidual` is 0.000 and looks perfect | check `Depthfitchecked`. With two pins it is meaningless |
 | the sidecar log says `0.5 fps` and a huge `age` | those were the HANDS stream's numbers and read nonsense with hands off. Fixed 2026-08-22 — the line now says `sends`, only shows `age` when hands is on, and has a `depth N @ M ms` counter |
 | depth arrives but hands got choppy | expected. 23 ms of inference on a 33 ms frame interval — see §2. MEASURED live: the camera holds 30 fps but every frame arrives ~35 ms old |
-| `sc_depth` reads 0 while `Streamdepth` is on | the sidecar was launched without it. Read `/tmp/visionhands_sidecar.log` — its first line lists the streams it actually started |
+| `sc_depth` reads 0 while `Streamdepth` is on | the sidecar was launched without it. Read `/tmp/appletd_sidecar.log` — its first line lists the streams it actually started |
 
 **The sidecar writes a log**, and it is the first place to look for anything on this
-page: `/tmp/visionhands_sidecar.log`, truncated per launch with the previous run kept
+page: `/tmp/appletd_sidecar.log`, truncated per launch with the previous run kept
 as `.prev`. Its first line is the streams it actually started, which is the difference
 between "the toggle did not reach the process" and "the model failed to load".
 
-Ref: `design/DESIGN.md` 2.22 (the measurements), `visionhands/depth.py` (the model),
-`visionhands/pins.py` (the solve and its limits), `tools/depth_probe.py` (the check).
+Ref: `design/DESIGN.md` 2.22 (the measurements), `appletd/depth.py` (the model),
+`appletd/pins.py` (the solve and its limits), `tools/depth_probe.py` (the check).

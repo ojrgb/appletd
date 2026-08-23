@@ -2,10 +2,10 @@
 """Drive TouchDesigner with synthetic hands over OSC. No camera, nobody in frame.
 
     RUN IT
-        ~/.venvs/visionhands/bin/python tools/send_synthetic.py --list
-        ~/.venvs/visionhands/bin/python tools/send_synthetic.py ramp --cycles 4
-        ~/.venvs/visionhands/bin/python tools/send_synthetic.py clap --period 3
-        ~/.venvs/visionhands/bin/python tools/send_synthetic.py absent --cycles 1
+        ~/.venvs/appletd/bin/python tools/send_synthetic.py --list
+        ~/.venvs/appletd/bin/python tools/send_synthetic.py ramp --cycles 4
+        ~/.venvs/appletd/bin/python tools/send_synthetic.py clap --period 3
+        ~/.venvs/appletd/bin/python tools/send_synthetic.py absent --cycles 1
 
     IT CHECKS FOR THE SIDECAR ITSELF and refuses to run alongside it; `--force`
     overrides. Both write to the same port, and TouchDesigner's OSC In CHOP
@@ -18,7 +18,7 @@
     rather than a warning in a docstring.
 
 WHAT IT IS FOR. The latches have memory, so verifying them needs a controlled
-input over time - see the module docstring of `visionhands/sequences.py`. This is
+input over time - see the module docstring of `appletd/sequences.py`. This is
 the transmitter for those sequences: the same 137 channels the sidecar sends, the
 same encoder, the same port, so TouchDesigner cannot tell the difference and
 every operator downstream is exercised for real.
@@ -27,7 +27,7 @@ WHAT IT IS NOT. It is not a benchmark. Nothing timed against this stream may be
 quoted as a performance result: the frames are free to generate, so the numbers
 would flatter everything downstream (STANDARDS.md, measurement honesty).
 
-Ref: visionhands/sequences.py (the sequences), visionhands/osc.py (the encoder),
+Ref: appletd/sequences.py (the sequences), appletd/osc.py (the encoder),
 DESIGN.md 6.2 (the channel contract), docs/ATTRIBUTES.md (the thresholds swept).
 """
 
@@ -40,19 +40,19 @@ import time
 from pathlib import Path
 
 # tools/ is not on the path when this is run as a script from the repo root.
-# Insert the repo root so `visionhands` imports, exactly as the other tools do.
+# Insert the repo root so `appletd` imports, exactly as the other tools do.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from visionhands.osc import datagram_socket, encode_channels
-from visionhands.sequences import SEQUENCES, frames
-from visionhands.sidecar import DEFAULT_HOST, DEFAULT_PORT, SEQ_MODULUS
-from visionhands.slots import SLOT_MODE_CHIRALITY, SLOT_MODES, SlotAssigner
-from visionhands.streams import (
+from appletd.osc import datagram_socket, encode_channels
+from appletd.sequences import SEQUENCES, frames
+from appletd.sidecar import DEFAULT_HOST, DEFAULT_PORT, SEQ_MODULUS
+from appletd.slots import SLOT_MODE_CHIRALITY, SLOT_MODES, SlotAssigner
+from appletd.streams import (
     STREAM_HANDS,
     status_channel_names,
     status_channel_values,
 )
-from visionhands.types import channel_names, channel_values
+from appletd.types import channel_names, channel_values
 
 # Frames per second to send at, and seconds per sweep. 30 fps matches what the
 # camera delivers (DESIGN.md 2.1), so the latches see the same frame spacing they
@@ -63,9 +63,9 @@ DEFAULT_PERIOD_S = 2.0
 
 # How the sidecar is recognised. The same shape of check tools/td_build_vision.py
 # uses for the COMP's Start/Stop buttons: argv[0] must be a python, and `-m` must
-# sit immediately before the module, so a `python -c "...visionhands.sidecar..."`
+# sit immediately before the module, so a `python -c "...appletd.sidecar..."`
 # decoy and this process itself are both excluded.
-SIDECAR_MODULE = "visionhands.sidecar"
+SIDECAR_MODULE = "appletd.sidecar"
 
 # How often to print progress. Often enough to see it working, rare enough not to
 # be the reason a frame is late.
@@ -109,7 +109,7 @@ def _runs_module(words: list[str], module: str) -> bool:
            on spaces does NOT recover the argv boundaries - the body of a
            `python -c "..."` script is split into words too. An "is there a `-m`
            immediately followed by the module anywhere?" test therefore matches
-           `python -c "# -m visionhands.sidecar"`, which is the same class of
+           `python -c "# -m appletd.sidecar"`, which is the same class of
            false positive that once made the COMP's Stop button SIGTERM the shell
            that launched it. Caught here by a decoy test rather than in anger.
 
@@ -239,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.list or args.sequence is None:
-        print("sequences (visionhands/sequences.py):\n")
+        print("sequences (appletd/sequences.py):\n")
         for name in sorted(SEQUENCES):
             doc = (SEQUENCES[name].__doc__ or "").strip().splitlines()[0]
             print("  %-8s %s" % (name, doc))

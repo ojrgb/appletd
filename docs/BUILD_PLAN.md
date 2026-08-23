@@ -139,13 +139,13 @@ the Triggers pulses. It needs an exact channel-to-group map.
 The sound way to get one, when it is time: a registry in the package. `derive()`
 can already report a group's channels by being called with just that group, so the
 derive side is free; the latch table moves from `tools/td_add_latches.py` into
-`visionhands/` so both the builder and the registry import it. That also fixes a
+`appletd/` so both the builder and the registry import it. That also fixes a
 smell noted in the journal - liveness is a property of the stream and currently
 lives in the latch builder, which two other builders now reach into.
 
 ## Step 4 — `tools/send_synthetic.py` — DONE 2026-08-20
 
-`visionhands/sequences.py` holds the sweeps as pure functions of a phase (tested,
+`appletd/sequences.py` holds the sweeps as pure functions of a phase (tested,
 23 tests, no sockets); `tools/send_synthetic.py` is the CLI that puts them on the
 wire. Sequences: `ramp`, `snap`, `clap`, `both`, `deadband`, `open`, `absent`.
 
@@ -160,11 +160,11 @@ assertable rather than plausible.
 
 ## Step 5 — visionpose and visionface — DONE 2026-08-21. Segmentation deferred
 
-**Built and verified end to end with no camera:** `visionhands/pose_types.py` (the
-19-joint table and the 123-channel contract), `visionhands/pose.py` (the Vision
-request and the conversion), `visionhands/streams.py` (the stream registry, the
+**Built and verified end to end with no camera:** `appletd/pose_types.py` (the
+19-joint table and the 123-channel contract), `appletd/pose.py` (the Vision
+request and the conversion), `appletd/streams.py` (the stream registry, the
 ports and the `sc_*` status channels), the engine carrying both requests on one
-buffer, the sidecar sending one bundle per stream, `visionhands/synth_body.py` plus
+buffer, the sidecar sending one bundle per stream, `appletd/synth_body.py` plus
 `tools/send_synthetic_pose.py` for testing without anybody in frame, and
 the TouchDesigner side (folded into `tools/td_build_vision.py` when the streams
 were wrapped - step 8). 61 new tests.
@@ -175,7 +175,7 @@ right names and moving values, and the hands port now carrying 141 (137 + four
 surface; the journal has the four things that went wrong.
 
 **visionface followed the same afternoon**, and finished later the same day:
-`visionhands/face_types.py`, `visionhands/face.py`, `visionhands/synth_face.py`,
+`appletd/face_types.py`, `appletd/face.py`, `appletd/synth_face.py`,
 `tools/send_synthetic_face.py`, `tools/td_build_face_comp.py`. **Verified in
 TouchDesigner: 387 channels on port 10002** - 23 observation scalars, 348 landmark
 slots, and 16 transformed box components.
@@ -261,13 +261,13 @@ DESIGN.md 6.4 with the reasoning:
   several processes, is bought instead with a try/except per stream: a failing pose
   request costs the pose stream and nothing else.
 - **One port PER STREAM**, hands 10000 and pose 10001, from one base constant in
-  `visionhands/streams.py`. Sharing a port would put pose channels inside the hands
+  `appletd/streams.py`. Sharing a port would put pose channels inside the hands
   COMP's output, and the alternative - a prefix Select per COMP - is the mechanism
   that has already failed to partition these channels once (step 3 above).
 - **The toggles are launch flags**, appended to the command line in `start()`, and
   the sidecar reports what it actually started as `sc_*` channels so the panel
   cannot lie.
-- **The sidecar DATs did NOT move upstream.** They still live in the `visionhands`
+- **The sidecar DATs did NOT move upstream.** They still live in the `appletd`
   COMP even though the process serves every stream now. Moving them would break the
   panel in a live project and every callback's parameter path in exchange for
   tidiness; the trigger for doing it is a second thing needing to control the
@@ -315,7 +315,7 @@ gaps:
 
 ## Step 6 — slot assignment — DONE 2026-08-21
 
-`visionhands/slots.py`, 17 tests, wired through the engine, the source and the
+`appletd/slots.py`, 17 tests, wired through the engine, the source and the
 sidecar, with `--slots` and a `Slotassign` toggle on the Sidecar page. DESIGN.md
 6.3 has the algorithm and the measurement; the journal has how it went.
 
@@ -550,7 +550,7 @@ each with its inputs and outputs on connectors, gives:
   clocks - which is what makes disabling a group actually free.
 
 The channel-to-group registry that step 3 wants for output trimming is the same
-refactor: once the latch table lives in `visionhands/` rather than in a builder
+refactor: once the latch table lives in `appletd/` rather than in a builder
 script, both the registry and the builders can import it.
 
 ## TouchDesigner facts that cost time to learn
@@ -619,9 +619,9 @@ per-joint jitter is still unmeasured, which is what should set `Velocityfilter`.
 
 ## Step 8 — one COMP around the three streams — DONE 2026-08-21
 
-Asked for after the face stream landed: *"visionhands also contains transformation
+Asked for after the face stream landed: *"appletd also contains transformation
 logic to transform coords to TouchDesigner screenspace. These, the filter, etc,
-should be applicable for pose and face as well. Suggestion: wrap visionhands,
+should be applicable for pose and face as well. Suggestion: wrap appletd,
 visionpose, visionface in one comp, have the filter + sidecar + etc controls at the
 master comp level, and perform space transformations on all three."*
 
@@ -651,7 +651,7 @@ synthetic senders and no camera:
 
 The fourth row is the point: **a width is not offset**. `_tw` = w × Orthowidth with
 no −0.5, because a box is 0.2 wide wherever it sits and subtracting 0.5 gives a
-negative size that draws as nothing. `visionhands/spaces.py` is what keeps positions
+negative size that draws as nothing. `appletd/spaces.py` is what keeps positions
 and extents apart, and it also marks face landmark points `box_relative` - they are
 normalised to the bounding box rather than the image, so they are deliberately not
 transformed (DESIGN.md 7).
@@ -687,7 +687,7 @@ built on it.
     td_add_latches.py   the proximity latches          (hands)
     td_add_groups.py    the Attributes page and the cook gating
 
-**PATHS CHANGED.** `/project1/visionhands` is now `/project1/vision/hands`, and the
+**PATHS CHANGED.** `/project1/appletd` is now `/project1/vision/hands`, and the
 same for pose and face. The master builder rewires anything that was wired to the
 old COMPs and inherits their tuned parameter values, so a rebuild does not reset
 somebody's Ortho Width - verified: Mincutoff 3.170 and Beta 10.000 survived, both
@@ -840,7 +840,7 @@ CHOP composing per channel — would have been 608 Python evaluations a frame.
 The face stream went **387 -> 1083 channels**. It costs 1.08 ms with the world half
 on, which is why it has its own toggle rather than riding on `Coordstx`.
 
-`visionhands/synth_face.py` grew a full 76-point constellation to verify it, and
+`appletd/synth_face.py` grew a full 76-point constellation to verify it, and
 that was necessary rather than nice: with landmarks at zero, `_tx` reduces to the
 bounding box alone and a broken `point * bbox_w` term looks perfect.
 
@@ -904,7 +904,7 @@ Hands went **499 → 531 channels**, and the delete list 84 → 100.
 ### 6. Text DATs and deliberate layout — DONE, and it found bugs
 
 Every network has a `notes` DAT explaining it, and every generated coordinate comes
-from `visionhands/td_layout.py` — one table, with a test asserting nothing collides.
+from `appletd/td_layout.py` — one table, with a test asserting nothing collides.
 `tools/td_verify_layout.py` checks the LIVE network for overlaps, undocumented
 groups, ribbons and orphans, and it earned its keep on the first run:
 
@@ -955,7 +955,7 @@ process can die and the toggle will still read on, which the label says and
 had. A string and not a menu: MEASURED, this machine has four devices — the built-in
 camera, an OBS virtual camera, a Camo camera and an iPhone — so a list baked at build
 time goes wrong the moment one is unplugged. `Listcameras` shells out to
-`python -m visionhands.sidecar --list-cameras` (new), a subprocess and not an import,
+`python -m appletd.sidecar --list-cameras` (new), a subprocess and not an import,
 so pyobjc never enters TouchDesigner and the names come from the same code that
 `--camera` matches against.
 
@@ -972,7 +972,7 @@ is what caught the first attempt, where the four had not been listed as moving.
 ### `Keeplayout` (their item 2)
 
 **Yes, the builders overwrite your positions on every run** — every one writes
-`nodeX`/`nodeY` from `visionhands/td_layout.py`. `Keeplayout` (default off) makes them
+`nodeX`/`nodeY` from `appletd/td_layout.py`. `Keeplayout` (default off) makes them
 leave an operator that already existed where it is.
 
 **What it cannot hold, and the label says so:** anything INSIDE a group. `temporal`
@@ -982,7 +982,7 @@ operators at the top level — which is the layer a person actually rearranges. 
 node is always placed whatever the flag says, because TouchDesigner puts a freshly
 created operator wherever it likes and "leave it alone" would mean piling every new
 operator somewhere arbitrary. The rule is one function,
-`visionhands.td_layout.placement`, with a test.
+`appletd.td_layout.placement`, with a test.
 
 ### `Temporal` and `Latches` master switches (their item 7)
 
@@ -1064,7 +1064,7 @@ presence and velocity already pays nothing. Replacing 74 verified operators with
 lines of Python to save 0.147 ms from the case that does want them is the wrong
 trade.
 
-**The prototype stays, frozen**, as `visionhands/temporal.py` (pure, 16 tests) plus
+**The prototype stays, frozen**, as `appletd/temporal.py` (pure, 16 tests) plus
 `tools/td_add_temporal_proto.py`. It is attached to nothing downstream. If the
 attribute layer ever grows enough that 0.147 ms becomes 1.5, the measurement and the
 code are both already here.
@@ -1074,15 +1074,15 @@ code are both already here.
 The prototype held its `TemporalState` in operator storage, and the user hit this
 trying to save:
 
-    PicklingError: Can't pickle <class 'visionhands.temporal.TemporalState'>:
-    it's not the same object as visionhands.temporal.TemporalState
+    PicklingError: Can't pickle <class 'appletd.temporal.TemporalState'>:
+    it's not the same object as appletd.temporal.TemporalState
 
 **TouchDesigner pickles operator storage into the .toe.** So the third reason for
 keeping memory native - "no hidden Python state for a project reload to treat
 unpredictably" - is understated: the state does not reload unpredictably, **the
 project does not save.** And the specific failure is one this repo manufactures for
 itself: pickle compares the instance's class against the module's current class by
-IDENTITY, and every builder purges `visionhands.*` from `sys.modules`, so after any
+IDENTITY, and every builder purges `appletd.*` from `sys.modules`, so after any
 rebuild the stored object's class is a different object with the same name.
 
 Fixed by moving the state into the callback DAT's module globals, which are not
@@ -1196,7 +1196,7 @@ they carried 1,863 channels between them. Asked for by the user, in their words:
 **The shape.** `hands`, `pose` and `face` now merge into `merge_streams`, that feeds
 `trim_empty`, and that feeds the only `out1`. `Delete Empty Channels` on the Vision
 page (on by default) bypasses the trim. Node positions are in
-`visionhands/td_layout.py` like everything else.
+`appletd/td_layout.py` like everything else.
 
 **The trim's list is generated, never written by hand.** `tools/td_add_groups.py`
 owns it, because it is the only thing that knows which groups are frozen, and it
@@ -1311,7 +1311,7 @@ builders ran in the same frame. `DESIGN.md` 2.17. Fixed by never re-appending.
 ## Step 16 — the segmentation transport, built and measured — DONE 2026-08-22
 
 Step 9 researched the transport and parked it with a decision. This is that decision
-built: `visionhands/maskbuf.py` and `visionhands/segmentation.py`, 54 tests, no
+built: `appletd/maskbuf.py` and `appletd/segmentation.py`, 54 tests, no
 TouchDesigner side yet.
 
 ### `maskbuf.py` - a file-backed mmap with a seqlock
@@ -1363,7 +1363,7 @@ Also not done: wiring segmentation into `sidecar.py` so it runs on the live capt
 queue beside hands, pose and face. `detect_sample_buffer` is there and unexercised -
 the fixture path uses `detect_pixel_buffer`.
 
-    ~/.venvs/visionhands/bin/python tools/segmentation_probe.py --png /tmp/masks
+    ~/.venvs/appletd/bin/python tools/segmentation_probe.py --png /tmp/masks
 
 runs the whole pipeline in two real processes and writes the mask both as published
 and stretched back to its source, which is the shortest available explanation of why
@@ -1414,7 +1414,7 @@ for ever, which looks exactly like a sidecar that failed to start.
 
 ### Still not done
 
-`visionhands/sidecar.py` does not run segmentation, so `Segment` ships OFF and there
+`appletd/sidecar.py` does not run segmentation, so `Segment` ships OFF and there
 is nothing to read until something writes. `detect_sample_buffer` is there and
 unexercised. That is the next piece, and it needs the camera.
 
@@ -1426,7 +1426,7 @@ the request.
 
 ### `segment` is a request, not a stream
 
-`visionhands/streams.py` now has two tuples. `STREAM_NAMES` is what has a UDP port;
+`appletd/streams.py` now has two tuples. `STREAM_NAMES` is what has a UDP port;
 `REQUEST_NAMES` is that plus the portless requests, and it is what `--streams` accepts
 and what the status channels are built from. A 197 KB mask has nowhere to go on a
 datagram, so `port_for("segment")` **raises by name**, saying where the mask actually
@@ -1529,10 +1529,10 @@ the pin-based metric correction ported from `apple-vision-examples/examples/dept
 
 ### The shape
 
-    visionhands/depth.py    the VNCoreMLRequest, the .mlpackage -> .mlmodelc compile,
+    appletd/depth.py    the VNCoreMLRequest, the .mlpackage -> .mlmodelc compile,
                             and the fp16 extraction. Imports Core ML; imports no
                             TouchDesigner and lets no pyobjc object escape the queue
-    visionhands/pins.py     the affine solve. numpy only - no Vision, no Core ML, no
+    appletd/pins.py     the affine solve. numpy only - no Vision, no Core ML, no
                             maskbuf - which is why it has 31 tests and no fixtures
     engine.py               `depth_detector` + `on_depth`, `_publish_depth` LAST
     sidecar.py              a SECOND MaskWriter, and the pins parsed at construction
@@ -1628,7 +1628,7 @@ create.** A `pip install --dry-run` against TD's pip resolves all nine packages 
 prebuilt `cp311-macosx_10_9_universal2` wheels - pyobjc-core included - so no compiler is
 needed either.
 
-    launch:  <TD>/bin/python3.11  -m visionhands.sidecar
+    launch:  <TD>/bin/python3.11  -m appletd.sidecar
     env:     PYTHONPATH=<install>/site-packages:<install>
 
 **Never install into TD's own `site-packages`.** The app is code-signed with the hardened
@@ -1678,9 +1678,9 @@ Not needed at runtime and deliberately not shipped: `coords`, `motion`, `sequenc
 `temporal`, `tuning`, `synth`, `synth_body`, `synth_face`.
 
 **`__init__.py` is the trap here.** An import-closure walk finds it in nothing, because
-nothing imports *from* it - and without it on disk `import visionhands.derive` fails at
+nothing imports *from* it - and without it on disk `import appletd.derive` fails at
 the first cook. Any generator that derives the file list from the import graph must add
-it explicitly, and the check has to be "does `import visionhands.sidecar` succeed in a
+it explicitly, and the check has to be "does `import appletd.sidecar` succeed in a
 fresh interpreter", not "are the modules the walk named present".
 
 A new builder - `tools/td_embed_package.py` - reads each file and writes one Text DAT
@@ -1694,7 +1694,7 @@ destroys. That is the intended behaviour, not a bug to fix later.
 
 ### 21.4 Install, in order, with the failure named at each step
 
-1. **write the source** - 19 files to `<install>/visionhands/`, plus `INSTALLED.json`
+1. **write the source** - 19 files to `<install>/appletd/`, plus `INSTALLED.json`
    carrying the version stamp. Local, fast, cannot fail except on permissions.
 2. **`pip install --target <install>/site-packages -r` the pinned pyobjc** - needs
    network. Nine wheels. This is where a corporate proxy fails.
@@ -1707,7 +1707,7 @@ back from another one, because **nothing may touch a TouchDesigner object from a
 thread but the main one**. Install polls the same way.
 
 Where `<install>` defaults to is a real decision and should be made when this is built.
-`~/Library/Application Support/visionhands/<version>/` is the macOS-correct answer -
+`~/Library/Application Support/appletd/<version>/` is the macOS-correct answer -
 always writable, versioned so two `.toe` versions cannot fight - against `project.folder`
 being far more discoverable for the beginner audience this component is aimed at.
 Recommend Application Support, with the path visible and editable in `Installroot` so it
@@ -1754,7 +1754,7 @@ interrupted download - so it needs a `--force` flag rather than a change of defa
    dry-run resolves; resolving is not importing. `import Vision` in a subprocess of
    TD's own `python3.11` with `PYTHONPATH` set is the whole test, and it costs a minute.
 2. **Camera permission.** TCC attributes the prompt to the responsible process. Changing
-   the sidecar's interpreter from `~/.venvs/visionhands/bin/python` to TD's bundled one
+   the sidecar's interpreter from `~/.venvs/appletd/bin/python` to TD's bundled one
    may reset the grant, or may attribute it to TouchDesigner - which would be *better*,
    since TD is already trusted. Genuinely unknown, and needs the camera, so it needs
    asking for.
@@ -1764,7 +1764,7 @@ interrupted download - so it needs a `--force` flag rather than a change of defa
 
 ### 21.8 A simplification this enables
 
-Both Script TOPs import `visionhands.maskbuf` at cook time, and the depth one also
+Both Script TOPs import `appletd.maskbuf` at cook time, and the depth one also
 imports `pins.unpack`. Both are stdlib-only - `maskbuf` is `struct` and `mmap`, `unpack`
 is one `struct.unpack` - so both could be inlined into their generated DATs exactly as
 `groups_callbacks` already is, for the reason its docstring already gives: *a project

@@ -54,12 +54,12 @@ ALL FIVE PASSED on 2026-08-20: +4, +1, clap +3, both +3 on all four per-hand
 counters with clap +0, and absent +0 everywhere.
 
 The same expectations are asserted with no TouchDesigner at all in
-`visionhands/tests/test_sequences.py`, against a reference recurrence written
+`appletd/tests/test_sequences.py`, against a reference recurrence written
 straight from docs/ATTRIBUTES.md. That file says what should happen; this one
 says what TouchDesigner did.
 
 Ref: docs/ATTRIBUTES.md, tools/td_add_latches.py (the network under test),
-visionhands/sequences.py (the sweeps).
+appletd/sequences.py (the sweeps).
 """
 
 # The hands STREAM, inside the master COMP - the latch channels live on its
@@ -192,7 +192,7 @@ def main():
         store = comp.create(td.textDAT, BASELINE_DAT)
         # Out of the way, from the one layout table. It used to land wherever
         # `create` put it, which was in the middle of the attribute layer.
-        from visionhands.td_layout import stream_xy
+        from appletd.td_layout import stream_xy
         store.nodeX, store.nodeY = stream_xy(BASELINE_DAT)
         store.nodeX, store.nodeY = 200, -1800
         store.text = ""

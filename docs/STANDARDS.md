@@ -1,4 +1,4 @@
-# visionhands — coding and working standards
+# appletd — coding and working standards
 
 Agreed before implementation started. Binding on every file in this repo and on
 every review agent. `design/DESIGN.md` is the source of truth for *what* we

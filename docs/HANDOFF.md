@@ -1,9 +1,9 @@
 # Handoff — 2026-08-21
 
-**430 tests**, `ruff check` and `mypy visionhands` clean. Working tree clean apart
+**430 tests**, `ruff check` and `mypy appletd` clean. Working tree clean apart
 from `tools/vision_landmarks.py` and `tools/vision_landmarks_live.py`, which are the
 user's own untracked files — leave them alone. (`ruff check` at the repo root will
-fail on one of those two; lint `visionhands/` and `tools/td_*.py tools/send_*.py
+fail on one of those two; lint `appletd/` and `tools/td_*.py tools/send_*.py
 tools/probe_*.py tools/record_*.py` instead.)
 
 The optimisation and tidy pass landed. `docs/BUILD_PLAN.md` step 10 is the full
@@ -49,7 +49,7 @@ have an `sc_*` status channel, and `REQUEST_TOGGLES` in `td_build_vision.py` is 
 table that maps a name to its toggle - added after `depth` reached the parameters, the
 argv extras and the report but NOT the loop that builds `--streams`. DESIGN.md 6.4.
 
-**The sidecar writes a log: `/tmp/visionhands_sidecar.log`**, truncated per launch with
+**The sidecar writes a log: `/tmp/appletd_sidecar.log`**, truncated per launch with
 the previous run as `.prev`. Its first line is the streams it actually started. Before
 that existed, "why did depth not start" was unanswerable - it went to /dev/null.
 
@@ -180,9 +180,9 @@ engaged on all five rows.
 
 ## How to test anything, with no camera and nobody in frame
 
-    ~/.venvs/visionhands/bin/python tools/send_synthetic.py      --list
-    ~/.venvs/visionhands/bin/python tools/send_synthetic_pose.py --list
-    ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py --list
+    ~/.venvs/appletd/bin/python tools/send_synthetic.py      --list
+    ~/.venvs/appletd/bin/python tools/send_synthetic_pose.py --list
+    ~/.venvs/appletd/bin/python tools/send_synthetic_face.py --list
 
 For a long session, `--period 3 --cycles 4000` is about three hours; the default
 runs out in well under one, and an expired sender is indistinguishable from a
@@ -260,7 +260,7 @@ All measured here. 1–10 are older and still true; 11 onwards are this session'
    operators are not time-sliced, and a benchmark there said five variants were
    identical when the live network showed a 3x spread.
 5. **TouchDesigner caches imported modules for the process's life.** Purge
-   `visionhands*` from `sys.modules` at the top of any builder.
+   `appletd*` from `sys.modules` at the top of any builder.
 6. **Re-running a builder can silently unwire its consumers.** An In/Out CHOP IS a
    connector; destroying one breaks a CHOP consumer's wire and leaves a COMP
    consumer's intact. Every builder now PRESERVES its ports — including
@@ -413,7 +413,7 @@ re-research it. The one thing still unmeasured needs a camera: the per-frame cos
 ### 5. Shipping — PLANNED, and it is the reason nobody else can open this yet
 
 `docs/BUILD_PLAN.md` step 21 is the whole design. The blocker in one line: **fifteen
-files hardcode `/Users/omer/Documents/GitHub/visionhands-touchdesigner`**, so the
+files hardcode `/Users/omer/Documents/GitHub/appletd`**, so the
 project opens on exactly one machine. The user's decision is a single `.toe` with an
 Install button - the files stay the source of truth, the builders embed them, Install
 writes them back out and fetches the model, and the status text probes on load.

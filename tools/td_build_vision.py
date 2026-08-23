@@ -38,7 +38,7 @@ in step, and three Start buttons for one process would all have been wrong. So t
 parameters live here, once, and every stream reads them.
 
     OLD PATH                      NEW PATH
-    /project1/visionhands         /project1/vision/hands
+    /project1/appletd         /project1/vision/hands
     /project1/visionpose          /project1/vision/pose
     /project1/visionface          /project1/vision/face
 
@@ -79,7 +79,7 @@ SIDECAR_PYTHON = %(python)r
 # streams actually started, which model it compiled, why a request refused to build -
 # used to go to /dev/null, which made "why did depth not start" a question nobody could
 # answer. See `start()`.
-SIDECAR_LOG = "/tmp/visionhands_sidecar.log"
+SIDECAR_LOG = "/tmp/appletd_sidecar.log"
 # The `Camera` menu's "use whatever the engine defaults to" entry. A real token rather
 # than an empty string, because TouchDesigner refuses "" as a menu NAME at the C level -
 # a SystemError with no Python exception behind it. Mapped back to blank below.
@@ -91,7 +91,7 @@ CAMERA_DEFAULT = "__default__"
 REQUEST_TOGGLES = %(request_toggles)r
 REPO_ROOT = %(repo)r
 PORT = %(port)d
-MATCH = "visionhands.sidecar"
+MATCH = "appletd.sidecar"
 
 
 def running_pids():
@@ -105,12 +105,12 @@ def running_pids():
     TWO-STAGE MATCH, and the second stage is not paranoia - it was written after
     the first version SIGTERMed the shell that was grepping for the sidecar.
     `pgrep -f` matches the pattern anywhere in a full command line, so a
-    terminal running `pgrep -f visionhands.sidecar`, an editor with the file
+    terminal running `pgrep -f appletd.sidecar`, an editor with the file
     open, or a `tail` on its log all match. Killing those is unacceptable, so
     every candidate is confirmed with `ps` before it is signalled:
 
         argv[0] must be a python             (a shell or a grep is not)
-        the argv must contain -m visionhands.sidecar
+        the argv must contain -m appletd.sidecar
 
     A shell whose command line merely mentions the sidecar has argv[0] of sh or
     zsh and is rejected; a python running `-c` with the string in it fails the
@@ -120,7 +120,7 @@ def running_pids():
         found = subprocess.run(["pgrep", "-f", MATCH],
                                capture_output=True, text=True, timeout=5)
     except Exception as exc:
-        print("[visionhands] pgrep failed: %%r" %% (exc,))
+        print("[appletd] pgrep failed: %%r" %% (exc,))
         return []
 
     pids = []
@@ -155,7 +155,7 @@ def _is_sidecar(pid):
     if not tokens or "python" not in os.path.basename(tokens[0]):
         return False
     # `-m` and the module name must be ADJACENT ARGUMENTS, not a substring of
-    # the command line. A python running `-c "x='-m visionhands.sidecar'"`
+    # the command line. A python running `-c "x='-m appletd.sidecar'"`
     # contains the text but is not a sidecar, and signalling it would be exactly
     # the class of mistake that killed a shell a moment ago.
     for index, token in enumerate(tokens[:-1]):
@@ -209,11 +209,11 @@ def start():
         # the Textport next to the button that was pressed. A sidecar with no
         # streams opens the camera and looks exactly like a working one with
         # nobody in frame.
-        print("[visionhands] NOT STARTING: every stream toggle is off, so the "
+        print("[appletd] NOT STARTING: every stream toggle is off, so the "
               "sidecar would open the camera and run no inference at all.")
         return 0
 
-    argv = [SIDECAR_PYTHON, "-m", "visionhands.sidecar",
+    argv = [SIDECAR_PYTHON, "-m", "appletd.sidecar",
             "--port", str(port), "--parent-pid", str(os.getpid()),
             "--slots", "chirality" if assign else "off",
             "--streams", ",".join(streams)]
@@ -251,7 +251,7 @@ def start():
     except OSError as problem:
         # Not fatal: a sidecar with no log is worse than one with a log, but far
         # better than no sidecar. Say so and carry on.
-        print("[visionhands] could not open %%s (%%s) - starting without a log"
+        print("[appletd] could not open %%s (%%s) - starting without a log"
               %% (SIDECAR_LOG, problem))
         log = subprocess.DEVNULL
     process = subprocess.Popen(
@@ -264,12 +264,12 @@ def start():
         # handle left open in TouchDesigner would keep the file alive across every
         # restart for the life of the application.
         log.close()
-    print("[visionhands] capture started, pid %%d, camera=%%s, slots=%%s, "
+    print("[appletd] capture started, pid %%d, camera=%%s, slots=%%s, "
           "streams=%%s"
           %% (process.pid, camera or "(default)",
               "chirality (h0=right, h1=left)" if assign else "off",
               ",".join(streams)))
-    print("[visionhands]   log: %%s   (previous run: %%s.prev)"
+    print("[appletd]   log: %%s   (previous run: %%s.prev)"
           %% (SIDECAR_LOG, SIDECAR_LOG))
     # The signature of what was ACTUALLY launched, so `set_state` can tell a running
     # process that matches the panel from one that does not. A plain string in operator
@@ -280,10 +280,10 @@ def start():
         set_state(comp)
     # The ports each stream lands on, printed because "which port is pose on" is
     # the first question when the pose COMP shows no channels.
-    print("[visionhands]   hands -> %%d   pose -> %%d   face -> %%d  (base + 0/1/2)"
+    print("[appletd]   hands -> %%d   pose -> %%d   face -> %%d  (base + 0/1/2)"
           %% (port, port + 1, port + 2))
     if "segment" in streams:
-        print("[visionhands]   segment -> %%s  (a shared mmap, no port), quality %%s"
+        print("[appletd]   segment -> %%s  (a shared mmap, no port), quality %%s"
               %% (comp.par.Maskbuffer.eval(), comp.par.Segquality.eval()))
     if "depth" in streams:
         # `depth_pins(comp)`, NOT the retired `Depthpins` text field. This line kept a
@@ -292,7 +292,7 @@ def start():
         # not starting, with no message anywhere. A reporting line that can break the
         # thing it reports on.
         pins = depth_pins(comp)
-        print("[visionhands]   depth   -> %%s  (a shared mmap, no port), %%s"
+        print("[appletd]   depth   -> %%s  (a shared mmap, no port), %%s"
               %% (comp.par.Depthbuffer.eval(),
                   "pins %%s" %% pins if pins else
                   "NO PINS - the map is relative, bigger means nearer"))
@@ -321,7 +321,7 @@ def depth_pins(comp):
                 float(getattr(comp.par, "Depthpin%%dy" %% index).eval()),
                 float(getattr(comp.par, "Depthpin%%dm" %% index).eval())))
         except AttributeError:
-            print("[visionhands] pin row %%d is missing - run "
+            print("[appletd] pin row %%d is missing - run "
                   "tools/td_add_depth.py. Starting with NO pins rather than a "
                   "partial list." %% index)
             return ""
@@ -339,11 +339,11 @@ def stop():
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
-            print("[visionhands] stopped sidecar pid %%d" %% pid)
+            print("[appletd] stopped sidecar pid %%d" %% pid)
         except ProcessLookupError:
             pass
         except PermissionError:
-            print("[visionhands] cannot signal pid %%d - not ours" %% pid)
+            print("[appletd] cannot signal pid %%d - not ours" %% pid)
     if not pids:
         return 0
     # WAIT for them to actually go, bounded. SIGTERM is a request: the sidecar handles
@@ -364,7 +364,7 @@ def stop():
             break
         time.sleep(0.02)
     else:
-        print("[visionhands] %%d process(es) still running 1 s after SIGTERM - the "
+        print("[appletd] %%d process(es) still running 1 s after SIGTERM - the "
               "status will say so rather than assume" %% len(running_pids()))
     return len(pids)
 
@@ -372,7 +372,7 @@ def stop():
 def list_cameras():
     """Print the capture devices, by asking the sidecar module rather than importing.
 
-    `python -m visionhands.sidecar --list-cameras` enumerates and exits. Two reasons
+    `python -m appletd.sidecar --list-cameras` enumerates and exits. Two reasons
     it is a subprocess and not an import: pyobjc must never be imported inside
     TouchDesigner (that separation is the whole point of the sidecar), and the list
     then comes from the same code that `--camera` matches against, so the names in
@@ -383,23 +383,23 @@ def list_cameras():
     """
     try:
         found = subprocess.run(
-            [SIDECAR_PYTHON, "-m", "visionhands.sidecar", "--list-cameras"],
+            [SIDECAR_PYTHON, "-m", "appletd.sidecar", "--list-cameras"],
             cwd=REPO_ROOT, capture_output=True, text=True, timeout=20)
     except Exception as exc:
-        print("[visionhands] could not list cameras: %%r" %% (exc,))
+        print("[appletd] could not list cameras: %%r" %% (exc,))
         return []
     if found.returncode != 0:
-        print("[visionhands] --list-cameras exited %%d: %%s"
+        print("[appletd] --list-cameras exited %%d: %%s"
               %% (found.returncode, found.stderr.strip()[:400]))
         return []
     names = []
-    print("[visionhands] capture devices - put any part of a name in `Camera`:")
+    print("[appletd] capture devices - put any part of a name in `Camera`:")
     for line in found.stdout.splitlines():
         name = line.split("\t")[0].strip()
         if not name:
             continue
         names.append(name)
-        print("[visionhands]    %%s" %% line.replace("\t", "   "))
+        print("[appletd]    %%s" %% line.replace("\t", "   "))
     return names
 
 
@@ -433,14 +433,14 @@ def refresh_cameras(comp=None, want=None):
         # meant; leaving it as a dead entry would silently stop finding the camera.
         matched = [n for n in names if current.lower() in n.lower()]
         if len(matched) == 1:
-            print("[visionhands] `%%s` was a substring - selecting `%%s`"
+            print("[appletd] `%%s` was a substring - selecting `%%s`"
                   %% (current, matched[0]))
             current = matched[0]
         else:
             # Zero matches, or an ambiguous one. Kept as an entry rather than guessed
             # at: a camera that has been unplugged should read as itself.
             entries.append(current)
-            print("[visionhands] `%%s` matches %%d devices - kept as an entry, but it "
+            print("[appletd] `%%s` matches %%d devices - kept as an entry, but it "
                   "will not be found until that is resolved" %% (current, len(matched)))
     comp.par.Camera.menuNames = entries
     comp.par.Camera.menuLabels = ["(default)" if e == CAMERA_DEFAULT else e
@@ -569,7 +569,7 @@ def onValueChange(par, prev):
         else:
             stopped = control.stop()
             par.owner.par.Capturepid = 0
-            print("[visionhands] stopped %d process(es)" % stopped)
+            print("[appletd] stopped %d process(es)" % stopped)
         control.set_state(par.owner)
         return
     # ANY OTHER parameter in `pars` is a launch flag, and changing one means the
@@ -584,7 +584,7 @@ def onPulse(par):
         control.restart()
         return
     if par.name == "Printstatus":
-        print("[visionhands] " + control.status())
+        print("[appletd] " + control.status())
     elif par.name == "Listcameras":
         control.refresh_cameras(par.owner)
 '''
@@ -692,11 +692,11 @@ MASTER_PAR = "op.%s.par.%%s" % OP_SHORTCUT
 STREAM_NAMES = ("hands", "pose", "face")
 
 OSC_PORT = 10000
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
-SIDECAR_PYTHON = "/Users/omer/.venvs/visionhands/bin/python"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
+SIDECAR_PYTHON = "/Users/omer/.venvs/appletd/bin/python"
 
 # Which camera, as a substring of the device name. Matches
-# `visionhands.engine.DEFAULT_CAMERA_NAME`, and the substring form is deliberate:
+# `appletd.engine.DEFAULT_CAMERA_NAME`, and the substring form is deliberate:
 # MEASURED on this machine, `--list-cameras` returns four devices - the built-in
 # camera plus an OBS virtual camera, a Camo camera and an iPhone - so "the first
 # device" would be the wrong answer more often than not, and a device INDEX would
@@ -779,6 +779,10 @@ DEFAULT_ORTHO_WIDTH = 1.0
 # What the three COMPs this replaces were called. Destroyed at the end, once the new
 # structure has been built and verified - so a half-finished run leaves the old one
 # working rather than nothing working.
+# NOT RENAMED with the package, and this is deliberate. These are the names
+# operators ACTUALLY HAD before the COMP existed, and this list's whole job is to
+# find and destroy them. Renaming them to `appletd*` would leave it hunting for
+# names that never existed, and the old operators would survive for ever.
 SUPERSEDED = ("visionhands", "visionpose", "visionface",
               "visionhands_osc", "visionpose_osc", "visionface_osc")
 
@@ -795,19 +799,19 @@ def main():
         sys.path.append(REPO_ROOT)
     # TouchDesigner caches our modules for the life of the process (DESIGN.md 2.11).
     for stale in [n for n in list(sys.modules)
-                  if n == "visionhands" or n.startswith("visionhands.")]:
+                  if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
     # `td_layout` is every coordinate a MASTER-level operator gets. One table,
     # because seven builders place operators in here and two of them once chose the
     # same spot with nothing able to notice.
-    from visionhands.sidecar import DEFAULT_DEPTH_PATH, DEFAULT_MASK_PATH
-    from visionhands.streams import (
+    from appletd.sidecar import DEFAULT_DEPTH_PATH, DEFAULT_MASK_PATH
+    from appletd.streams import (
         DEFAULT_SEGMENT_QUALITY,
         SEGMENT_QUALITIES,
         STATUS_PREFIX,
         port_for,
     )
-    from visionhands.td_layout import COL_W, master_xy, stream_row
+    from appletd.td_layout import COL_W, master_xy, stream_row
 
     parent = op(PARENT_PATH)
     if parent is None:
@@ -826,7 +830,7 @@ def main():
     else:
         # First run: inherit whatever the COMP this supersedes was tuned to, so the
         # restructure does not quietly reset somebody's Ortho Width.
-        old = parent.op("visionhands")
+        old = parent.op("appletd")
         if old is not None:
             previous = {par.name: par.eval() for par in old.customPars}
             print("0. inheriting %d tuned parameters from %s"
@@ -970,7 +974,7 @@ def main():
     page.appendPulse("Listcameras", label="Refresh Camera List")
 
     # Slot assignment: h0 = the right hand, h1 = the left, whichever order Vision
-    # reports them in (visionhands/slots.py). NOTE the consequence: with this on, a
+    # reports them in (appletd/slots.py). NOTE the consequence: with this on, a
     # single LEFT hand puts nothing in h0, so every h0_* channel reads zero.
     par_slots = page.appendToggle(
         "Slotassign", label="Assign Slots (restart to apply)")[0]
@@ -1027,7 +1031,7 @@ def main():
     #
     # All of it lands on the same serial queue as hands' 3.41 ms. Vision's OWN
     # default is `accurate`; ours is `fast`, and the menu comes from
-    # visionhands/streams.py so the sidecar's command line and this menu cannot
+    # appletd/streams.py so the sidecar's command line and this menu cannot
     # disagree about what a level is called.
     par_quality = page.appendMenu(
         "Segquality", label="Mask Quality (restart to apply)")[0]
@@ -1077,7 +1081,7 @@ def main():
         "Deleteempty", label="Delete Empty Channels")[0]
     par_empty.default = True
 
-    # Whether the builders may move nodes. `visionhands.td_layout.placement` has the
+    # Whether the builders may move nodes. `appletd.td_layout.placement` has the
     # rule and what it cannot protect - the short version is that it holds the group
     # COMPs, the stream shell and the OSC In CHOPs, and cannot hold operators INSIDE
     # a group, because those are destroyed and regenerated on every run.
@@ -1444,7 +1448,7 @@ def main():
             continue
         # Anything wired to the old COMP is repointed at this one's matching
         # output, so a project does not silently lose its input.
-        target = {"visionhands": 0, "visionpose": 1, "visionface": 2}.get(name)
+        target = {"appletd": 0, "visionpose": 1, "visionface": 2}.get(name)
         if target is not None:
             for sibling in parent.children:
                 if sibling is comp:
@@ -1518,11 +1522,11 @@ def main():
 def _at(node, xy, keep, existed):
     """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
 
-    The rule lives in `visionhands.td_layout.placement`, including what the flag
+    The rule lives in `appletd.td_layout.placement`, including what the flag
     cannot hold: anything a builder destroys and regenerates, which is every
     operator inside a group.
     """
-    from visionhands.td_layout import placement
+    from appletd.td_layout import placement
 
     where = placement(xy, keep, existed)
     if where is not None:
@@ -1620,7 +1624,7 @@ def _place_shell(td, child, stream, keep):
     whatever position it has. The notes DAT's TEXT is rewritten either way - the flag
     is about arrangement, not about letting documentation go stale.
     """
-    from visionhands.td_layout import placement, stream_xy
+    from appletd.td_layout import placement, stream_xy
 
     for name in ("in1", "merge_out", "out1"):
         node = child.op(name)

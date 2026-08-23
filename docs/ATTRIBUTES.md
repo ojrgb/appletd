@@ -1,6 +1,6 @@
 # Derived attributes — the definitive list
 
-What the `visionhands` COMP computes from the 137 channels the sidecar sends.
+What the `appletd` COMP computes from the 137 channels the sidecar sends.
 This is the spec the implementation follows; every formula here is the definition
 of that channel, and a channel whose formula is not written down here does not
 exist.
@@ -257,7 +257,7 @@ disagreeing is worse than either alone.
 
 `dir` comes from `atan2`, which **no CHOP provides** — the Math CHOP's unary menu
 covers negate, absolute value, square, root and reciprocal and stops there. So it
-is the second pure-Python operator in the COMP, `visionhands/motion.py`, wrapped
+is the second pure-Python operator in the COMP, `appletd/motion.py`, wrapped
 the same way `derive()` is. The *holding* is native, because holding is memory:
 the module publishes `moving` and lets the network decide what to remember, which
 is the same division of labour as the latches.
@@ -800,7 +800,7 @@ sets of coordinate spaces. Reference a channel as
 stream, or wire from the master's one output connector — an operator outside the COMP
 cannot wire to a nested one.
 
-**Paths changed:** `/project1/visionhands` is now `/project1/vision/hands`.
+**Paths changed:** `/project1/appletd` is now `/project1/vision/hands`.
 
 ### Page: Vision — everything operational
 
@@ -974,7 +974,7 @@ transformed. **`roll`/`yaw`/`pitch` are not transformed** - there is no yaw in
 pixels - and they are smoothed like any other continuous value.
 
 **`roll`, `yaw` and `pitch` are DEGREES.** Vision reports radians; the conversion
-happens once, in `visionhands/face.py`. If you see values under 2 for a head that
+happens once, in `appletd/face.py`. If you see values under 2 for a head that
 is clearly turned, something has bypassed that conversion.
 
 **`bbox_y` is the BOTTOM edge of the box**, because the box is a CGRect with a
@@ -1021,7 +1021,7 @@ image_y = f0_bbox_y + point_y * f0_bbox_h
 
 **387 channels in total** on this COMP - 371 from the wire plus 16 transformed box
 components. The bundle is 12208 bytes, which is more than a default UDP socket will
-send; `visionhands/osc.py` raises the send buffer, and `MAX_FACES = 2` is the
+send; `appletd/osc.py` raises the send buffer, and `MAX_FACES = 2` is the
 practical ceiling for one datagram.
 
 `tools/send_synthetic_face.py` leaves the landmark channels at zero - the
@@ -1140,7 +1140,7 @@ align channel names before subtracting them, and testable only by eye. Written a
 Python it is one operator whose code reads like this document.
 
 The decisive reason is testability. The Script CHOP's cook is a thin wrapper
-around a pure function in `visionhands/derive.py`:
+around a pure function in `appletd/derive.py`:
 
     derive(values: dict[str, float], params, groups) -> dict[str, float]
 
@@ -1219,7 +1219,7 @@ A `seg_mask` that is 16x16 has never read the buffer; a real mask is 256x192 or 
 
 **To see the mask with no camera**, which is also how it was verified:
 
-    ~/.venvs/visionhands/bin/python tools/segmentation_probe.py --write-only
+    ~/.venvs/appletd/bin/python tools/segmentation_probe.py --write-only
 
 then switch `Streamsegment` on. That is exactly the shape the sidecar has.
 
@@ -1246,7 +1246,7 @@ every caveat. This is the parameter table.
 | where | parameter | default | what it does |
 |---|---|---|---|
 | Vision | `Streamdepth` | **off** | run the model and read its map |
-| Advanced | `Depthbuffer` | `/tmp/visionhands_depth.buf` | the shared file. Must match on both sides |
+| Advanced | `Depthbuffer` | `/tmp/appletd_depth.buf` | the shared file. Must match on both sides |
 | Depth | `Depthpinson` | on | apply the fit to the PIXELS - the port of the example's `p`. Off = the model's own numbers |
 | Depth | `Depthwindownear` `Depthwindowfar` | 0.4, 3.0 | the fixed metre window the corrected map is drawn on |
 | Depth | `Depthunits` | READ-ONLY | which of the two you are looking at |

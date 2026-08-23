@@ -28,7 +28,7 @@ Ref: docs/BUILD_PLAN.md step 14, docs/JOURNAL.md.
 
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 
 # layer -> the script that owns it, in CHAIN ORDER. The order is the dependency
 # order: `derive` reads `filter`'s output, `latches` reads `temporal`'s, `groups`

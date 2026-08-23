@@ -12,14 +12,14 @@
 
 ```bash
 # once
-python3.11 -m venv ~/.venvs/visionhands
-~/.venvs/visionhands/bin/pip install touchdesigner-apple-vision
+python3.11 -m venv ~/.venvs/appletd
+~/.venvs/appletd/bin/pip install touchdesigner-apple-vision
 
 # every session
-~/.venvs/visionhands/bin/python -m visionhands.sidecar
+~/.venvs/appletd/bin/python -m appletd.sidecar
 ```
 
-Then drop [`visionhands.tox`](https://github.com/ORG/touchdesigner-apple-vision/releases/latest)
+Then drop [`appletd.tox`](https://github.com/ORG/touchdesigner-apple-vision/releases/latest)
 into your network. Wave. You have 21 named joints per hand as channels.
 
 ---
@@ -96,16 +96,16 @@ marked.
 **1. The sidecar** (its own venv — never TouchDesigner's Python):
 
 ```bash
-python3.11 -m venv ~/.venvs/visionhands
-~/.venvs/visionhands/bin/pip install touchdesigner-apple-vision
-~/.venvs/visionhands/bin/python -m visionhands.doctor     # verify before debugging anything
+python3.11 -m venv ~/.venvs/appletd
+~/.venvs/appletd/bin/pip install touchdesigner-apple-vision
+~/.venvs/appletd/bin/python -m appletd.doctor     # verify before debugging anything
 ```
 
 **2. The TouchDesigner side**, either way:
 
-- **Drop-in:** `visionhands.tox` from
+- **Drop-in:** `appletd.tox` from
   [Releases](https://github.com/ORG/touchdesigner-apple-vision/releases). Copy it
-  to `~/Documents/Derivative/Palette/visionhands/` to get it in your Palette
+  to `~/Documents/Derivative/Palette/appletd/` to get it in your Palette
   permanently.
 - **Build it:** paste [`tools/td_build_comp.py`](tools/td_build_comp.py) into a
   Text DAT → right-click → Run Script. Idempotent; run it as often as you like.

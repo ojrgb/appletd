@@ -7,7 +7,7 @@ Proposal. Nothing here is applied yet.
 | | repo A | repo B |
 |---|---|---|
 | GitHub | `apple-vision-landmarks` | `touchdesigner-apple-vision` |
-| import / package | `vision_landmarks` | `visionhands` (keep — it is what the sidecar is called) |
+| import / package | `vision_landmarks` | `appletd` (keep — it is what the sidecar is called) |
 | PyPI | `apple-vision-landmarks` | `touchdesigner-apple-vision` |
 | one-line description | "Hand, body and face landmarks on macOS with Apple's Vision framework, from Python. No MediaPipe, no model files." | "Apple Vision hand tracking into TouchDesigner — 137 CHOP channels at 30 fps, no Python in your project." |
 | topics | `macos` `apple` `vision-framework` `pyobjc` `hand-tracking` `pose-estimation` `face-detection` `computer-vision` `mediapipe-alternative` `apple-silicon` | `touchdesigner` `touchdesigner-components` `tox` `osc` `hand-tracking` `macos` `apple-vision` `creative-coding` `realtime` `mocap` |
@@ -24,14 +24,14 @@ Check both names on PyPI before announcing anything.
 
 | today | goes to | note |
 |---|---|---|
-| `visionhands/types.py` | **A** | minus `channel_names()` / `channel_values()` |
-| `visionhands/coords.py` | **A** | |
-| `visionhands/engine.py` | **A** | plus `pose.py`, `face.py` when they exist |
-| `visionhands/source.py` | **A** | `HandSource` is the seam both repos depend on |
-| `visionhands/osc.py` | **B** | the wire is a TD concern |
-| `visionhands/sidecar.py` | **B** | |
+| `appletd/types.py` | **A** | minus `channel_names()` / `channel_values()` |
+| `appletd/coords.py` | **A** | |
+| `appletd/engine.py` | **A** | plus `pose.py`, `face.py` when they exist |
+| `appletd/source.py` | **A** | `HandSource` is the seam both repos depend on |
+| `appletd/osc.py` | **B** | the wire is a TD concern |
+| `appletd/sidecar.py` | **B** | |
 | `channel_names()` / `channel_values()` | **B**, as `contract.py` | the 137-channel flattening is TD-shaped, not landmark-shaped |
-| `visionhands/td/*` | **B**, under `experiments/in_process/` | the measured-slower route, kept as provenance |
+| `appletd/td/*` | **B**, under `experiments/in_process/` | the measured-slower route, kept as provenance |
 | `tools/td_*.py`, the `.tox`, the COMP | **B** | |
 | `tools/record_fixture.py` | **A** | B depends on A for fixtures |
 | `tools/probe_m1_in_td.py` | **B** | it is a TD probe |
@@ -151,10 +151,10 @@ Three labels that will do real work: `needs-measurement`, `td-version`,
 ## 9. Release
 
 - A: PyPI on tag, pure-Python wheel, `python -m build` in CI with a trusted publisher.
-- B: PyPI *and* a GitHub Release carrying `visionhands-<version>.tox` plus a
+- B: PyPI *and* a GitHub Release carrying `appletd-<version>.tox` plus a
   `.toe` demo project. The `.tox` is what the TouchDesigner audience actually
   wants; a pip command is not a distribution channel for them. Name the asset with
   the version and the TD build it was saved from — a `.tox` saved in a newer TD
   will not open in an older one, and that will be an issue on day one.
-- Ship the Palette layout (`~/Documents/Derivative/Palette/visionhands/`) in the
+- Ship the Palette layout (`~/Documents/Derivative/Palette/appletd/`) in the
   release notes as the one-line install.

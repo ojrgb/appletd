@@ -2,11 +2,11 @@
 """Drive TouchDesigner with a synthetic FACE over OSC. No camera, nobody in frame.
 
     RUN IT
-        ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py turn
-        ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py tilt --cycles 6
-        ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py speak
-        ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py two
-        ~/.venvs/visionhands/bin/python tools/send_synthetic_face.py absent
+        ~/.venvs/appletd/bin/python tools/send_synthetic_face.py turn
+        ~/.venvs/appletd/bin/python tools/send_synthetic_face.py tilt --cycles 6
+        ~/.venvs/appletd/bin/python tools/send_synthetic_face.py speak
+        ~/.venvs/appletd/bin/python tools/send_synthetic_face.py two
+        ~/.venvs/appletd/bin/python tools/send_synthetic_face.py absent
 
     IT SENDS TO THE FACE PORT, the base + 2 (10002 by default). `--port` is the
     BASE, matching the sidecar's flag, so both tools take the same number.
@@ -28,11 +28,11 @@ landmark channels.
     bounding box alone, and a broken `point * bbox_w` would look perfect.
 
 WHAT IT IS NOT. The constellation is a hand-laid caricature, not a face model -
-`visionhands/synth_face.py` says exactly what it does and does not reproduce, and
+`appletd/synth_face.py` says exactly what it does and does not reproduce, and
 the region OVERLAP is the important omission. No threshold should be tuned against
 this stream.
 
-Ref: visionhands/synth_face.py, visionhands/face_types.py, DESIGN.md 6.4.
+Ref: appletd/synth_face.py, appletd/face_types.py, DESIGN.md 6.4.
 """
 
 from __future__ import annotations
@@ -51,11 +51,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # than reimplemented, as in send_synthetic_pose.py.
 from send_synthetic import sidecar_pids
 
-from visionhands.face_types import face_channel_names, face_channel_values
-from visionhands.osc import datagram_socket, encode_channels
-from visionhands.sidecar import DEFAULT_HOST, DEFAULT_PORT, SEQ_MODULUS
-from visionhands.streams import STREAM_FACE, port_for
-from visionhands.synth_face import FacePose, synthetic_face_frame
+from appletd.face_types import face_channel_names, face_channel_values
+from appletd.osc import datagram_socket, encode_channels
+from appletd.sidecar import DEFAULT_HOST, DEFAULT_PORT, SEQ_MODULUS
+from appletd.streams import STREAM_FACE, port_for
+from appletd.synth_face import FacePose, synthetic_face_frame
 
 DEFAULT_FPS = 30.0
 DEFAULT_PERIOD_S = 3.0

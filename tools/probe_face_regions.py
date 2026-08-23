@@ -2,14 +2,14 @@
 """Ask the camera how many points each face landmark region carries. Prints numbers only.
 
     RUN IT, from the repo root, with your own face in front of the camera:
-        ~/.venvs/visionhands/bin/python tools/probe_face_regions.py
+        ~/.venvs/appletd/bin/python tools/probe_face_regions.py
 
     It opens the camera, waits for one face, prints the 12 regions and their point
     counts, and exits. **It writes no image, saves nothing, and keeps nothing** -
     the only thing that leaves this process is a table of integers and the numbers
     it prints.
 
-WHY IT HAS TO EXIST. `visionhands/face_types.py` needs one number per region to
+WHY IT HAS TO EXIST. `appletd/face_types.py` needs one number per region to
 publish the landmark channels, and **nothing in the Vision framework will tell you
 before a face has been observed**: `VNFaceLandmarks2D` hands back 12 regions, each
 with its own `pointCount`, and the counts only exist once there is a face. The
@@ -23,9 +23,9 @@ until somebody wonders why the eyebrows never move. So the numbers get measured 
 the machine that will run them, or the channels do not ship.
 
 WHAT TO DO WITH THE OUTPUT. Paste each count into the matching `FaceRegionSpec` in
-`visionhands/face_types.py`, then re-run **`tools/td_add_filter.py`**. That is the
+`appletd/face_types.py`, then re-run **`tools/td_add_filter.py`**. That is the
 script that matters: it splits each stream into smoothed and passthrough halves from
-`visionhands/spaces.py`, and a channel in neither half is dropped inside the filter
+`appletd/spaces.py`, and a channel in neither half is dropped inside the filter
 group with no error anywhere. The coordinate builder needs no re-run for these -
 face landmarks are normalised to the BOUNDING BOX rather than to the image, so they
 are deliberately not transformed into world or pixel space (`spaces.py` marks them
@@ -38,7 +38,7 @@ THE CAMERA. This is the only tool in the repo that needs it, and it needs it for
 few seconds. If the camera has another owner - a call, a recording - this will fail
 to open it and say so rather than fighting for the device.
 
-Ref: visionhands/face_types.py (what the numbers are for), DESIGN.md 2.12,
+Ref: appletd/face_types.py (what the numbers are for), DESIGN.md 2.12,
      docs/STANDARDS.md 3 (why no frame is written anywhere).
 """
 
@@ -51,7 +51,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from visionhands.face_types import CONSTELLATION_DISTINCT_POINTS, FACE_REGIONS
+from appletd.face_types import CONSTELLATION_DISTINCT_POINTS, FACE_REGIONS
 
 # How long to wait for a face before giving up. Long enough to walk into frame,
 # short enough that a forgotten process releases the camera on its own.
@@ -72,9 +72,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Imported here, not at module scope: this is the one tool that pulls in
     # pyobjc, and a `--help` should not.
-    from visionhands.face import region_point_report
-    from visionhands.source import InProcessSource
-    from visionhands.streams import STREAM_FACE
+    from appletd.face import region_point_report
+    from appletd.source import InProcessSource
+    from appletd.streams import STREAM_FACE
 
     print(__doc__.splitlines()[0])
     print("opening the camera - nothing is written to disk, at any point.")

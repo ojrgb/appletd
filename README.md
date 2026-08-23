@@ -24,8 +24,8 @@ Vision Pro. Nothing here needs a headset.
 git clone https://github.com/ORG/apple-touchdesigner
 cd apple-touchdesigner
 
-python3.11 -m venv ~/.venvs/visionhands
-~/.venvs/visionhands/bin/pip install -r requirements.txt
+python3.11 -m venv ~/.venvs/appletd
+~/.venvs/appletd/bin/pip install -r requirements.txt
 
 ./tools/fetch_models.sh          # 47 MB, only if you want depth
 ```
@@ -33,7 +33,7 @@ python3.11 -m venv ~/.venvs/visionhands
 Check it works before involving TouchDesigner — no camera, no TD:
 
 ```bash
-~/.venvs/visionhands/bin/python tools/depth_probe.py
+~/.venvs/appletd/bin/python tools/depth_probe.py
 ```
 
 The pyobjc wheels are pinned to **cp311** deliberately: TouchDesigner ships Python
@@ -76,9 +76,9 @@ Three outputs, because a COMP can carry connectors of different families but
 The sidecar is a normal CLI and does not need TouchDesigner at all:
 
 ```bash
-~/.venvs/visionhands/bin/python -m visionhands.sidecar --list-cameras
-~/.venvs/visionhands/bin/python -m visionhands.sidecar --streams hands,depth
-~/.venvs/visionhands/bin/python -m visionhands.sidecar --fps 60 --port 10000
+~/.venvs/appletd/bin/python -m appletd.sidecar --list-cameras
+~/.venvs/appletd/bin/python -m appletd.sidecar --streams hands,depth
+~/.venvs/appletd/bin/python -m appletd.sidecar --fps 60 --port 10000
 ```
 
 Channels go out over OSC on UDP loopback — hands on the base port, pose on +1,
@@ -88,7 +88,7 @@ CHOP, no callbacks DAT, no Python in your cook.
 ### Driving it with no camera
 
 ```bash
-~/.venvs/visionhands/bin/python tools/send_synthetic.py clap --period 4
+~/.venvs/appletd/bin/python tools/send_synthetic.py clap --period 4
 ```
 
 Synthetic hands over the same encoder and the same port, so TouchDesigner cannot
@@ -230,7 +230,7 @@ falling from 495 channels to 57 while the builder reported success.
 **539 tests, 17 seconds, no camera and no TouchDesigner.**
 
 ```bash
-~/.venvs/visionhands/bin/python -m pytest -q
+~/.venvs/appletd/bin/python -m pytest -q
 ```
 
 The split that makes that possible is deliberate: modules that touch Apple
@@ -247,7 +247,7 @@ fails immediately rather than against a live network an hour later.
 ## Repo layout
 
 ```
-visionhands/          the package — 27 modules, ~9,900 lines
+appletd/          the package — 27 modules, ~9,900 lines
   sidecar.py          the process: camera → Vision → OSC + shared memory
   engine.py           one serial queue, requests cheapest-first
   derive.py           the attribute layer — curls, pinches, spreads

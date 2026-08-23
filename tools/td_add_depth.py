@@ -20,7 +20,7 @@ THREE THINGS THAT MAKE THIS DIFFERENT FROM THE MASK, and each cost a measurement
     frame's own maximum, so the raw map is not comparable between frames - a hand
     coming toward the lens darkens everything else. Nothing may be built on the raw
     numbers without pins. `Depthfit*` below is how a project finds out whether it has
-    a usable fit, and `visionhands/pins.py` is the argument.
+    a usable fit, and `appletd/pins.py` is the argument.
   * THE FIT TRAVELS IN THE BUFFER'S AUX BLOCK, not on a parameter of its own, because
     it is solved from ONE frame and is meaningless against any other. The Script TOP
     unpacks it and writes it onto read-only parameters so a project can gate on it.
@@ -32,12 +32,12 @@ somebody else's behalf, on the main thread, for every project whether it wants m
 or not. `Depthfitalpha` and `Depthfitbeta` are published for exactly that.
 
 Ref: docs/DEPTH.md (first run, and the pins), design/DESIGN.md 2.22,
-     visionhands/depth.py, visionhands/pins.py, tools/td_add_segmentation.py.
+     appletd/depth.py, appletd/pins.py, tools/td_add_segmentation.py.
 """
 
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 MASTER_PATH = "/project1/vision"
 
 PAGE = "Depth"
@@ -88,8 +88,8 @@ if REPO_ROOT not in sys.path:
 
 import numpy
 
-from visionhands.maskbuf import MaskReader
-from visionhands.pins import unpack
+from appletd.maskbuf import MaskReader
+from appletd.pins import unpack
 
 # The red a pin is drawn in. Full red and nothing else, so it cannot be mistaken for a
 # depth value however the map is being coloured downstream.
@@ -200,7 +200,7 @@ def onCook(scriptOp):
     _write(comp, "Depthfitresidual", fit.get("worst_residual_m", 0.0))
     # 1 only when the residual MEANS something. Two pins always fit a line exactly, so
     # a residual of 0.000 from two pins reads as a perfect fit while checking nothing -
-    # this is the flag that says which it is (visionhands/pins.py).
+    # this is the flag that says which it is (appletd/pins.py).
     _write(comp, "Depthfitchecked", fit.get("residual_is_a_check", 0.0))
 
 
@@ -243,7 +243,7 @@ def _corrected(comp, raw, fit):
     inverse = fit["alpha"] * raw + fit["beta"]
     # Clamped before the reciprocal, or a `d` outside the range the pins covered drives
     # alpha*d + beta through zero and one infinity poisons the whole map. The same
-    # clamp `visionhands/pins.py` uses, and for the same reason.
+    # clamp `appletd/pins.py` uses, and for the same reason.
     metres = 1.0 / numpy.clip(inverse, 1.0 / 60.0, 1.0 / 0.05)
     span = max(far - near, 1e-6)
     windowed = 1.0 - numpy.clip((metres - near) / span, 0.0, 1.0)
@@ -379,7 +379,7 @@ def _page(comp, name):
 
 
 def _at(node, xy, keep, existed):
-    from visionhands.td_layout import placement
+    from appletd.td_layout import placement
     where = placement(xy, keep, existed)
     if where is not None:
         node.nodeX, node.nodeY = where
@@ -392,9 +392,9 @@ def main():
         sys.path.append(REPO_ROOT)
     # TouchDesigner caches our modules for the life of the process. DESIGN.md 2.11.
     for stale in [n for n in list(sys.modules)
-                  if n == "visionhands" or n.startswith("visionhands.")]:
+                  if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from visionhands.td_layout import master_xy
+    from appletd.td_layout import master_xy
 
     master = op(MASTER_PATH)
     if master is None:
@@ -649,7 +649,7 @@ def main():
         print("   FIRST RUN? The model is 47 MB and is not in this repo:")
         print("     ./tools/fetch_models.sh")
         print("   Check it with no camera and no TouchDesigner:")
-        print("     ~/.venvs/visionhands/bin/python tools/depth_probe.py")
+        print("     ~/.venvs/appletd/bin/python tools/depth_probe.py")
         print("   Then switch Streamdepth on and press Active. docs/DEPTH.md has")
         print("   the pins, which are what turn the map into metres.")
     else:

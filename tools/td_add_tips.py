@@ -64,7 +64,7 @@ Ref: docs/ATTRIBUTES.md (the coordinate spaces and their toggles), DESIGN.md 7.
 
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 PARENT_PATH = "/project1"
 VISION_PATH = "/project1/vision"
 COMP_NAME = "handtips"
@@ -180,12 +180,12 @@ def main():
         sys.path.append(REPO_ROOT)
     # TouchDesigner caches our modules for the life of the process. DESIGN.md 2.11.
     for stale in [n for n in list(sys.modules)
-                  if n == "visionhands" or n.startswith("visionhands.")]:
+                  if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
     # The fingertip joint names, from the contract rather than typed here - so a
     # rename in the joint table reaches this builder instead of silently selecting
     # nothing.
-    from visionhands.derive import FINGER_NAMES, FINGERS
+    from appletd.derive import FINGER_NAMES, FINGERS
 
     tips = [FINGERS[finger][1][-1] for finger in FINGER_NAMES]
 

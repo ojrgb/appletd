@@ -2,10 +2,10 @@
 """Drive TouchDesigner with a synthetic BODY over OSC. No camera, nobody in frame.
 
     RUN IT
-        ~/.venvs/visionhands/bin/python tools/send_synthetic_pose.py walk
-        ~/.venvs/visionhands/bin/python tools/send_synthetic_pose.py wave --cycles 6
-        ~/.venvs/visionhands/bin/python tools/send_synthetic_pose.py two --period 4
-        ~/.venvs/visionhands/bin/python tools/send_synthetic_pose.py absent
+        ~/.venvs/appletd/bin/python tools/send_synthetic_pose.py walk
+        ~/.venvs/appletd/bin/python tools/send_synthetic_pose.py wave --cycles 6
+        ~/.venvs/appletd/bin/python tools/send_synthetic_pose.py two --period 4
+        ~/.venvs/appletd/bin/python tools/send_synthetic_pose.py absent
 
     IT SENDS TO THE POSE PORT, which is the base port + 1 (10001 by default), for
     the same reason the sidecar does: one stream per port, so no stream's channels
@@ -26,9 +26,9 @@ camera left alone. It is the pose half of the same argument
 WHAT IT IS NOT. Not a benchmark (the frames are free to generate) and not
 evidence about Vision. The skeleton is proportions from a diagram, so a threshold
 tuned against it is a guess - see the module docstring of
-`visionhands/synth_body.py`.
+`appletd/synth_body.py`.
 
-Ref: visionhands/synth_body.py (the figure), visionhands/streams.py (the ports),
+Ref: appletd/synth_body.py (the figure), appletd/streams.py (the ports),
 DESIGN.md 6.4 (the stream contract).
 """
 
@@ -50,18 +50,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # sit immediately before the module), and two copies of it would drift.
 from send_synthetic import sidecar_pids
 
-from visionhands.osc import datagram_socket, encode_channels
-from visionhands.pose_types import pose_channel_names, pose_channel_values
-from visionhands.sidecar import DEFAULT_HOST, DEFAULT_PORT, SEQ_MODULUS
-from visionhands.streams import STREAM_POSE, port_for
-from visionhands.synth_body import BodyPose, synthetic_pose_frame
+from appletd.osc import datagram_socket, encode_channels
+from appletd.pose_types import pose_channel_names, pose_channel_values
+from appletd.sidecar import DEFAULT_HOST, DEFAULT_PORT, SEQ_MODULUS
+from appletd.streams import STREAM_POSE, port_for
+from appletd.synth_body import BodyPose, synthetic_pose_frame
 
 DEFAULT_FPS = 30.0
 DEFAULT_PERIOD_S = 3.0
 STATUS_INTERVAL_S = 1.0
 
 # A phase is 0..1 over one cycle. Every sequence below is a pure function of it,
-# the same shape as `visionhands/sequences.py` - so a sweep is reproducible and
+# the same shape as `appletd/sequences.py` - so a sweep is reproducible and
 # the frame rate is a delivery detail rather than part of the definition.
 Sequence = Callable[[float], tuple[BodyPose, ...]]
 

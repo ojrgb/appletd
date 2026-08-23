@@ -18,7 +18,7 @@ same conversion, and one Ortho Width has to serve all three or they disagree abo
 where the world is - which is why the parameters live on the master COMP and every
 stream's branches read them through `op.Vision`.
 
-WHICH CHANNELS, AND WITH WHAT RULE, comes from `visionhands/spaces.py` rather than
+WHICH CHANNELS, AND WITH WHAT RULE, comes from `appletd/spaces.py` rather than
 from a pattern written here. Three distinctions it makes that a pattern cannot:
 
   * a POSITION gets the -0.5 offset, because world space is centred on the camera;
@@ -84,7 +84,7 @@ Ref: DESIGN.md 7 (the coordinate contract), 2.12 (box-relative points),
 
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 MASTER_PATH = "/project1/vision"
 GROUP = "coords"
 
@@ -95,7 +95,7 @@ GROUP = "coords"
 MASTER_PAR = "op.Vision.par.%s"
 
 # The GAIN each output space applies, by suffix - the `K` in the docstring's
-# arithmetic. The pre-offset and the channel list come from visionhands/spaces.py;
+# arithmetic. The pre-offset and the channel list come from appletd/spaces.py;
 # only these expressions are here, because only this script knows how to write a
 # TouchDesigner expression.
 GAINS = {
@@ -132,7 +132,7 @@ SOURCE = "filter"
 SOURCES = ("filter", "derive_chop", "temporal")
 
 # ---- layout -----------------------------------------------------------------
-# The group's position inside its stream comes from `visionhands/td_layout.py`, the
+# The group's position inside its stream comes from `appletd/td_layout.py`, the
 # one table for it - this script and td_add_filter.py both used to place their group
 # at (-400, -300), on top of each other, with nothing able to notice. The positions
 # INSIDE the group are here, beside the code that builds them.
@@ -320,11 +320,11 @@ def _keep_layout(master):
 def _place(node, xy, keep, existed):
     """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
 
-    See `visionhands.td_layout.placement` for the rule and for what the flag can
+    See `appletd.td_layout.placement` for the rule and for what the flag can
     and cannot hold - the short version is that it holds this group COMP and not
     the operators inside it, which are regenerated on every run.
     """
-    from visionhands.td_layout import placement
+    from appletd.td_layout import placement
 
     where = placement(xy, keep, existed)
     if where is not None:
@@ -425,17 +425,17 @@ def main():
         sys.path.append(REPO_ROOT)
     # TouchDesigner caches our modules for the life of the process. DESIGN.md 2.11.
     for stale in [n for n in list(sys.modules)
-                  if n == "visionhands" or n.startswith("visionhands.")]:
+                  if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from visionhands.spaces import (
+    from appletd.spaces import (
         DERIVED_SOURCES,
         box_branches,
         box_expressions,
         derived_branches,
         transform_branches,
     )
-    from visionhands.streams import STREAM_HANDS, STREAM_NAMES
-    from visionhands.td_layout import stream_xy
+    from appletd.streams import STREAM_HANDS, STREAM_NAMES
+    from appletd.td_layout import stream_xy
 
     master = op(MASTER_PATH)
     if master is None:

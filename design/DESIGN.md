@@ -1,4 +1,4 @@
-# visionhands — design plan
+# appletd — design plan
 
 Apple Vision hand landmarks, on macOS, delivered into TouchDesigner as CHOP
 channels without stalling TD's main thread.
@@ -675,7 +675,7 @@ Against the running instance (099), not read anywhere:
   `?` and `[0-9]` character classes.** Verified by expanding the same patterns
   both ways against the same channel set and comparing the lists. That is what
   makes a generated pattern checkable BEFORE it is written to an operator:
-  `visionhands/spaces.py` expands each candidate against the stream's own contract
+  `appletd/spaces.py` expands each candidate against the stream's own contract
   and falls back to the literal name list unless the match is exact. `fnmatchcase`
   and not `fnmatch` - the latter is case-insensitive on macOS.
 - **`renamefrom = '*'` APPENDS rather than substitutes.** Reproduced deliberately
@@ -755,10 +755,10 @@ Against the running instance (099), not read anywhere:
 - **TouchDesigner PICKLES operator storage into the `.toe` on save, so anything
   `store()`d must be picklable - and a class from a module the builders purge from
   `sys.modules` is NOT.** Measured, as a save failure the user saw:
-  `PicklingError: Can't pickle <class 'visionhands.temporal.TemporalState'>: it's not
-  the same object as visionhands.temporal.TemporalState`. Pickle compares the
+  `PicklingError: Can't pickle <class 'appletd.temporal.TemporalState'>: it's not
+  the same object as appletd.temporal.TemporalState`. Pickle compares the
   instance's class against the module's current class BY IDENTITY, and every builder
-  here re-imports `visionhands.*` (see above), so after any rebuild the stored
+  here re-imports `appletd.*` (see above), so after any rebuild the stored
   object's class is a different object with the same name. The project then saves
   "with errors" and the storage is silently dropped.
   Two consequences. Store only primitives - a tuple of strings is fine, which is why
@@ -778,7 +778,7 @@ Against the running instance (099), not read anywhere:
 - **`ps -Ao args=` is not tokenised by argv**, so splitting it on spaces cannot
   recover argument boundaries: the body of a `python -c "..."` script splits into
   words too, and a test for "`-m` immediately followed by the module" matches
-  `python -c "# -m visionhands.sidecar"`. This is the same class of false positive
+  `python -c "# -m appletd.sidecar"`. This is the same class of false positive
   that once had the COMP's Stop button SIGTERM the shell that launched it, one
   level subtler. Walk the leading interpreter options the way CPython does and
   stop at the first `-c`, `-m`, or script path.
@@ -1120,7 +1120,7 @@ than commented. `supportedRevisions()` is `[1]`.
 
 ### 2.19 The transport, measured — 0.02 ms a read and no tearing in 56,591 frames
 
-`visionhands/maskbuf.py`: a file-backed `mmap` with a seqlock, chosen over
+`appletd/maskbuf.py`: a file-backed `mmap` with a seqlock, chosen over
 TouchDesigner's shared memory for the reasons in `docs/BUILD_PLAN.md` step 9.
 
 | what | figure |
@@ -1468,8 +1468,8 @@ built-in C++.
 
 ### 4.2 Two processes, and what crosses between them
 
-**The sidecar** (`visionhands/sidecar.py`, run as `python -m
-visionhands.sidecar`) owns the camera, the `AVCaptureSession`, Vision, and a UDP
+**The sidecar** (`appletd/sidecar.py`, run as `python -m
+appletd.sidecar`) owns the camera, the `AVCaptureSession`, Vision, and a UDP
 socket. Two threads of interest, exactly as before: the GCD capture queue
 AVFoundation delivers on, and the sidecar's own send loop. No run loop is turned
 by us — measured, §2.5.
@@ -1515,7 +1515,7 @@ Settled in `docs/ATTRIBUTES.md` and worth stating here because it decides where
 new work goes:
 
 - **Stateless maths** — every distance, angle, curl, bounding box, two-hand
-  geometry — is a pure function of one frame, and lives in `visionhands/derive.py`
+  geometry — is a pure function of one frame, and lives in `appletd/derive.py`
   called from one Script CHOP. Pure Python, no TD, so every formula in the spec is
   a unit test against a synthetic hand.
 - **Anything with memory** — latches, edge pulses, filters, debounce, dwell,
@@ -1538,7 +1538,7 @@ and the teardown stay in one place and each new stream is a plug-in rather than 
 rewrite.
 
 ```
-visionhands/
+appletd/
   types.py        # LandmarkFrame, Hand, the joint table, the 137-channel contract
   pose_types.py   # Body, PoseFrame, the 19-joint table, the 123-channel contract
   face_types.py   # Face, FaceFrame, the 12 regions, the 23-channel contract
@@ -1650,7 +1650,7 @@ Publish `age_ms` and treat a rising value as engine death.
 
 Vision gives no tracking ID and its observation order is not stable, so `h0` swaps
 to the other physical hand between frames unless we prevent it.
-`visionhands/slots.py` prevents it, and the algorithm collapsed to almost nothing
+`appletd/slots.py` prevents it, and the algorithm collapsed to almost nothing
 because Vision already tells us which hand is which.
 
 **The assignment is a partition, not a tracking problem.**
@@ -1732,7 +1732,7 @@ everything else that makes a stream a stream — one launch flag, the same camer
 same serial queue, the same `seq` and `captured_at` as the hands frame from the same
 buffer, and a status channel.
 
-So `visionhands/streams.py` now has two tuples. `STREAM_NAMES` is what has a port;
+So `appletd/streams.py` now has two tuples. `STREAM_NAMES` is what has a port;
 `REQUEST_NAMES` is `STREAM_NAMES` plus the portless requests, and it is what
 `--streams` accepts and what the status channels are built from. `port_for("segment")`
 raises **by name**, saying where the mask actually goes, rather than returning a
@@ -1750,12 +1750,12 @@ AVFoundation starts dropping buffers, which shows up as `n_delivered` falling ra
 than as anything failing.
 
 **One UDP port per stream.** Hands 10000, pose 10001, face 10002 — `BASE_PORT` plus
-a fixed offset, in `visionhands/streams.py`, which both the sidecar and the TD
+a fixed offset, in `appletd/streams.py`, which both the sidecar and the TD
 builders import so the two cannot drift. All three are built. One port carrying everything was the
 obvious alternative and is worse here:
 
   * TouchDesigner's OSC In CHOP puts every channel it receives into one CHOP, and
-    the `visionhands` COMP passes its whole input through to `merge_out`. Sharing
+    the `appletd` COMP passes its whole input through to `merge_out`. Sharing
     the port would put pose channels inside the hands COMP's output, so each COMP
     would need a prefix Select at its input — and a prefix Select is exactly the
     mechanism that already failed to partition channels once (step 3 of
@@ -1882,7 +1882,7 @@ at 50 fps. The question is whether 10 fps is an acceptable price, not whether it
 can be done.
 
 **Where the sidecar control lives, and why it did not move.** The Start/Stop DATs
-and the stream toggles are still inside the `visionhands` COMP, even though the
+and the stream toggles are still inside the `appletd` COMP, even though the
 process they control now serves every stream. Moving them up to a shared COMP was
 considered and deferred: it would break the panel in a live project, the parameter
 paths every callback names, and the `--slots` plumbing, in exchange for tidiness.
@@ -1929,7 +1929,7 @@ own port with its own time-slicing; merging them would make every stream cook wh
 any one arrived, and reintroduce exactly the cross-stream name coupling that
 separate ports were chosen to avoid.
 
-**WHICH channels get filtered and transformed is `visionhands/spaces.py`**, not a
+**WHICH channels get filtered and transformed is `appletd/spaces.py`**, not a
 pattern in a builder. Patterns have failed at this twice (§2.11): `h?_*_x` matches
 two different groups, `^` does not exclude in a Select CHOP, and anything a pattern
 misses vanishes from the COMP output with no error. `spaces.py` classifies every
@@ -1971,7 +1971,7 @@ _ty and _th both carry the RENDER's aspect: * Renderh / Renderw
 
 Subtracting 0.5 from a width gives a negative size, which draws as nothing — a
 silent failure that looks like a missing operator rather than wrong arithmetic.
-`visionhands/spaces.py` is what keeps the two apart, and it is the only place that
+`appletd/spaces.py` is what keeps the two apart, and it is the only place that
 decides.
 
 **Face landmark points are normalised to the FACE'S BOUNDING BOX, not to the
@@ -2018,7 +2018,7 @@ that `except Exception` does not catch and that takes the process down.
 ### 8.2 The process, and how TouchDesigner controls it
 
 - The COMP's **Sidecar** page has Start, Stop and Status pulses and a read-only
-  PID. Start launches `python -m visionhands.sidecar` detached; Stop matches the
+  PID. Start launches `python -m appletd.sidecar` detached; Stop matches the
   process by argv and signals it.
 - **Process matching is by full argv, not by pattern.** `pgrep -f` matches the
   grep's own command line, which is how an early version of the Stop button
@@ -2129,7 +2129,7 @@ predates both the sidecar and the attribute layer.
   (§2.5): yes.** TD 099 ships 3.11.15; pyobjc 12.2.2 imports and runs Vision in
   TD's process.
 - ~~Best venv strategy~~ **CLOSED (§2.5): a dedicated venv at
-  `~/.venvs/visionhands`, its `site-packages` APPENDED to `sys.path`.** Measured
+  `~/.venvs/appletd`, its `site-packages` APPENDED to `sys.path`.** Measured
   inside TD: numpy correctly resolved to TD's own 2.1.2 rather than the venv's
   2.2.6, which is the outcome that keeps TD's extension modules matched to the
   numpy they were built against. Inserting at position 0 would invert that.

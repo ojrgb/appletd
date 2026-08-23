@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Record the benchmark fixture clip - the only honest performance input we have.
 
-    ~/.venvs/visionhands/bin/python tools/record_fixture.py --seconds 10
-    ~/.venvs/visionhands/bin/python tools/record_fixture.py --list-devices
-    ~/.venvs/visionhands/bin/python tools/record_fixture.py --name two_hands --seconds 12
+    ~/.venvs/appletd/bin/python tools/record_fixture.py --seconds 10
+    ~/.venvs/appletd/bin/python tools/record_fixture.py --list-devices
+    ~/.venvs/appletd/bin/python tools/record_fixture.py --name two_hands --seconds 12
 
 WHY THIS EXISTS. A live camera cannot produce a comparable performance number:
 identical 720p configs gave medians from 2.12 to 16.30 ms in the spike, an 8x
@@ -28,7 +28,7 @@ The clip is written WITHOUT any landmark overlay - it is an input, not a
 demonstration. Drawing on it would feed our own annotations back into Vision.
 
 This is a dev tool: it imports cv2, which TouchDesigner's bundled Python does
-not have, and nothing in visionhands/ imports it.
+not have, and nothing in appletd/ imports it.
 
 Built against pyobjc 12.2.2 / macOS 26.5.2 (Darwin 25.5.0), Apple silicon.
 """
@@ -330,7 +330,7 @@ def record(device, out_path, w_px, h_px, seconds):
 
     delegate = RecorderDelegate.alloc().initWithPath_fps_(out_path, writer_fps)
     queue = dispatch_queue_create(
-        b"visionhands.fixture.capture",
+        b"appletd.fixture.capture",
         dispatch_queue_attr_make_with_qos_class(None, QOS_CLASS_USER_INITIATED, 0))
     output.setSampleBufferDelegate_queue_(delegate, queue)
     session.addOutput_(output)

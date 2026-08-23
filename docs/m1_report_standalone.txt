@@ -1,17 +1,17 @@
 ========================================================================
-visionhands milestone 1 probe
+appletd milestone 1 probe
 ========================================================================
 
 --- stage 1: environment
   python      : 3.11.9
-  executable  : /Users/omer/.venvs/visionhands/bin/python
+  executable  : /Users/omer/.venvs/appletd/bin/python
   platform    : darwin
   host        : standalone python (control run, NOT inside TD)
 
 --- stage 2: pyobjc import
-  already on sys.path: /Users/omer/.venvs/visionhands/lib/python3.11/site-packages
+  already on sys.path: /Users/omer/.venvs/appletd/lib/python3.11/site-packages
   pyobjc      : 12.2.2
-  numpy       : 2.2.6  (from venv: /Users/omer/.venvs/visionhands/lib/python3.11/site-packages/numpy/__init__.py)
+  numpy       : 2.2.6  (from venv: /Users/omer/.venvs/appletd/lib/python3.11/site-packages/numpy/__init__.py)
   request rev : 1  (supported: [1])
   OK pyobjc + Vision loaded in this process
 
@@ -46,4 +46,4 @@ VERDICT
   Q2 run loop needed   : NO - 18 frames arrived with no run loop of
                          our own. DESIGN.md 4.2 loses a thread.
 ========================================================================
-report written to /Users/omer/Documents/GitHub/visionhands-touchdesigner/docs/m1_report_standalone.txt
+report written to /Users/omer/Documents/GitHub/appletd/docs/m1_report_standalone.txt

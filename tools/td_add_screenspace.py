@@ -59,12 +59,12 @@ built where it can do the least damage:
     reads and a toggle that defaulted on would delete them out from under one.
 
 Ref: DESIGN.md 6.2 (why a vanished channel is silent), 7 (the coordinate contract),
-     visionhands/spaces.py, docs/BUILD_PLAN.md step 10.
+     appletd/spaces.py, docs/BUILD_PLAN.md step 10.
 """
 
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 MASTER_PATH = "/project1/vision"
 NODE = "screen_only"
 PARAMETER = "Screenspaceonly"
@@ -129,12 +129,12 @@ def main():
         sys.path.append(REPO_ROOT)
     # TouchDesigner caches our modules for the life of the process. DESIGN.md 2.11.
     for stale in [n for n in list(sys.modules)
-                  if n == "visionhands" or n.startswith("visionhands.")]:
+                  if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
     # `td_layout` is where this operator goes - the one table every builder reads.
-    from visionhands.spaces import companioned_names, derived_companioned_names
-    from visionhands.streams import STREAM_HANDS, STREAM_NAMES
-    from visionhands.td_layout import master_xy, stream_xy
+    from appletd.spaces import companioned_names, derived_companioned_names
+    from appletd.streams import STREAM_HANDS, STREAM_NAMES
+    from appletd.td_layout import master_xy, stream_xy
 
     master = op(MASTER_PATH)
     if master is None:
@@ -202,9 +202,9 @@ def _keep_layout(master):
 def _place(node, xy, keep, existed):
     """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
 
-    Rule and caveats in `visionhands.td_layout.placement`.
+    Rule and caveats in `appletd.td_layout.placement`.
     """
-    from visionhands.td_layout import placement
+    from appletd.td_layout import placement
 
     where = placement(xy, keep, existed)
     if where is not None:

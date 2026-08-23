@@ -6,7 +6,7 @@ downloaded, compiles, loads and produces a map, and that the map survives the sh
 buffer - with no camera, no TouchDesigner, and nothing to set up.
 
     # the default: replay the fixture, publish maps, read them in this process
-    ~/.venvs/visionhands/bin/python tools/depth_probe.py
+    ~/.venvs/appletd/bin/python tools/depth_probe.py
 
     # with pins, so the numbers come out in metres
     ... tools/depth_probe.py --pins "0.06,0.30,2.5 0.94,0.30,2.4 0.50,0.96,1.1"
@@ -34,7 +34,7 @@ WHY THE FIXTURE AND NOT THE CAMERA. The camera usually has another owner and has
 asked for, and `docs/STANDARDS.md` 3 only accepts timings from deterministic fixture
 replay. For live depth, enable it in the sidecar - that is what it is for.
 
-Ref: docs/DEPTH.md, visionhands/depth.py, visionhands/pins.py, DESIGN.md 2.22.
+Ref: docs/DEPTH.md, appletd/depth.py, appletd/pins.py, DESIGN.md 2.22.
 """
 
 from __future__ import annotations
@@ -50,16 +50,16 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from visionhands.maskbuf import (  # noqa: E402
+from appletd.maskbuf import (  # noqa: E402
     DTYPE_F16,
     MaskReader,
     MaskWriter,
     capacity_for,
 )
-from visionhands.pins import format_pins, parse_pins, unpack  # noqa: E402
+from appletd.pins import format_pins, parse_pins, unpack  # noqa: E402
 
 FIXTURE = os.path.join(REPO_ROOT, "fixtures", "hand_clip.mp4")
-DEFAULT_PATH = "/tmp/visionhands_depth.buf"
+DEFAULT_PATH = "/tmp/appletd_depth.buf"
 
 
 def decode(limit: int) -> list:
@@ -97,8 +97,8 @@ def write(path: str, pin_text: str, frames_wanted: int, fps: float,
     """Run the model over the fixture and publish each map."""
     import numpy
 
-    from visionhands.depth import DepthDetector
-    from visionhands.engine import pixel_buffer_from_bgra
+    from appletd.depth import DepthDetector
+    from appletd.engine import pixel_buffer_from_bgra
 
     pins = parse_pins(pin_text) if pin_text.strip() else ()
     frames = decode(frames_wanted)
@@ -235,7 +235,7 @@ def _write_png(frame, fit: dict, png_dir: str) -> None:
     import cv2
     import numpy
 
-    from visionhands.pins import Solve, metres
+    from appletd.pins import Solve, metres
 
     os.makedirs(png_dir, exist_ok=True)
     raw = frame.as_numpy().astype(numpy.float32)

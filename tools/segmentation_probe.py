@@ -6,7 +6,7 @@ with no TouchDesigner running and no camera. It is the thing to run before belie
 anything about the transport, and the thing to run again when a macOS update lands.
 
     # the default: replay the fixture, write masks, read them in this process
-    ~/.venvs/visionhands/bin/python tools/segmentation_probe.py
+    ~/.venvs/appletd/bin/python tools/segmentation_probe.py
 
     # one quality level, and dump PNGs to look at
     ... tools/segmentation_probe.py --quality fast --png /tmp/masks
@@ -20,13 +20,13 @@ WHY THE FIXTURE AND NOT THE CAMERA. Two reasons and both are standing rules on t
 project: the camera usually has another owner and is asked for first, and a live
 camera cannot produce a comparable number - `docs/STANDARDS.md` 3 only accepts
 timings from deterministic fixture replay. `--camera` is deliberately NOT an option
-here; if you want live, that is `visionhands/sidecar.py`'s job.
+here; if you want live, that is `appletd/sidecar.py`'s job.
 
 WHAT THE FIXTURE CONTAINS, since this file is about segmenting people: a torso, an
 arm and a hand in a room, framed below the neck. It is gitignored and stays that way,
 and `--png` writes wherever you point it, which should not be inside the repo.
 
-Ref: visionhands/segmentation.py, visionhands/maskbuf.py,
+Ref: appletd/segmentation.py, appletd/maskbuf.py,
      design/DESIGN.md 2.18, docs/BUILD_PLAN.md step 9.
 """
 
@@ -43,10 +43,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from visionhands.maskbuf import MaskReader, MaskWriter, capacity_for  # noqa: E402
+from appletd.maskbuf import MaskReader, MaskWriter, capacity_for  # noqa: E402
 
 FIXTURE = os.path.join(REPO_ROOT, "fixtures", "hand_clip.mp4")
-DEFAULT_PATH = "/tmp/visionhands_mask.buf"
+DEFAULT_PATH = "/tmp/appletd_mask.buf"
 
 # MEASURED 2026-08-22 over the fixture. The buffer is sized for the level being
 # written, and `accurate` is 3 MB where `fast` is 49 KB - a 60x spread, which is why
@@ -87,8 +87,8 @@ def decode(limit: int) -> list:
 def write(path: str, quality: str, frames_wanted: int, fps: float,
           loop: bool) -> None:
     """Segment the fixture and publish each mask. Runs until the frames run out."""
-    from visionhands.engine import pixel_buffer_from_bgra
-    from visionhands.segmentation import SegmentationDetector
+    from appletd.engine import pixel_buffer_from_bgra
+    from appletd.segmentation import SegmentationDetector
 
     frames = decode(frames_wanted)
     height, width = frames[0].shape[:2]

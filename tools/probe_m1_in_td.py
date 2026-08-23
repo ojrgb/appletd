@@ -2,7 +2,7 @@
 """Milestone 1 probe: does the pyobjc + Vision approach work INSIDE TouchDesigner?
 
 Run this by hand, once, in a Text DAT. It is a diagnostic, not part of the
-package, and nothing in `visionhands/` imports it.
+package, and nothing in `appletd/` imports it.
 
     HOW TO RUN
       1. In TouchDesigner, create a Text DAT.
@@ -12,7 +12,7 @@ package, and nothing in `visionhands/` imports it.
          docs/m1_report.txt in the repo, so it can be read directly.
 
     It also runs standalone, which is useful as a control:
-      ~/.venvs/visionhands/bin/python tools/probe_m1_in_td.py
+      ~/.venvs/appletd/bin/python tools/probe_m1_in_td.py
 
 Why this lives in tools/ and not td/: DESIGN.md 5 and STANDARDS.md 2 forbid
 `td/*` from importing pyobjc, and importing pyobjc is this file's entire job.
@@ -53,10 +53,10 @@ import traceback
 # The dev venv's site-packages, APPENDED to sys.path (see stage 2 for why
 # appending rather than inserting is load-bearing).
 VENV_SITE_PACKAGES = os.path.expanduser(
-    "~/.venvs/visionhands/lib/python3.11/site-packages")
+    "~/.venvs/appletd/lib/python3.11/site-packages")
 
 # Fallback repo root, for when this file's own location cannot be trusted.
-FALLBACK_REPO_ROOT = os.path.expanduser("~/Documents/GitHub/visionhands-touchdesigner")
+FALLBACK_REPO_ROOT = os.path.expanduser("~/Documents/GitHub/appletd")
 
 
 def _repo_root():
@@ -243,7 +243,7 @@ def stage_2_import(rep):
     if not os.path.isdir(VENV_SITE_PACKAGES):
         rep.line("  FAIL venv site-packages not found: %s" % VENV_SITE_PACKAGES)
         rep.line("       create it with:  ~/.pyenv/versions/3.11.9/bin/python3.11 "
-                 "-m venv ~/.venvs/visionhands")
+                 "-m venv ~/.venvs/appletd")
         return None
 
     if VENV_SITE_PACKAGES not in sys.path:
@@ -566,7 +566,7 @@ def _run_delivery_test(rep, mod, wait_style):
 
     delegate = _make_delegate_class(mod).alloc().init()
     queue = mod["qcreate"](
-        b"visionhands.probe.capture",
+        b"appletd.probe.capture",
         mod["qattr"](None, QOS_CLASS_USER_INITIATED, 0))
     output.setSampleBufferDelegate_queue_(delegate, queue)
     session.addOutput_(output)
@@ -649,7 +649,7 @@ def main():
         "m1_report.txt" if in_td else "m1_report_standalone.txt")
     rep = Report(report_path)
     rep.line("=" * 72)
-    rep.line("visionhands milestone 1 probe")
+    rep.line("appletd milestone 1 probe")
     rep.line("=" * 72)
 
     try:
@@ -714,7 +714,7 @@ def main():
 # produced no report at all, because neither branch fired.
 #
 # A guard exists to stop a module doing work when it is *imported*. This module
-# is a hand-run diagnostic that nothing imports - `visionhands/` must not touch
+# is a hand-run diagnostic that nothing imports - `appletd/` must not touch
 # it, by design - so there is nothing for a guard to protect, and every guard is
 # one more way for the probe to do nothing silently.
 main()

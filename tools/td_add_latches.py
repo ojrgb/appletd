@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Add the proximity latch bank to the visionhands COMP. Paste, Run Script.
+"""Add the proximity latch bank to the appletd COMP. Paste, Run Script.
 
     WHAT IT BUILDS
         h{i}_pinching             h{i}_e_pinch_start   h{i}_e_pinch_end
@@ -60,12 +60,12 @@ the running instance (099) rather than taken from documentation:
      `_verify` then checks the names really are what the wiring assumed.
 
 Ref: docs/ATTRIBUTES.md (the definitions, the thresholds, why a latch and not a
-counter), docs/BUILD_PLAN.md step 1, visionhands/sequences.py (how it is tested).
+counter), docs/BUILD_PLAN.md step 1, appletd/sequences.py (how it is tested).
 """
 
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 # The master COMP holds every parameter; the hands STREAM holds this
 # network. Both are named, because this script writes to both.
 MASTER_PATH = "/project1/vision"
@@ -159,7 +159,7 @@ NAMED_LATCHES = (
     # "touching" is for a pinch, and the hysteresis stops a hand hovering near
     # half-closed from chattering.
     #
-    # `openness` is 0..1 rather than a ratio of hand size - see visionhands/tuning.py.
+    # `openness` is 0..1 rather than a ratio of hand size - see appletd/tuning.py.
     ("grab0",    "h0_openness",      "h0_valid",   "Grabon",     "Graboff",
      "h0_grabbing", "h0_e_grab", "h0_e_release",
      "h0_grab_count", "h0_release_count"),
@@ -198,13 +198,13 @@ FINGER_LATCHES = tuple(
 LATCHES = (*NAMED_LATCHES, *FINGER_LATCHES)
 WORKING = tuple(row[0] for row in LATCHES)
 
-# Tuning defaults come from visionhands/tuning.py, not from a copy here. They were
+# Tuning defaults come from appletd/tuning.py, not from a copy here. They were
 # written down in three places - this builder, the tests, and docs/ATTRIBUTES.md -
 # and nothing tied them together, so raising `Pinchon` here alone left the whole
 # suite green while silently pushing the dead-band sweep's crest below the engage
 # threshold: the hysteresis test stopped testing hysteresis and kept reporting
 # success. Imported inside main(), after sys.path is set up.
-THRESHOLD_DEFAULTS = None       # populated by main() from visionhands.tuning
+THRESHOLD_DEFAULTS = None       # populated by main() from appletd.tuning
 
 # Where the bank is laid out, below the derive Script CHOP at y = -800.
 # ---- layout -----------------------------------------------------------------
@@ -569,12 +569,12 @@ def _keep_layout(master):
 def _place(node, xy, keep, existed):
     """Write nodeX/nodeY unless `Keeplayout` is on and the node already existed.
 
-    See `visionhands.td_layout.placement` for the rule and for what the flag can
+    See `appletd.td_layout.placement` for the rule and for what the flag can
     and cannot hold - the short version is that it holds the group COMPs and the
     stream shell, and not the operators inside a group, which are regenerated on
     every run.
     """
-    from visionhands.td_layout import placement
+    from appletd.td_layout import placement
 
     where = placement(xy, keep, existed)
     if where is not None:
@@ -623,7 +623,7 @@ def main():
     if REPO_ROOT not in sys.path:
         sys.path.append(REPO_ROOT)
     # PURGE FIRST. TouchDesigner's Python process outlives every run of this
-    # script, so `import visionhands.tuning` returns whatever was imported hours
+    # script, so `import appletd.tuning` returns whatever was imported hours
     # ago - editing the repo does nothing. Not a subtle failure, but a silent one:
     # adding the Trigger thresholds to tuning.py and re-running this built a bank
     # referencing `parent().par.Triggeron`, which the Tuning page did not have,
@@ -635,12 +635,12 @@ def main():
     # script rewrites anyway - which is what makes TD recompile it against the
     # fresh import.
     for stale in [n for n in list(sys.modules)
-                  if n == "visionhands" or n.startswith("visionhands.")]:
+                  if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
     # One table, shared with the tests. Its import-time self-check refuses a
     # threshold pair with no dead band, which is a build that would chatter.
-    from visionhands.td_layout import master_xy, stream_xy
-    from visionhands.tuning import THRESHOLD_DEFAULTS as DEFAULTS
+    from appletd.td_layout import master_xy, stream_xy
+    from appletd.tuning import THRESHOLD_DEFAULTS as DEFAULTS
     THRESHOLD_DEFAULTS = DEFAULTS
 
     master = op(MASTER_PATH)
@@ -1155,7 +1155,7 @@ def main():
     else:
         print("\nstructure verified. Now exercise it over TIME - a latch cannot be")
         print("checked from one frame:")
-        print("   ~/.venvs/visionhands/bin/python tools/send_synthetic.py ramp --cycles 4")
+        print("   ~/.venvs/appletd/bin/python tools/send_synthetic.py ramp --cycles 4")
 
 
 main()

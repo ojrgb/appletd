@@ -32,13 +32,13 @@ WHAT IT CHECKS, and each one is a thing that actually happened here:
 It is a REPORT, not a gate. Some findings are fine - a Text DAT has no inputs or
 outputs by design - so it prints what it sees and says which ones are expected.
 
-Ref: visionhands/td_layout.py (where the coordinates come from),
+Ref: appletd/td_layout.py (where the coordinates come from),
      docs/BUILD_PLAN.md step 10.
 """
 
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 MASTER_PATH = "/project1/vision"
 
 # A network wider than this many columns per operator is a ribbon rather than a
@@ -68,9 +68,9 @@ def main():
     if REPO_ROOT not in sys.path:
         sys.path.append(REPO_ROOT)
     for stale in [n for n in list(sys.modules)
-                  if n == "visionhands" or n.startswith("visionhands.")]:
+                  if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from visionhands.td_layout import COL_W
+    from appletd.td_layout import COL_W
 
     master = op(MASTER_PATH)
     if master is None:

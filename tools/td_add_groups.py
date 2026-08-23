@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Add the Attributes page - the group toggles - to the visionhands COMP.
+"""Add the Attributes page - the group toggles - to the appletd COMP.
 
     Paste into a Text DAT, Run Script. Idempotent.
 
 WHAT THE TOGGLES ACTUALLY DO, because it is less than docs/ATTRIBUTES.md's step 3
 describes and the difference is deliberate.
 
-**They gate the compute that costs something.** `visionhands/derive.py` takes the
+**They gate the compute that costs something.** `appletd/derive.py` takes the
 set of enabled groups and computes only those, and `tools/td_add_derive.py`'s
 `_groups()` reader has always read these parameters - it just fell back to "all
 enabled" because they did not exist. So turning Descriptor off stops 84 channels
@@ -59,7 +59,7 @@ Ref: docs/ATTRIBUTES.md (the group table and the budget), docs/BUILD_PLAN.md ste
 import sys
 from fnmatch import fnmatchcase
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 # The master COMP holds every parameter; the hands STREAM holds this
 # network. Both are named, because this script writes to both.
 MASTER_PATH = "/project1/vision"
@@ -67,7 +67,7 @@ COMP_PATH = MASTER_PATH + "/hands"
 
 # The groups, their defaults, and how each one's toggle reaches what it gates.
 #
-# `derive` means the group is computed by visionhands/derive.py, so the toggle
+# `derive` means the group is computed by appletd/derive.py, so the toggle
 # reaches it through the existing `_groups()` reader and genuinely saves work.
 # `native` means the group is built from CHOPs, where the toggle gates cost only if
 # those CHOPs live in a COMP that `allowCooking` can freeze - which is what COOK_GATED
@@ -606,9 +606,9 @@ def main():
         sys.path.append(REPO_ROOT)
     # TouchDesigner caches our modules for the life of the process. DESIGN.md 2.11.
     for stale in [n for n in list(sys.modules)
-                  if n == "visionhands" or n.startswith("visionhands.")]:
+                  if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from visionhands.derive import ALL_GROUPS
+    from appletd.derive import ALL_GROUPS
 
     master = op(MASTER_PATH)
     comp = op(COMP_PATH)
@@ -779,7 +779,7 @@ def main():
     print("  `h0_palm_x` (Core). It needs an exact channel-to-group map, and the")
     print("  sound way to get one is a registry in the package: derive() can already")
     print("  report a group's channels by being called with just that group, and the")
-    print("  latch table would move from tools/td_add_latches.py into visionhands/")
+    print("  latch table would move from tools/td_add_latches.py into appletd/")
     print("  so both can import it. Worth doing carefully rather than quickly.")
     print("")
     print("  `filter` is still not a gating candidate: it is in the data path, and")

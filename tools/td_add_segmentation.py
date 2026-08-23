@@ -16,7 +16,7 @@ WHY THREE OPERATORS AND NOT ONE. Each does the one thing it is cheapest at:
     `copyNumpyArray` accepts natively (VERIFIED: no float32 conversion needed).
   * the Y FLIP is in the Script TOP, because that is the operator that knows the
     convention. Vision's mask has its origin at the TOP left and TouchDesigner's TOP
-    arrays are bottom-up (visionhands/coords.py). `maskbuf.py` deliberately does NOT
+    arrays are bottom-up (appletd/coords.py). `maskbuf.py` deliberately does NOT
     flip - a transport that silently reorients its payload cannot be tested against
     a known pattern - so somebody downstream has to, and this is that somebody.
   * the FIT TOP undoes the stretch, on the GPU. MEASURED (DESIGN.md 2.18): the mask
@@ -43,17 +43,17 @@ making. Off releases the mmap, so a project not using the mask holds no file han
 
 TO SEE IT WITH NO CAMERA, which is also how it was verified:
 
-    ~/.venvs/visionhands/bin/python tools/segmentation_probe.py --write-only
+    ~/.venvs/appletd/bin/python tools/segmentation_probe.py --write-only
 
 then switch `Streamsegment` on. That is exactly the shape the sidecar has.
 
-Ref: visionhands/maskbuf.py, visionhands/segmentation.py, design/DESIGN.md 2.18-2.19,
+Ref: appletd/maskbuf.py, appletd/segmentation.py, design/DESIGN.md 2.18-2.19,
      docs/BUILD_PLAN.md step 16.
 """
 
 import sys
 
-REPO_ROOT = "/Users/omer/Documents/GitHub/visionhands-touchdesigner"
+REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 MASTER_PATH = "/project1/vision"
 
 PAGE = "Segmentation"
@@ -80,7 +80,7 @@ if REPO_ROOT not in sys.path:
 
 import numpy
 
-from visionhands.maskbuf import MaskReader
+from appletd.maskbuf import MaskReader
 
 # The reader lives in MODULE GLOBALS and never in operator storage. TouchDesigner
 # PICKLES operator storage into the .toe on save, and an `mmap` cannot be pickled -
@@ -199,7 +199,7 @@ def _page(comp, name):
 
 
 def _at(node, xy, keep, existed):
-    from visionhands.td_layout import placement
+    from appletd.td_layout import placement
     where = placement(xy, keep, existed)
     if where is not None:
         node.nodeX, node.nodeY = where
@@ -212,9 +212,9 @@ def main():
         sys.path.append(REPO_ROOT)
     # TouchDesigner caches our modules for the life of the process. DESIGN.md 2.11.
     for stale in [n for n in list(sys.modules)
-                  if n == "visionhands" or n.startswith("visionhands.")]:
+                  if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from visionhands.td_layout import master_xy
+    from appletd.td_layout import master_xy
 
     master = op(MASTER_PATH)
     if master is None:
@@ -427,7 +427,7 @@ def main():
         print("   `Streamsegment` is OFF, so `seg_mask` publishes black. Switch it")
         print("   on and press Active to have the sidecar publish masks, or drive")
         print("   the buffer yourself with no camera:")
-        print("     ~/.venvs/visionhands/bin/python tools/segmentation_probe.py "
+        print("     ~/.venvs/appletd/bin/python tools/segmentation_probe.py "
               "--write-only")
     else:
         script.cook(force=True)

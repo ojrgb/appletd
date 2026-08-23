@@ -3331,3 +3331,61 @@ nothing tells you which.
 The pleasing part of the design: during development `Installroot` points at the checkout,
 so the dev path and the ship path are one code path with a different parameter value, and
 there is no second copy on this machine to drift.
+
+---
+
+## 2026-08-23 — renamed to appletd, and the one list that must not be renamed
+
+`visionhands` -> `appletd`, everywhere: the package, the venv, the repo directory,
+the OS-level paths, 96 tracked files and 728 occurrences. The repo is
+`~/Documents/GitHub/appletd` and the venv is `~/.venvs/appletd`. Tests: 539 passed.
+Ruff clean, mypy clean on the package (59 files, strict).
+
+### THIS FILE IS NOT RENAMED, and that is the point
+
+Everything else describes the current state and should say `appletd`. A journal is
+the one document that must not, because an entry dated 2026-08-12 saying
+"`appletd_osc` produced no channels" describes an operator that never existed under
+that name. Renaming history to match the present is how a record stops being
+evidence. Entries before today refer to the package as `visionhands`; that is
+correct and stays.
+
+### The one thing a blind sed would have broken
+
+`SUPERSEDED` in `tools/td_build_vision.py` lists operator names to FIND AND
+DESTROY - `visionhands`, `visionhands_osc` and four others that existed before the
+COMP did. Renaming those to `appletd*` would have left the cleanup hunting for
+names that never existed, and the real orphans would have survived for ever. It is
+annotated now with the reason, because an unexplained exception to a global rename
+is a defect waiting to be "fixed".
+
+Two live orphans from the pre-sidecar route are still at project root -
+`/project1/visionhands_callbacks` and `/project1/visionhands_landmarks`, created by
+`tools/td_setup_snippet.py` before the sidecar existed. They are not in
+`SUPERSEDED` and nothing destroys them.
+
+### Four builder FAILURES that are the same crying-wolf pattern, again
+
+The full chain runs clean twice with no exceptions, and reports four FAILURES
+blocks. Every one of them is a builder comparing a LIVE channel list against a
+hardcoded expected tuple, with no account of the group being switched off:
+
+    tmp_out_active   expected h0_active, got ()          Presence=0
+    lat_valid        missing 'together'                  Contacts=0
+    coords           expected h0_pinch_tx                Contacts=0
+    groups           h0_vel_x not on out1                Motion=0
+
+This is the third time this exact shape has appeared - DESIGN.md already names it,
+"a live reading compared against a compile-time constant" - and it is still
+generating four blocks of alarming text on every clean build. `derive_chop`'s 29
+channels are exactly right for `Core` + `Twohands` + `Landmarks` with the rest off.
+The checks need to read the toggles, or say "skipped, group off".
+
+### Two things left in a state worth knowing
+
+`Coordspx` came back from the rebuild switched off, which cost 96 channels on the
+output until it was switched on again; `out1` is 222 now against 214 before, the
+extra 8 being the derived positions in world space. And `hands/derive_chop` carries
+a **cook dependency loop warning**. It produces correct channels, no operator in
+the COMP is in error, and whether that warning predates today is not known - it was
+not checked before the rebuild, which is the honest answer and also the lesson.

@@ -32,7 +32,7 @@ people. Concretely:
 
 - one `pip install`, one `python -m`, one drag-and-drop `.tox`;
 - a `.toe` demo project in the release so there is nothing to wire;
-- `python -m visionhands.doctor` so the five common failures (camera permission,
+- `python -m appletd.doctor` so the five common failures (camera permission,
   wrong port, wrong venv, frozen channels, camera taken by OBS) diagnose
   themselves;
 - an FAQ of exactly those five, in the README, in the order people hit them.

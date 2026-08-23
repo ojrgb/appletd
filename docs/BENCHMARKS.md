@@ -212,8 +212,8 @@ notices first and it is easy to mistake for a fault.
 
 ```sh
 # inference and the transport, no camera, no TouchDesigner
-~/.venvs/visionhands/bin/python tools/depth_probe.py
-~/.venvs/visionhands/bin/python tools/segmentation_probe.py
+~/.venvs/appletd/bin/python tools/depth_probe.py
+~/.venvs/appletd/bin/python tools/segmentation_probe.py
 
 # the COMP, from inside TouchDesigner
 tools/td_profile.py
