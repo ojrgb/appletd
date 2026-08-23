@@ -28,35 +28,70 @@ Maintained with ❤️ by **Omer Jacoby** —
 
 ## Install
 
+Download [**`appletd.tox`**](https://github.com/ojrgb/appletd/raw/main/appletd.tox),
+drop it into your TouchDesigner project, and press **Install** on its Vision page.
+Wait for `Installstate` to read `Installed`, then switch `Active` on.
+
+**No terminal, and no Python of your own.** Apple Silicon Mac, TouchDesigner, that is
+it. The button does everything, once per machine:
+
+| what it does | size | when |
+|---|---|---|
+| finds a working Python, or downloads a relocatable CPython | 26 MB | only if you have none |
+| installs the pinned pyobjc and numpy into the install folder | ~35 MB | always |
+| writes the 20 package modules out of the `.tox` | 402 KB | always |
+| fetches the depth model | 47 MB | only if `Streamdepth` is on |
+
+It never writes into your Python, your TouchDesigner, or `/usr/local`. Everything
+lands in one folder you can see and change — `Installroot` on the Advanced page,
+`~/Library/Application Support/appletd` by default. Delete that folder and press
+Install again; nothing else on the machine is touched.
+
+`Installstate` says what happened: `Installing - <step>` while it runs,
+`Install failed - <which step>` if a download or a proxy blocks it, `Update needed`
+if the `.tox` is newer than the install, `Installed` when it is done.
+
+### If you would rather point it at your own interpreter
+
+Any Python 3.11+ that is not hardened will do — a venv, Homebrew, pyenv:
+
 ```bash
-git clone https://github.com/ORG/appletd
+python3.11 -m venv ~/.venvs/appletd
+~/.venvs/appletd/bin/pip install -r requirements.txt
+```
+
+Then set `Sidecarpython` on the Advanced page to that interpreter and press Install.
+It verifies your choice by running `import objc` in it, skips the 26 MB download
+entirely, and installs nothing you already have. Leaving `Sidecarpython` blank means
+"work it out", and the probe already looks in `~/.venvs/appletd` before it downloads
+anything.
+
+### Working on appletd itself
+
+```bash
+git clone https://github.com/ojrgb/appletd
 cd appletd
 
 python3.11 -m venv ~/.venvs/appletd
-~/.venvs/appletd/bin/pip install -r requirements.txt
+~/.venvs/appletd/bin/pip install -r requirements-dev.txt
 
-./tools/fetch_models.sh          # 47 MB, only if you want depth
+~/.venvs/appletd/bin/python -m pytest -q          # 588 tests, ~20 s, no camera, no TD
+./tools/fetch_models.sh                            # 47 MB, only if you want depth
+~/.venvs/appletd/bin/python tools/depth_probe.py   # depth end to end, still no TD
 ```
 
-Check it works before involving TouchDesigner — no camera, no TD:
+A checkout takes precedence over an installed copy, deliberately: the callback DATs
+prefer the repo they were built from, so editing `appletd/` changes what the component
+runs without reinstalling anything. `Sourceversion` and `Installstate` are what tell
+you when the two have drifted.
 
-```bash
-~/.venvs/appletd/bin/python tools/depth_probe.py
-```
+> **Do not reach for TouchDesigner's own bundled Python.** It is the obvious thing to
+> try and it cannot work — [Compatibility](#the-one-platform-detail-that-will-bite-you)
+> has the reason and the measurement.
 
-The pyobjc wheels are pinned to **cp311** deliberately: TouchDesigner ships Python
-3.11, and a pyobjc that disagrees with its ABI is a crash inside TD rather than an
-`ImportError`.
-
-> **Status.** The paths are portable now, so a fresh clone should open — though
-> nobody has yet proved that on a second machine. An Install button to replace the
-> steps above is designed in [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) step 21, and
-> it can do the whole job with **no terminal**: measured, it downloads a relocatable
-> CPython (26 MB), pip-installs pyobjc into it, writes the package out and fetches
-> the model — and the full test suite passes on that interpreter. TouchDesigner's own
-> bundled Python cannot be used, for a reason worth knowing if you were about to try
-> it: hardened runtime without the entitlement, so macOS refuses to load pyobjc into
-> it (21.1).
+> **Untested claim, stated as one.** Every install above has been exercised on one
+> machine. Nobody has yet cloned this repository onto a second Mac and run it, which
+> is the largest thing in here that has never been checked.
 
 ---
 
@@ -106,12 +141,10 @@ interpreter and nothing is downloaded.
 
 ## Usage
 
-Drop [`appletd.tox`](appletd.tox) into your project, press **Install** on the Vision
-page and wait for `Installstate` to read `Installed` — once per machine, and it
-downloads nothing if you already have a working interpreter. Then switch `Active` on.
-The COMP launches the sidecar process itself and the status goes green.
+Installed already? Switch `Active` on. The COMP launches the sidecar process itself
+and the status goes green — there is nothing else to start.
 
-Working projects to open instead: [`examples/`](examples/).
+Working projects to open instead of building your own: [`examples/`](examples/).
 
 | parameter | does |
 |---|---|
