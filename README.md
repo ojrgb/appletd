@@ -391,13 +391,13 @@ mistaken for first.
 
 MIT — see [LICENSE](LICENSE).
 
-One caveat worth reading before you ship a product on the depth stream:
-**Depth Anything V2 is not ours and is not in this repository.**
-`./tools/fetch_models.sh` downloads it at run time from Apple's Hugging Face
-account, and its terms are its own. [NOTICE.md](NOTICE.md) says what to check. The
-other four streams — hands, body, face and segmentation — use Apple's Vision
-framework, which ships in macOS with no model file, so none of that applies to
-them.
+**Depth Anything V2 is not ours and is not in this repository** —
+`./tools/fetch_models.sh` fetches it at run time from Apple's Hugging Face account.
+The Small model that ships here is **Apache-2.0**, both in Apple's conversion and
+upstream, so the depth stream is usable commercially. Its Base and Large siblings are
+**CC-BY-NC-4.0**, so swapping one in for accuracy changes your terms.
+[NOTICE.md](NOTICE.md) has the detail. The other four streams use Apple's Vision
+framework and need no model file at all.
 
 ---
 
