@@ -171,7 +171,28 @@ def test_the_status_channels_are_named_and_ordered() -> None:
     start, which is what these channels are for. The ORDER is the port order followed
     by the portless requests, and reordering it would rename live channels."""
     assert status_channel_names() == ("sc_uptime_s", "sc_hands", "sc_pose", "sc_face",
-                                     "sc_segment", "sc_depth")
+                                     "sc_segment", "sc_depth",
+                                     "sc_src_w", "sc_src_h")
+
+
+def test_the_delivered_source_size_is_carried_and_zero_means_not_stated() -> None:
+    """`sc_src_w`/`sc_src_h` exist because TouchDesigner converts to pixels with
+    `_px = x * Resw` and `Resw` was a parameter nothing checked. The session preset
+    silently reverts `setActiveFormat_` - two spike runs delivered 1080p while the log
+    said 720p - so a typed parameter could be a third out with nothing to see.
+
+    ZERO IS "NOT STATED", not a resolution, and it has to survive as zero: the
+    TouchDesigner side ignores it rather than writing a 0 into `Resw`, and a default
+    of 1280 here would make "I do not know" indistinguishable from "1280 wide"."""
+    reading = dict(zip(status_channel_names(),
+                       status_channel_values(0.0, ("hands",), (1920, 1080)),
+                       strict=True))
+    assert reading["sc_src_w"] == 1920.0
+    assert reading["sc_src_h"] == 1080.0
+    unstated = dict(zip(status_channel_names(),
+                        status_channel_values(0.0, ()), strict=True))
+    assert unstated["sc_src_w"] == 0.0
+    assert unstated["sc_src_h"] == 0.0
 
 
 def test_status_values_line_up_with_status_names() -> None:

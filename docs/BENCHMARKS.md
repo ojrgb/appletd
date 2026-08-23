@@ -163,6 +163,29 @@ So the pin correction costs **+0.11 ms** and the overlay another **+0.42 ms**. T
 overlay was 1.4176 ms until 2026-08-22, when it stopped correcting the map twice and
 calling `copyNumpyArray` twice — one correction and one upload per cook.
 
+### The cost of a parameter expression in the pixel path
+
+Measured 2026-08-23 while deciding how `Resw`/`Resh` should learn the camera's
+delivered resolution. Same network, same 89-frame window, input moving.
+
+| `Resw`/`Resh` as | `math_px` | `math_py` | whole COMP |
+|---|---|---|---|
+| a written constant | **0.0094 ms** | 0.0092 | 1.3246 ms |
+| an expression reading `sc_src_w` | **0.1431 ms** | 0.1347 | 1.5984 ms |
+
+**+0.27 ms, about a fifth of the COMP, for a number that changes once.** A single
+read of that channel is 0.575 us, which is exactly what made the expression look
+free. A Math CHOP evaluates its gain expression **once per channel** - about 48 here
+- and each evaluation walks a chained indirection, `Math.gain` -> `Vision.par.Resw`
+-> the channel read. 48 x that is a tenth of a millisecond, per operator, per frame.
+
+The lesson generalises past this parameter: a per-evaluation microbenchmark says
+nothing until you know the evaluation COUNT, and for a CHOP parameter the count is
+channels, not cooks.
+
+So the value is written instead, by `reconcile_source_size()` in the launcher, when
+the sidecar starts. Back to 0.0109 ms after the revert.
+
 ### The whole COMP, by configuration
 
 Sampled over 90 render frames from a scheduled callback, medians of cooks where

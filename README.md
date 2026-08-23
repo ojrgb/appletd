@@ -1,4 +1,4 @@
-# apple-touchdesigner
+# appletd
 
 **Apple's on-device neural networks in TouchDesigner. Hands, body, face, person
 segmentation and metric depth — as CHOP channels and TOPs, with no Python running
@@ -21,8 +21,8 @@ Vision Pro. Nothing here needs a headset.
 ## Install
 
 ```bash
-git clone https://github.com/ORG/apple-touchdesigner
-cd apple-touchdesigner
+git clone https://github.com/ORG/appletd
+cd appletd
 
 python3.11 -m venv ~/.venvs/appletd
 ~/.venvs/appletd/bin/pip install -r requirements.txt
@@ -162,6 +162,11 @@ The short version of the rest:
 - **Metric depth by pinning, not by a metric model.** You name points you have
   measured and it solves `1/Z = alpha·d + beta`. A metric model is confidently
   wrong in a room it was not trained for and nothing in the output says so.
+- **Most of it is switched off.** A toggle here means `allowCooking = False` — the
+  operators do not run. Everything on is 1.74 ms and 207 cooking operators; hands
+  only with the attribute layer down is **0.60 ms and 29 of 287**. `allowCooking`
+  raises on anything that is not a COMP, which is why the network is grouped into
+  COMPs at all: the grouping *is* the gating mechanism.
 - **Not C++**, and two of the three original arguments for it were settled the
   other way by measurement. **Not WebSocket**, because TCP head-of-line blocking is
   the wrong trade for data that is worthless when late, and TD's WebSocket DAT puts

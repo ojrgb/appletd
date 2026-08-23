@@ -494,7 +494,8 @@ class Sidecar:
         # which tick they describe.
         names = self.names + self.status_names
         values = values + status_channel_values(
-            time.monotonic() - self._started_at, self.streams_started())
+            time.monotonic() - self._started_at, self.streams_started(),
+            self._source_px())
         self._send(names, values, port_for(STREAM_HANDS, self.port))
 
         is_new = frame.seq != self._last_seq_sent

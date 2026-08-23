@@ -194,6 +194,24 @@ STATUS_PREFIX: Final = "sc_"
 # so without this there is no way to tell "sidecar dead" from "stream off".
 STATUS_UPTIME: Final = STATUS_PREFIX + "uptime_s"
 
+# What the camera ACTUALLY DELIVERED, in pixels. Added 2026-08-23, and it closes a
+# real hole rather than adding a convenience.
+#
+# TouchDesigner converts normalised coordinates to pixels with `_px = x * Resw`, and
+# `Resw` was a PARAMETER somebody typed - nothing checked it against the camera. The
+# session preset silently reverts `setActiveFormat_`, and two spike runs delivered
+# 1080p while the log said 720p (DESIGN.md 3), so the parameter and the truth could
+# differ by a third with nothing to see: every pixel coordinate wrong, no error.
+#
+# `sc_` prefixed on purpose. It makes these two channels housekeeping by
+# construction - `sc_*` is already off the output and already routed to the
+# `housekeeping` Null - so no trim list, no keep pattern and no page had to change.
+#
+# ZERO means "not stated", matching `Sidecar._source_px()`. A consumer must not read
+# 0 as a resolution, and the TouchDesigner side ignores it rather than writing it.
+STATUS_SRC_W: Final = STATUS_PREFIX + "src_w"
+STATUS_SRC_H: Final = STATUS_PREFIX + "src_h"
+
 
 def status_channel_names() -> tuple[str, ...]:
     """The status channel list. Fixed, like every other channel list here.
@@ -202,24 +220,29 @@ def status_channel_names() -> tuple[str, ...]:
     but it is exactly as capable of being requested and failing to start, which is
     what these channels are for.
     """
-    return (STATUS_UPTIME, *(STATUS_PREFIX + name for name in REQUEST_NAMES))
+    return (STATUS_UPTIME, *(STATUS_PREFIX + name for name in REQUEST_NAMES),
+            STATUS_SRC_W, STATUS_SRC_H)
 
 
 def status_channel_values(uptime_s: float,
-                         started: Iterable[str]) -> list[float]:
+                         started: Iterable[str],
+                         source_px: tuple[int, int] = (0, 0)) -> list[float]:
     """Values in `status_channel_names()` order.
 
     Contract: `started` is what the sidecar ACTUALLY started, not what was asked
               for. That distinction is the entire reason these channels exist -
               a stream that was requested and failed to start must read 0 here,
               or the panel reports the request rather than the state.
+              `source_px` is what the camera DELIVERED, or (0, 0) for "not
+              stated" - never the requested size, which is the whole point.
     """
     live = set(started)
-    return [float(uptime_s)] + [1.0 if name in live else 0.0
-                                for name in REQUEST_NAMES]
+    return ([float(uptime_s)]
+            + [1.0 if name in live else 0.0 for name in REQUEST_NAMES]
+            + [float(source_px[0]), float(source_px[1])])
 
 
-N_STATUS_CHANNELS: Final = 1 + len(REQUEST_NAMES)
+N_STATUS_CHANNELS: Final = 1 + len(REQUEST_NAMES) + 2
 
 
 # ---------------------------------------------------------------------------

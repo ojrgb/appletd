@@ -296,7 +296,73 @@ def start():
               %% (comp.par.Depthbuffer.eval(),
                   "pins %%s" %% pins if pins else
                   "NO PINS - the map is relative, bigger means nearer"))
+
+    # The delivered resolution arrives on the wire a moment after the process comes
+    # up, so this cannot be read now. 120 frames is 2 s at TD's default 60 - long
+    # enough for the camera to open and the first bundle to land, and it costs one
+    # scheduled call per start rather than anything per frame.
+    #
+    # Guarded: `run` is a TouchDesigner global and a missing one must not take down
+    # `start()`. A sidecar that is running with a stale `Resw` is a wrong pixel
+    # coordinate; a sidecar that failed to launch is nothing working at all, and the
+    # second is much worse.
+    try:
+        run("op(%(comp)r).op('sidecar_control').module."
+            "reconcile_source_size()", delayFrames=120)
+    except Exception as exc:                        # noqa: BLE001 - see above
+        print("[appletd] could not schedule the resolution check (%%r). "
+              "Resw/Resh stay as they are." %% (exc,))
     return process.pid
+
+
+def reconcile_source_size(comp=None):
+    """Set `Resw`/`Resh` to what the camera ACTUALLY delivered. Returns True if it
+    changed something.
+
+    WHY THIS EXISTS AT ALL. TouchDesigner converts to pixels with `_px = x * Resw`,
+    and `Resw` was a number somebody typed with nothing checking it. The capture
+    session silently reverts `setActiveFormat_` and two spike runs delivered 1080p
+    while the log said 720p (DESIGN.md 3), so the parameter and the truth could differ
+    by a third with every pixel coordinate wrong and nothing to see. The sidecar knows
+    the delivered size and sends it as `sc_src_w`/`sc_src_h`.
+
+    WHY IT IS CALLED RATHER THAN WATCHED. Two alternatives were built and measured,
+    and both were worse:
+
+      * A CHOP Execute on those two channels. `onValueChange` fires when a channel
+        CHANGES, and this one is 1280 from the moment it appears and never moves
+        again - so the callback never ran once.
+      * An expression on the parameter, reading the channel. Always correct, no event
+        to miss, and **+0.27 ms on the COMP** - `math_px` went 0.0094 -> 0.1431 ms,
+        because a Math CHOP evaluates its gain expression once per channel and each
+        one walks a chained parameter indirection. A tenth of a millisecond per
+        operator per frame, for a number that changes once.
+
+    So it is called: here, when the sidecar starts, and once at build. Zero per-frame
+    cost, and it converges a second or so after the process comes up.
+
+    Contract: 0 is "not stated" (appletd/streams.py) and is NEVER written - a zero in
+              `Resw` takes every pixel coordinate in the component to zero. A missing
+              channel indexes to None, which is also ignored.
+    """
+    comp = comp or op(%(comp)r)
+    osc = None if comp is None else comp.op("hands_osc")
+    if osc is None:
+        return False
+    changed = False
+    for channel, par_name in (("sc_src_w", "Resw"), ("sc_src_h", "Resh")):
+        chan = osc[channel]
+        par = getattr(comp.par, par_name, None)
+        if chan is None or par is None:
+            continue
+        value = int(float(chan))
+        if value <= 0 or int(par.eval()) == value:
+            continue
+        print("[appletd] %%s: %%s -> %%d, from the camera"
+              %% (par_name, par.eval(), value))
+        par.val = value
+        changed = True
+    return changed
 
 
 def depth_pins(comp):
@@ -765,13 +831,37 @@ VISION_PAGE_ORDER = (
     "Screenspaceonly", "Deleteempty", "Fingertipsonly",
 )
 
-# The three live defaults. `op('..')` because these expressions are evaluated on the
-# vision COMP, and `render1`/`cam1` are its SIBLINGS at /project1 - `op('render1')`
-# from here searches the COMP's own children and finds nothing.
-RENDER_W_EXPR = "op('../render1').width if op('../render1') is not None else 1280"
-RENDER_H_EXPR = "op('../render1').height if op('../render1') is not None else 720"
-ORTHO_EXPR = ("op('../cam1').par.orthowidth.eval() "
-              "if op('../cam1') is not None else 1")
+# The three live defaults. A custom parameter's expression resolves relative to the
+# COMP's PARENT, so `render1` and `cam1` are named directly - they are siblings of
+# the vision COMP at /project1.
+#
+# `../render1` was tried first and is WRONG, and the way it failed is worth keeping:
+# it resolves to nothing, so every expression fell to its `else` branch - 1280 and
+# 720 - which are exactly the numbers `render1` was already set to. Every check
+# agreed. It was only caught by RESIZING the render and watching nothing happen.
+# A fallback that equals the true value hides a broken expression completely, which
+# is the same trap DESIGN.md records for `_ty` and the render aspect.
+# `Resw`/`Resh` ARE WRITTEN, NOT EXPRESSIONS, and that is a measurement rather than a
+# preference. Both were briefly `me.op('hands_osc')['sc_src_w'] or 1280`, which is
+# always correct and needs no event - and it cost **+0.27 ms on the COMP**, about a
+# fifth of it:
+#
+#     hands/coords/pixels/math_px    0.0094 ms constant  ->  0.1431 ms expression
+#     whole COMP, 176 operators      1.3246 ms           ->  1.5984 ms
+#
+# A single read of that channel is 0.575 us, which is what made it look free. A Math
+# CHOP evaluates its gain expression ONCE PER CHANNEL - about 48 here - and each
+# evaluation walks `Math.gain` -> `Vision.par.Resw` -> the channel. 48 x a chained
+# parameter indirection is a tenth of a millisecond, per operator, every frame, for a
+# number that changes once.
+#
+# So it is reconciled instead: `reconcile_source_size()` below, called when the
+# sidecar starts and again at build. See there for why not a CHOP Execute.
+
+RENDER_W_EXPR = "op('render1').width if op('render1') is not None else 1280"
+RENDER_H_EXPR = "op('render1').height if op('render1') is not None else 720"
+ORTHO_EXPR = ("op('cam1').par.orthowidth.eval() "
+              "if op('cam1') is not None else 1")
 
 # Defaults for the aspect and pixel conversions. MEASURED: the sidecar requests and
 # receives 1280x720 (DESIGN.md 2.6), and Vision is fastest there.
@@ -1063,6 +1153,16 @@ def main():
     # its default says - both measured, both in DESIGN.md 2.11. `previous` is the
     # record of what existed, so it answers the only question that matters here.
     par_w.default, par_h.default = DEFAULT_WIDTH, DEFAULT_HEIGHT
+    # A FLOOR OF 1, because 0 here is catastrophic and invisible: `_px = x * Resw`,
+    # so a zero takes every pixel coordinate in the component to zero with no error
+    # anywhere. It is reachable - two aborted builds on 2026-08-23 left both of these
+    # at 0, because a newly appended parameter reads 0 whatever its default says
+    # (DESIGN.md 2.11) and the restore pass never ran.
+    #
+    # `sc_src_w` reports 0 for "not stated" and `source_size` refuses to write it, so
+    # nothing legitimate ever wants a zero here.
+    par_w.clampMin = par_h.clampMin = True
+    par_w.min = par_h.min = 1
     # THESE THREE DEFAULT TO AN EXPRESSION, not a number, and that is the point:
     # `_ty` is scaled by the RENDER's aspect, so a render resized after the build
     # used to leave the transform on last build's numbers - a wrong position with
@@ -1476,6 +1576,21 @@ def main():
     on_exit.text = SIDECAR_EXIT_SOURCE
     on_exit.par.active = True
     on_exit.par.exit = True
+
+    # A CHOP Execute DAT called `source_size` tried this on 2026-08-23 and could not:
+    # `onValueChange` fires when a channel CHANGES, and `sc_src_w` is 1280 from the
+    # moment it appears and never moves again, so the callback never ran at all.
+    # `reconcile_source_size()` in the launcher does it instead. Destroyed here rather
+    # than left orphaned.
+    stale_size = comp.op("source_size")
+    if stale_size is not None:
+        stale_size.destroy()
+
+    # And once now, in case a sidecar is already running and the channel is there to
+    # read. Cheap, and it means a rebuild does not leave a stale resolution behind.
+    control = comp.op("sidecar_control")
+    if control is not None and hasattr(control.module, "reconcile_source_size"):
+        control.module.reconcile_source_size()
 
     notes = comp.create(td.textDAT, "notes")
     notes.nodeX, notes.nodeY = master_xy("notes")

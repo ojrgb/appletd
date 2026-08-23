@@ -54,6 +54,10 @@ from appletd.streams import (
 )
 from appletd.types import channel_names, channel_values
 
+# What these synthetic frames claim to have come from. Matches what the sidecar asks
+# the camera for, so a project cannot tell this feeder from a real 720p source.
+SOURCE_W, SOURCE_H = 1280, 720
+
 # Frames per second to send at, and seconds per sweep. 30 fps matches what the
 # camera delivers (DESIGN.md 2.1), so the latches see the same frame spacing they
 # will see in production; a 2 second sweep gives ~60 frames per cycle, which is
@@ -193,8 +197,14 @@ def send(sequence_name: str, host: str, port: int, fps: float,
             age_ms = max(0.0, (time.monotonic() - due) * 1000.0)
             n_hands = sum(1 for hand in frame.hands if hand.found)
             values = list(channel_values(frame, age_ms, n_hands))
+            # A DECLARED SOURCE SIZE, so this exercises the whole status contract
+            # rather than most of it. These frames are normalised coordinates
+            # generated as if from a 1280x720 camera, which is what the sidecar
+            # requests (DESIGN.md 2.6), so saying so is honest - and it is the only
+            # way to test TouchDesigner's `source_size` callback without a camera.
             values.extend(status_channel_values(time.monotonic() - started,
-                                                (STREAM_HANDS,)))
+                                                (STREAM_HANDS,),
+                                                (SOURCE_W, SOURCE_H)))
             # seq wrapped exactly as the sidecar wraps it, so float32 carries it
             # exactly all the way to TouchDesigner. Index 1 is seq - the frame
             # scalars lead the channel list (types.py).

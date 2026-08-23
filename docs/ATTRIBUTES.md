@@ -531,7 +531,7 @@ off if you would rather see everything, frozen values included.
 |---|---|---|
 | the 80 per-joint `*_conf` | nowhere — use `h?_conf_median` | one confidence per joint is 80 channels nobody reads one at a time |
 | `h?_score` `h?_conf_median` `h?_chirality` | the `housekeeping` Null | quality and identity scalars; you should not meet three of them per hand before you meet a fingertip |
-| `sc_uptime_s` `sc_hands` `sc_pose` `sc_face` | the `housekeeping` Null | the capture process's own state, not the hands' |
+| every `sc_*` — uptime, one per request, and `sc_src_w`/`sc_src_h` | the `housekeeping` Null | the capture process's own state, not the hands'. `sc_src_w`/`sc_src_h` are what the camera ACTUALLY delivered, which is where `Resw`/`Resh` come from |
 | `seq` `pose_seq` `face_seq` | the `housekeeping` Null | frame counters |
 | `age_ms` `pose_age_ms` `face_age_ms` | the `housekeeping` Null | how stale the last datagram is |
 

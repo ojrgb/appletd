@@ -3508,3 +3508,68 @@ bypass, and say "every group reports disabled - check the Stream toggles". A
 component with everything switched off should show you everything frozen, not
 nothing at all. That is the same principle as DESIGN.md 6.2 on vanishing channels,
 one operator further downstream.
+
+---
+
+## 2026-08-23 — the delivered resolution, and a microbenchmark that lied
+
+`Resw`/`Resh` were numbers somebody typed, and TouchDesigner converts to pixels with
+`_px = x * Resw`. Nothing checked them against the camera. The capture session
+silently reverts `setActiveFormat_` and two spike runs delivered 1080p while the log
+said 720p (DESIGN.md 3), so the parameter and the truth could differ by a third with
+every pixel coordinate wrong and nothing at all to see.
+
+The sidecar knows the delivered size - `_source_px()` already returned it, honestly
+zero when unknown - so it now sends `sc_src_w`/`sc_src_h`.
+
+### `sc_` prefixed, and that did all the routing for free
+
+Naming them `sc_*` made them housekeeping by construction. `sc_*` is already off the
+output and already routed to the `housekeeping` Null, so **no trim list, no keep
+pattern and no page had to change**. Picking the name that matched the existing
+convention was worth more than any amount of new plumbing.
+
+### Three implementations, and the first two were wrong
+
+**A CHOP Execute on those two channels.** `onValueChange` fires when a channel
+CHANGES, and `sc_src_w` is 1280 from the moment it appears and never moves again. The
+callback never ran once. `Resw` sat on 999 while the camera actively contradicted it.
+Wired correctly, scoped correctly - `channel` singular, a pattern, not `channels` -
+and structurally incapable of doing the job.
+
+**An expression on the parameter**, reading the channel. Always correct, no event to
+miss, and I said it was free on the strength of a 0.575 us microbenchmark. It was
+**+0.27 ms on the COMP**, about a fifth of it:
+
+    hands/coords/pixels/math_px    0.0094 ms  ->  0.1431 ms
+    whole COMP, 176 operators      1.3246 ms  ->  1.5984 ms
+
+**A Math CHOP evaluates its gain expression once per CHANNEL, not once per cook.**
+About 48 here, each walking `Math.gain` -> `Vision.par.Resw` -> the channel read. My
+benchmark measured the right operation and the wrong count. A per-evaluation figure
+says nothing until you know how many evaluations there are, and for a CHOP parameter
+that number is channels.
+
+**Written, reconciled on start.** `reconcile_source_size()` in the launcher, called
+120 frames after the process comes up and once at build. Zero per-frame cost,
+converges in about two seconds, and `math_px` is back to 0.0109 ms. Verified by
+putting 999/555 in on purpose and watching it corrected: `Resw: 999 -> 1280, from the
+camera`.
+
+### `../render1` was wrong and every check agreed with it
+
+The user caught this by resizing the render and watching nothing happen. A custom
+parameter's expression resolves relative to the COMP's PARENT, so `op('../render1')`
+found nothing and every expression fell to its `else` branch - 1280 and 720, which
+are exactly what `render1` was already set to. **A fallback equal to the true value
+hides a broken expression completely.** Same shape as the `_ty` render-aspect bug,
+where the right and wrong versions agreed until the two resolutions differed.
+
+`op('render1')`, as originally specified. Verified against a 1920x1080 render.
+
+### And `Resw` got a floor of 1
+
+Because 0 there takes every pixel coordinate in the component to zero with no error
+anywhere, and it is reachable: the aborted builds left both at 0. `sc_src_w` reports 0
+for "not stated" and the reconcile refuses to write it, so nothing legitimate wants a
+zero. `clampMin` now makes it unreachable.

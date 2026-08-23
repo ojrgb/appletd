@@ -210,6 +210,61 @@ frozen TOP looks obviously wrong.
 
 ---
 
+## 5b. Why most of the component is switched off
+
+The component computes about 1,863 channels across 338 operators. Almost nobody wants
+all of it. So nearly everything is behind a toggle, and a toggle does not mean "hide
+the output" - it means **`allowCooking = False`**, and the operators do not run.
+
+    three streams, everything on          1.74 ms      207 / 287 operators cooking
+    hands only, attribute layer off       0.60 ms       29 / 287 operators cooking
+
+Twenty-nine of 287. That is what the toggles are for: a project that wants two hand
+positions should not pay for 76 face landmarks, a one-euro filter on all of them, and
+an attribute layer computing curls it never reads.
+
+### It is why the network is grouped into COMPs at all
+
+`allowCooking` **raises on anything that is not a COMP.** You cannot freeze a CHOP.
+So the only way to switch off a subsystem is to have put it in a COMP in the first
+place, and the shape of this network - `filter`, `derive`, `temporal`, `latches`,
+`coords` as separate base COMPs per stream - follows from that constraint rather than
+from tidiness. The grouping IS the gating mechanism.
+
+### Gating is not free, and it is worth saying so
+
+Making the coordinate spaces switchable cost **0.33 ms** of extra COMP boundaries and
+merges - about **0.11 ms per boundary** at these channel counts - paid whether
+anything is gated or not. It only pays here because something almost always is off.
+A component where everything is normally on would be slower for having the switches.
+
+### The trap: a frozen group's channels do not disappear, they go STALE
+
+A frozen COMP's Out CHOP keeps reporting its channels, holding whatever they last
+cooked. That is deliberate and it is the right behaviour - a channel that VANISHES
+breaks every downstream reference with no error anywhere (DESIGN.md 6.2) - but it
+means switching a group off leaves a plausible wrong number on the output rather than
+nothing. `Coordspx` off used to leave 100 `_px`/`_py` channels reading last frame's
+values for ever.
+
+That is the entire reason there is a Select in front of the output: the trim list is
+generated FROM the frozen groups, so a toggle that stops a group cooking also removes
+its channels from `out1`.
+
+### And the trap under that one
+
+A frozen group's Out CHOP holds its channels **only until something upstream changes
+SHAPE**. After that it is dirty, it cannot cook because it is frozen, and it reports
+zero channels - so the channels vanish after all, which is the failure the holding
+behaviour existed to prevent.
+
+Reproduced by flipping `Descriptor`, which changes `derive_chop`'s channel count:
+`temporal` went from 27 channels to 0 and `latches` from 70 to 0. The fix is to cook
+a group and *then* freeze it, unconditionally, on every change - one cook at human
+speed, not per frame.
+
+---
+
 ## 6. Choices we did not make
 
 ### C++ custom operator
