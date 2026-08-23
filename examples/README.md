@@ -24,7 +24,8 @@ project. These are here to show it doing something.
 A repo-hosted `.mp4` cannot autoplay inline — GitHub serves it as
 `application/octet-stream` — so a `<video>` tag pointed at it renders nothing.
 `docs/media/README.md` has the measurement, the three options and the ffmpeg recipes.
-Under about 2 MB for the clip.
+Budget about 5 MB for a GIF that does not band — see the measured table there;
+cutting the palette to save bytes was tried and rejected on sight.
 
 **The fixture privacy rule applies here too.** Body, clothing and room identify
 somebody perfectly well without a face in shot, and a video entering git history is

@@ -33,16 +33,30 @@ a palette, being full-frame detail that changes every frame:
 | GIF 720 wide, 12 fps, 256 colours | 7.4 MB |
 | GIF 720 wide, 12 fps, 64 colours | 4.6 MB |
 | GIF 720 wide, 12 fps, 32 colours | 3.4 MB |
-| **GIF 720 wide, 12 fps, 32 colours, trimmed to 3.5 s** | **2.2 MB** |
+
+Trimmed to 3.5 s, which is where the saving actually is:
+
+| 720 wide, 12 fps, 3.5 s | size |
+|---|---|
+| 32 colours | 2.2 MB — **visibly banded, rejected on sight** |
+| 64 colours | 3.2 MB |
+| 128 colours | 3.9 MB |
+| **256 colours, `dither=bayer:bayer_scale=3`** | **5.0 MB — what ships** |
+| 256 colours, `dither=sierra2_4a` | 7.3 MB |
 
 **Length is the lever, not resolution.** Dropping 900→640 saved 1 MB; trimming 5.5 s
 to 3.5 s saved 1.2 MB on top of that and costs almost nothing, because a loop only has
-to show the idea once. Colours are the second lever and screen UI is mostly flat, so
-32 bands far less than it would on video of a room.
+to show the idea once.
+
+**Colours are NOT a lever here, and that was a wrong guess.** The reasoning was that
+screen UI is flat, so a small palette would do. It does not: 32 colours banded visibly
+and was rejected on sight. The palette runs at the GIF maximum of 256 and the size is
+spent there instead — 5.0 MB against 2.2. If that is too much, trim harder; do not cut
+colours.
 
 ### What this repo does
 
-An inline GIF at 2.2 MB, **linked to the `.mp4`**. Motion on the page, and one click
+An inline GIF at 5.0 MB, **linked to the `.mp4`**. Motion on the page, and one click
 for the full length in real colour. The `.mp4` stays in the repository as the
 artefact — it is a fifth of the size and the thing worth keeping.
 
@@ -52,15 +66,15 @@ One pass to build a palette from what CHANGES between frames, one to apply it:
 
 ```sh
 ffmpeg -y -t 3.5 -i demo-hands.mp4 \
-  -vf "fps=12,scale=720:-1:flags=lanczos,palettegen=max_colors=32:stats_mode=diff" p.png
+  -vf "fps=12,scale=720:-1:flags=lanczos,palettegen=max_colors=256:stats_mode=diff" p.png
 
 ffmpeg -y -t 3.5 -i demo-hands.mp4 -i p.png \
   -lavfi "fps=12,scale=720:-1:flags=lanczos [x]; \
-          [x][1:v] paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" demo-hands.gif
+          [x][1:v] paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" demo-hands.gif
 ```
 
 `stats_mode=diff` matters here: the background is static and the hand is not, so a
-palette built from what MOVES spends its 32 entries where they show. `dither=bayer`
+palette built from what MOVES spends its entries where they show. `dither=bayer`
 with a low `bayer_scale` stops flat UI areas crawling between frames — the default
 `sierra2_4a` looks better on photographs and worse on screen recordings.
 
