@@ -3919,3 +3919,69 @@ fp16 findings are numpy behaviour and a minor release is exactly what changes th
 **Proved rather than argued**: a fresh interpreter with only `requirements.txt`
 installed now runs `--list-cameras`. That test did not exist this morning, and it is
 the one that would have caught this on day one.
+
+---
+
+## 2026-08-23 — `appletd/install.py`: the decisions, before any of the panel
+
+Scoped to Apple Silicon by decision. `require_arm64()` refuses rather than installing
+something that will disappoint: no Neural Engine means every figure in BENCHMARKS is
+meaningless and depth is several times slower.
+
+### It is a package module, not a builder, and that is what makes it testable
+
+Which interpreter works, what is on disk, whether the version matches - all of it is
+arithmetic over paths and subprocesses, none of it touches a TouchDesigner object. So
+it has 23 tests and no TD. Same split that lets `pins.py` be tested against a
+synthetic frame: put the reasoning where it can be checked, and leave the builder to
+draw the panel.
+
+### The probe runs the interpreter. It does not inspect it
+
+`verify_interpreter()` spawns the candidate and imports `objc, numpy`. That is the
+whole check, and the reason is this morning: four signals agreed that TouchDesigner's
+Python would work - dry-run resolved, install exited 0, version right, hardened-runtime
+flag sitting in output I had already read - and the import failed.
+
+`test_the_probe_does_not_let_a_candidate_inherit_our_pyobjc` is the test that makes it
+worth having. Without scrubbing `PYTHONPATH`, an interpreter with no pyobjc of its own
+imports OURS and is reported as working, and the install then launches a sidecar that
+dies. Mutating the scrub away is caught.
+
+Also bounded: a hung interpreter must not hang the button, so there is a timeout and a
+test that a timeout reads as "not ok" rather than propagating.
+
+### Mutation-checked, because a quiet failure is the only failure here
+
+    drop __init__ from the list          CAUGHT (3 tests)
+    drop a real module                   CAUGHT
+    let PYTHONPATH be inherited          CAUGHT
+    treat a missing module as installed  CAUGHT
+    ignore the version stamp             CAUGHT
+
+`__init__.py` gets its own test that ASSERTS IT IS NOT IN THE CLOSURE - because the
+drift test adds it by hand, so without that second test both would pass over a
+closure that is quietly wrong. That is the trap the plan recorded in advance and it is
+still the only one here that fails at first cook rather than at install.
+
+### Two states that exist to stop silent wrong answers
+
+`stale` compares the stamp against the version the `.toe` wants. With the package on
+disk AND embedded, a newer `.toe` over an older install runs the old `derive` every
+cook - no error, wrong channels - and no existence check can see it.
+
+And `probe()` deliberately does NOT require the model. Depth is optional; making the
+install incomplete without it would push everybody through 47 MB for a feature they
+may not want.
+
+### Three paths on Advanced, and one of them means "work it out"
+
+`Installroot`, `Sidecarpython`, `Pythonurl`. Blank `Sidecarpython` is the normal
+case: probe, then download. Set it and it goes first and nothing is downloaded. Blank
+`Pythonurl` will mean never download - an escape hatch for a machine that must not
+fetch a binary.
+
+The download is PINNED, not resolved through the GitHub API: an install that worked
+yesterday must not break because an asset was renamed. The hash is our own, of the
+exact tarball that ran the full suite, and the constant says so rather than implying a
+vendor checksum.

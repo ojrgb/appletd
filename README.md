@@ -60,6 +60,50 @@ The pyobjc wheels are pinned to **cp311** deliberately: TouchDesigner ships Pyth
 
 ---
 
+## Compatibility
+
+**Apple Silicon Macs only.** Intel is out of scope, and not for lack of interest —
+there is no Neural Engine, so every figure in [BENCHMARKS](docs/BENCHMARKS.md) is
+meaningless there and depth in particular would be several times slower. The installer
+refuses rather than giving you something that will disappoint.
+
+| | tested | expected to work |
+|---|---|---|
+| chip | M4 Pro | any M-series — all have a Neural Engine, and all will be **slower than the numbers here** |
+| macOS | 26.5 | 12+ for person segmentation, 11+ for hands, body and face |
+| TouchDesigner | 099 (2023.11xxx) | anything shipping Python 3.11+ |
+| Python (sidecar) | 3.11.9 and 3.11.16 | any 3.11+ that is not hardened — see below |
+
+**Everything in the "tested" column is one machine.** Nobody has yet run this on a
+second Mac, which is the largest untested claim in the repository.
+
+### The one platform detail that will bite you
+
+**TouchDesigner's own bundled Python cannot run the sidecar.** It is the obvious thing
+to reach for — it is right there, it is 3.11, it has pip — and macOS refuses to load
+pyobjc into it:
+
+```
+ImportError: dlopen(objc/_objc.cpython-311-darwin.so): code signature not valid
+  for use in process: ... have different Team IDs
+```
+
+`TouchDesigner.app` carries `com.apple.security.cs.disable-library-validation`, which
+is why pyobjc works *inside* TD. The interpreter inside the bundle does not carry it,
+so run as a subprocess it is an ordinary hardened binary and library validation stops
+it. Nothing to be done from this side.
+
+So the sidecar needs its own interpreter. Any Python 3.11+ that is ad-hoc or
+unsigned will do — a `venv`, Homebrew, pyenv — and if you have none the Install
+button downloads a relocatable CPython (26 MB) from
+[`astral-sh/python-build-standalone`](https://github.com/astral-sh/python-build-standalone),
+which is what `uv` uses. That is a third-party binary download, pinned to one release
+and checked against a recorded hash; it is called out here rather than buried because
+it is a trust decision and yours to make. Point `Sidecarpython` at your own
+interpreter and nothing is downloaded.
+
+---
+
 ## Usage
 
 Open the project, find the **Vision** COMP, and switch `Active` on. That is it —
@@ -289,7 +333,7 @@ mistaken for first.
 
 ## Known limitations
 
-- **macOS only**, Apple Silicon in practice.
+- **macOS on Apple Silicon only** — a decision, not a hedge. See [Compatibility](#compatibility).
 - **No z per joint.** Vision's hand request is 2D plus confidence. Depth fills that
   at frame level, not per joint, and only if you pin it.
 - **No tracking IDs.** Vision returns hands in arbitrary order; slots are assigned

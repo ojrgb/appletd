@@ -964,6 +964,8 @@ def main():
     # `td_layout` is every coordinate a MASTER-level operator gets. One table,
     # because seven builders place operators in here and two of them once chose the
     # same spot with nothing able to notice.
+    from appletd.install import DEFAULT_INSTALL_ROOT as INSTALL_ROOT
+    from appletd.install import PYTHON_URL
     from appletd.sidecar import DEFAULT_DEPTH_PATH, DEFAULT_MASK_PATH
     from appletd.streams import (
         DEFAULT_SEGMENT_QUALITY,
@@ -1318,6 +1320,27 @@ def main():
         "Keeplayout", label="Keep Layout (builders leave existing nodes)")[0]
     par_keep.default = False
 
+    # THE INSTALL PATHS, all three configurable and none of them magic. `appletd
+    # .install` decides what they mean; these are only where somebody changes them.
+    #
+    # `Installroot` is Application Support rather than beside the .toe: always
+    # writable, survives the project moving, and stamped with a version inside so two
+    # .toe files cannot quietly fight over one install.
+    #
+    # `Sidecarpython` EMPTY means "work it out" - the probe in `install.py` tries the
+    # install's own interpreter, then the documented venv, then what is on PATH, and
+    # downloads one only if none of them can actually import pyobjc. Set it and it
+    # goes first. It is a path and not a menu because the answer is a path.
+    par_installroot = advanced.appendStr(
+        "Installroot", label="Install Folder")[0]
+    par_installroot.default = INSTALL_ROOT
+    par_sidecarpy = advanced.appendStr(
+        "Sidecarpython", label="Sidecar Python  (blank = find or install one)")[0]
+    par_sidecarpy.default = ""
+    par_pyurl = advanced.appendStr(
+        "Pythonurl", label="Python Download  (pinned; blank = never download)")[0]
+    par_pyurl.default = PYTHON_URL
+
     par_mask = advanced.appendStr("Maskbuffer", label="Mask Buffer Path")[0]
     par_mask.default = DEFAULT_MASK_PATH
     par_depthbuf = advanced.appendStr("Depthbuffer",
@@ -1350,6 +1373,8 @@ def main():
              ("Segquality", par_quality), ("Maskbuffer", par_mask),
              ("Depthbuffer", par_depthbuf),
              ("Oscport", par_port),
+             ("Installroot", par_installroot), ("Sidecarpython", par_sidecarpy),
+             ("Pythonurl", par_pyurl),
              ("Smoothing", par_smooth), ("Mincutoff", par_mincut),
              ("Beta", par_beta)]
     owned += [("Stream" + name, par) for name, par in stream_pars.items()]
