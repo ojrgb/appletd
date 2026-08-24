@@ -301,6 +301,75 @@ All measured here. 1–10 are older and still true; 11 onwards are this session'
     counts**, paid whether the gate is open or shut. Do not wrap something in a COMP
     to make it switchable unless it is worth more than that switched off.
 
+## Next — agreed 2026-08-24, in this order
+
+### A. Face key points, five per face, from the COMPOSED channels
+
+A toggle that replaces 348 landmark channels with a handful. **Decided: no ears** -
+Vision has twelve landmark regions and none is an ear, so there is nothing to select.
+
+| point | where it comes from | status |
+|---|---|---|
+| left eye centre | `f<i>_left_pupil_00` | **free** - Vision publishes the pupil as a single-point region, it IS the centre |
+| right eye centre | `f<i>_right_pupil_00` | free |
+| nose tip | one index of `nose` (8 points) or `nose_crest` (6) | **NEEDS ONE MEASUREMENT** - which index is not recorded anywhere, and the fixture is hands-only so it cannot be found without a face in front of the camera |
+| mouth centre | mean of `inner_lips` (6 points) | **computed, not selected** - both lip regions are rings and neither has a centre point |
+
+**None of the ring regions has a centre point.** `left_eye_00`..`_05` trace around the
+eye. That is why the pupils matter: they are the only single-point regions Vision gives.
+
+**SELECT FROM THE COMPOSED CHANNELS, not the raw ones** - decided, and it is the part
+that would otherwise be got wrong. Landmarks are normalised to the FACE'S BOUNDING BOX,
+not the image, which is why they have no `_tx`/`_px` companions. Raw values put every
+feature inside a unit box. The composition already exists in the coords layer's box
+branches: `image_x = f0_bbox_x + point_x * f0_bbox_w`.
+
+### B. Move the removing toggles EARLIER in the chain
+
+**The suspicion was right, and here is the measurement.** The hands chain:
+
+    in1 145 -> filter 145 -> coords 200 + derive_chop 187 -> merge_out 635
+            -> screen_only 535 -> out1        ... and trim_empty removes at the MASTER
+
+`Fingertipsonly` drops the fifteen non-tip joints **at the master trim** - after every
+one of them has been through the one-euro filter and converted into up to four
+coordinate spaces. Same for `Handbox`.
+
+What can move, and what cannot:
+
+- **`Fingertipsonly` CAN move to just after `in1`**, before `filter`. That cuts the
+  filter, both coordinate spaces and the merges from 21 joints to 6.
+  **The catch**: `derive()` needs all 21 - curls, spreads and angles are computed from
+  the full hand - so the trim has to feed `coords` while `derive_chop` keeps reading
+  the untrimmed `filter`. A fork, not a filter in the line.
+- **`Handbox` likewise** - `hands_overlap` needs the boxes, so `derive` keeps them and
+  only the coords branch is trimmed.
+- **`Screenspaceonly` CANNOT move.** It removes the raw normalised channels that are
+  `coords`' own input. It is correctly placed at the end.
+- **`Coordstx`/`Coordspx`/`Lmcoordstx`/`Lmcoordspx` already gate cooking**, so they are
+  not paying for what they drop. Nothing to do.
+
+Expected saving is the hands filter and coords falling to roughly a third when
+`Fingertipsonly` is on. UNMEASURED - measure before claiming it.
+
+### C. A button that updates the .tox from GitHub
+
+Download the latest `appletd.tox` from the repo and replace the component in place.
+
+**What is already known and will shape it:**
+
+- GitHub serves repo files as `application/octet-stream`, which is fine for `curl` -
+  it only broke the `<video>` tag. The raw URL works:
+  `https://github.com/ojrgb/appletd/raw/main/appletd.tox`
+- **The hazard is that the COMP would be replacing itself**, from a script that lives
+  inside it. `loadTox` onto a running component is the one thing to design around -
+  most likely the download happens to a temp file, and the swap is scheduled with
+  `run(..., delayFrames=n)` so the calling script has finished.
+- `Sourceversion` already exists and is exactly the right comparison: fetch, read the
+  new file's version, and say "up to date" rather than reloading blindly.
+- It should NOT clobber a customised component silently. Every tuned parameter lives
+  on the COMP being replaced.
+
 ## Next
 
 ### 0. Depth's metric correction against a real room — CHECKED 2026-08-23, no figures recorded
