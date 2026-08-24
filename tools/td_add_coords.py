@@ -182,14 +182,20 @@ ROW_FIRST = -1
 # one. A key point composes through the face's bounding box exactly as a landmark
 # does - identical arithmetic, identical operators - but there are 4 of them per
 # branch against 87, so they ride with the bounding box under `Coordstx` instead of
-# behind `Lmcoordstx`. That is the whole mechanism behind `Face Key Points`: the
-# eyes, nose and mouth stay live when the 348 landmark channels are frozen.
+# in the landmark halves. That is the whole mechanism behind `Face Key Points`: it
+# freezes `lm_world` and `lm_pixels` and nothing else, so the eyes, nose and mouth
+# stay live when the 348 landmark channels stop.
 HALVES = (
     # name        toggle          the suffixes            box branches
     ("world", "Coordstx", ("_tx", "_ty", "_tw", "_th"), "keypoints"),
     ("pixels", "Coordspx", ("_px", "_py", "_pw", "_ph"), "keypoints"),
-    ("lm_world", "Lmcoordstx", ("_tx", "_ty"), "landmarks"),
-    ("lm_pixels", "Lmcoordspx", ("_px", "_py"), "landmarks"),
+    # STILL SEPARATE COMPS, on the SAME toggle since 2026-08-24. `Lmcoordstx` and
+    # `Lmcoordspx` were collapsed into the two above by request - needing both on
+    # before a face landmark reached world space was a distinction nobody wanted -
+    # and the COMPs stay split because `Facekeypoints` freezes exactly these two and
+    # nothing else. A toggle is not a boundary.
+    ("lm_world", "Coordstx", ("_tx", "_ty"), "landmarks"),
+    ("lm_pixels", "Coordspx", ("_px", "_py"), "landmarks"),
 )
 
 # Which halves take branches whose source is NOT the wire contract. Split out so a
@@ -221,8 +227,8 @@ NOTES = """COORDS - normalised values into TouchDesigner's world and pixel space
 
   in1 -> world     (Coordstx)   --+
       -> pixels    (Coordspx)   --+
-      -> lm_world  (Lmcoordstx) --+-> out -> out1
-      -> lm_pixels (Lmcoordspx) --+
+      -> lm_world  (Coordstx)   --+-> out -> out1
+      -> lm_pixels (Coordspx)   --+
 
 Inside each half, one ROW per branch, and every branch is TWO operators: the Select
 picks the channels with a PATTERN and renames them in the same operator, and the
@@ -512,8 +518,8 @@ def _build_one(td, child, stream, pairs, boxes, box_expressions, failures,
     `pairs` is [(source name, Branch)] - the source is which of this group's inputs
     the branch reads, because the derived positions do not arrive on the wire.
     `boxes` is {kind: [BoxBranch]}, keyed by the names in `HALVES`' fourth column:
-    `landmarks` for the 348 that ride behind `Lmcoordstx`, `keypoints` for the 16
-    that ride with the bounding box.
+    `landmarks` for the 348 that live in the freezable `lm_*` halves, `keypoints`
+    for the 16 that ride with the bounding box.
     """
     branches = [b for _src, b in pairs]
     source = child.op(SOURCE) or child.op("in1")

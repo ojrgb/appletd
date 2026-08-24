@@ -90,14 +90,14 @@ GROUPS = (
     # turning it off has to be a deliberate saving. Same reasoning as
     # `Screenspaceonly`, which ships off because on deletes channels.
     ("Coordspx",    True,  "native"),
-    # The FACE LANDMARK coordinate spaces, separate from the box's own because they
-    # are two orders of magnitude bigger: 348 channels against 8, and MEASURED at
-    # 1.2099 ms per cook against under a tenth of that. A project that wants a
-    # face's bounding box in world space should not have to pay for 174 points.
-    ("Lmcoordstx",  True,  "native"),
-    # OFF, and unlike `Coordspx` that is safe: these 348 channels did not exist
-    # before today, so nothing can be reading a value that is about to go stale.
-    ("Lmcoordspx",  False, "native"),
+    # `Lmcoordstx` and `Lmcoordspx` WERE here, one per space, gating the face's
+    # landmark halves separately from its bounding box. COLLAPSED into the two above
+    # on 2026-08-24 by request: needing both `Coordstx` and `Lmcoordstx` on before a
+    # face landmark moved into world space is a distinction the panel was making and
+    # nobody wanted. One toggle per SPACE now, and `Face Key Points` is what a project
+    # that wants a face without 348 channels reaches for instead. They are in
+    # RETIRED_PARS, because removing the code that creates a parameter does not remove
+    # the parameter.
     ("Core",        True,  "derive"),
     ("Presence",    True,  "derive"),
     ("Contacts",    True,  "derive"),
@@ -182,9 +182,13 @@ COOK_GATED = {
     "pose/coords/pixels": ("Coordspx",),
     "face/coords/world": ("Coordstx",),
     "face/coords/pixels": ("Coordspx",),
-    # Only the face has box-relative channels, so only the face has these two.
-    "face/coords/lm_world": ("Lmcoordstx",),
-    "face/coords/lm_pixels": ("Lmcoordspx",),
+    # The face's LANDMARK halves, on the same two toggles as everything else since
+    # 2026-08-24. They cost two orders of magnitude more than the bounding box beside
+    # them - 348 channels against 24, MEASURED - which is why they are still their own
+    # COMPs and why `Facekeypoints` can freeze them on their own. What changed is only
+    # which parameter says so.
+    "face/coords/lm_world": ("Coordstx",),
+    "face/coords/lm_pixels": ("Coordspx",),
     # And only HANDS has an attribute layer, so only hands has coordinate branches
     # reading `derive_chop` and `temporal` - palm, pinch, the two centres, and the
     # velocity channels. Same toggles as the wire-contract halves, because they are
@@ -538,8 +542,8 @@ PRESETS = {
     # entry in COOK_GATED, COOK_VETOED or COOK_REQUIRES - so the raw landmark
     # channels were always on and "Minimal" is what it always actually was.
     "Minimal": ("Coordstx",),
-    # Excluded from Interaction for the same reason each ships OFF: `Coordspx` and
-    # `Lmcoordspx` are channel volume nobody asked for, `Descriptor` is 84 channels,
+    # Excluded from Interaction for the same reason each ships OFF: `Coordspx` is
+    # channel volume nobody asked for, `Descriptor` is 84 channels,
     # and `Depth`/`Tilt` are UNCALIBRATED - `Palmarea` and `Zreference` are still set
     # against synthetic geometry (BUILD_PLAN step 13).
     #
@@ -547,8 +551,7 @@ PRESETS = {
     # "Interaction", so a preset that included these would turn them on the moment
     # anyone pressed the button their panel already claimed to be set to.
     "Interaction": tuple(n for n, _d, _g in GROUPS
-                         if n not in ("Coordspx", "Lmcoordspx", "Descriptor",
-                                      "Depth", "Tilt")),
+                         if n not in ("Coordspx", "Descriptor", "Depth", "Tilt")),
     "Everything": tuple(n for n, _d, _g in GROUPS),
 }
 
@@ -841,7 +844,10 @@ def _apply_trim(comp, wanted, verbose=False):
 # COOK_GATED, so each did something in combination and nothing on its own, which is
 # harder to explain to a beginner than one capability fewer. See COOK_GATED for what
 # removing `Motion` specifically cost.
-RETIRED_PARS = ("Landmarks", "Triggers", "Motion", "Events")
+RETIRED_PARS = ("Landmarks", "Triggers", "Motion", "Events",
+                # Collapsed into `Coordstx` and `Coordspx` on 2026-08-24. The
+                # halves they gated are unchanged; the toggles are gone.
+                "Lmcoordstx", "Lmcoordspx")
 
 # name -> the label it should now have. See the note in `_page`: labels on existing
 # parameters are left alone by default, so a rename has to be listed here or it only
@@ -867,8 +873,17 @@ RETIRED_PARS = ("Landmarks", "Triggers", "Motion", "Events")
 # The number is what the toggle costs WHEN ON. Zero would be misleading for the two
 # master switches, which cost nothing themselves and gate a great deal.
 MEASURED_MS = {
-    "Lmcoordstx": 0.82, "Lmcoordspx": 0.68,
-    "Coordstx": 0.20, "Coordspx": 0.18,
+    # RE-MEASURED 2026-08-24, after `Lmcoordstx`/`Lmcoordspx` were collapsed into
+    # these two: each now gates its stream's bounding-box branches AND the face's 348
+    # landmark channels, so it is worth roughly what the two old toggles were worth
+    # together. The figures are not added, they are measured again - the point of
+    # holding them as literals is that a number on the panel came from a run. 89
+    # frames, everything cooking, synthetic senders on all three ports:
+    #
+    #   Coordstx  face/lm_world 0.8015 + face/world 0.1330 + hands/dv_world 0.0364
+    #             + hands/world 0.0579 + pose/world 0.0500          = 1.0789
+    #   Coordspx  0.6631 + 0.1158 + 0.0306 + 0.0510 + 0.0432        = 0.9037
+    "Coordstx": 1.08, "Coordspx": 0.90,
     "Presence": 0.24, "Gestures": 0.18,
     "Core": 0.01, "Contacts": 0.01, "Pose": 0.01, "Twohands": 0.01,
     "Descriptor": 0.03, "Depth": 0.02, "Tilt": 0.01,
@@ -907,6 +922,23 @@ RELABELLED = {
     "Verbosity": "Level of Detail",
 }
 
+# The label a GROUPS toggle carries, where its parameter NAME is not the right word
+# for a panel. Everything absent from here keeps its own name, which is what the
+# other twelve toggles do.
+#
+# These two are here because `Coordstx` and `Coordspx` are names about the SUFFIX
+# they produce - `_tx`, `_px` - which is exactly backwards for somebody reading the
+# panel to find out what the component gives them. Asked for 2026-08-24, with the
+# collapse.
+#
+# Applied in the GROUPS loop below, so it OVERWRITES an existing label the way the
+# measured cost does - and for the same reason: a label built from a table has to
+# follow the table, or renaming one is impossible without destroying the parameter.
+LABELS = {
+    "Coordstx": "Screen Space Coords",
+    "Coordspx": "Pixel Coords",
+}
+
 
 def _page(comp, name="Attributes"):
     """The Attributes page. Created once; a tuned toggle survives a rebuild.
@@ -940,11 +972,29 @@ def _page(comp, name="Attributes"):
     # too - a rebuild must not overwrite a label somebody edited.
     # RETIRED FIRST, so a name that is being retired cannot also be relabelled or
     # counted as existing further down.
+    #
+    # AND SNAPSHOT EVERY VALUE AROUND IT, because on 2026-08-24 destroying
+    # `Lmcoordstx` and `Lmcoordspx` came back with `Handbox` switched off and
+    # `Facekeypoints` and `Onefaceonly` switched ON - three toggles on the same page
+    # that no code in this file writes, and that no preset covers. The mechanism was
+    # not established and this does not claim one; what it does is make the damage
+    # impossible to keep. A retirement is rare and a wrong toggle is silent, so the
+    # check is worth its cost every build.
+    before = {par.name: par.eval() for par in comp.customPars}
+    retired = []
     for name in RETIRED_PARS:
         for par in list(comp.customPars):
             if par.name == name:
                 print("   retired %s (was on the %s page)" % (name, par.page.name))
                 par.destroy()
+                retired.append(name)
+    if retired:
+        for par in comp.customPars:
+            was = before.get(par.name)
+            if was is not None and par.eval() != was:
+                print("   RESTORED %s: destroying %s changed it from %r to %r"
+                      % (par.name, ", ".join(retired), was, par.eval()))
+                par.val = was
 
     existing = {par.name: par for par in comp.customPars}
 
@@ -999,8 +1049,23 @@ def _page(comp, name="Attributes"):
     if menu is None:
         menu = page.appendMenu("Verbosity", label="Level of Detail")[0]
         menu.val = "Interaction"
-    menu.menuNames = list(PRESETS)
-    menu.menuLabels = list(PRESETS)
+    # ONLY WHEN THEY DIFFER, and this cost a rebuild to learn - 2026-08-24, the same
+    # failure DESIGN.md 2.17 records for `appendMenu` and by the same mechanism.
+    # Assigning `menuNames` to an EXISTING menu resets it to index 0 - "Minimal" -
+    # which fires the preset callback, and that callback is DEFERRED to the end of
+    # the frame. The parameter's own value was back at "Everything" before anything
+    # could read it; the queued preset ran anyway and switched off all nine derive
+    # groups, `Coordspx`, `Temporal` and `Latches`. `derive_chop` published 0
+    # channels and the only visible symptom was a builder reporting 24 channels
+    # short.
+    #
+    # Writing the value back afterwards does NOT fix it - 2.17 says so and this run
+    # confirmed it - because the queued callback outlives the restore. Not touching
+    # the parameter is the only thing that works.
+    names = list(PRESETS)
+    if list(menu.menuNames) != names:
+        menu.menuNames = names
+        menu.menuLabels = names
     menu.default = "Interaction"
 
     cost_gating = {name for names in COOK_GATED.values() for name in names}
@@ -1010,7 +1075,7 @@ def _page(comp, name="Attributes"):
             suffix = ""
         else:
             suffix = "  (channels only)"
-        label = _costed(group, group + suffix)
+        label = _costed(group, LABELS.get(group, group) + suffix)
         if par is None:
             par = page.appendToggle(group, label=label)[0]
             par.val = default

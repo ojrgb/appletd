@@ -4453,3 +4453,44 @@ into the hands stream needs a fork, because `derive()` reads all 21 joints, and 
 worth about 0.1 ms plus whatever the shorter keep list returns — smaller than either
 fix above and a wiring change rather than a parameter. `Screenspaceonly` cannot move:
 it removes `coords`' own input.
+
+---
+
+## Milestone — one toggle per coordinate space, and two silent parameter moves
+2026-08-24
+
+**Built.** `Lmcoordstx`/`Lmcoordspx` collapsed into `Coordstx`/`Coordspx`, so the
+face's landmark halves are gated by the same toggle as everything else in their
+space. Labels are now **Screen Space Coords** and **Pixel Coords** — the old names
+were about the SUFFIX they produce, which is backwards for somebody reading the panel
+to find out what they get. A `LABELS` table in `td_add_groups.py` is where that lives.
+
+**Re-measured rather than added**: `Coordstx` 1.0789 ms, `Coordspx` 0.9037 ms. The
+COMPs stay split, because a toggle is not a boundary — `Facekeypoints` freezes exactly
+those two halves and merging them into `world`/`pixels` would take that away.
+
+**It cost two rebuilds, and neither failure was in the change.**
+
+**Assigning `menuNames` to an existing menu resets it, and the reset is DEFERRED.**
+Exactly 2.17's mechanism wearing a different call. `Verbosity` went to index 0,
+"Minimal", which fired the preset callback at the end of the frame — and by the time
+anything read the parameter it said "Everything" again, so nothing looked wrong. The
+queued preset had already switched off all nine derive groups, `Coordspx`, `Temporal`
+and `Latches`. `derive_chop` published 0 channels and the only visible symptom was the
+coords builder reporting 24 channels short. Writing the value back does not help; only
+not touching it does.
+
+**Destroying a custom parameter disturbed three others on the same page.** After the
+two retired toggles were destroyed, `Handbox` had switched OFF and `Facekeypoints` and
+`Onefaceonly` had switched ON — three toggles no code in the builder writes, in no
+preset. The mechanism is NOT established and nothing claims one. `_page` now snapshots
+every custom value before a retirement and restores anything that moved, printing what
+it restored, which turns an invisible failure into a line in the build report.
+
+Both have the same shape: a parameter moved by code that never wrote it. Everything
+else in these builders is idempotent and reports what it did; a TouchDesigner side
+effect is not a return value.
+
+**What it cost in practice**: about forty minutes, most of it spent believing the
+network rather than the report — the coords builder said "24 channels short" on the
+first run and that was the whole diagnosis, three calls before I read it properly.

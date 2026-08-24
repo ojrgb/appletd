@@ -223,11 +223,9 @@ An OSC In CHOP cooks whether or not a datagram arrives, so the whole chain ran a
 
 | toggle | ms | how it was measured |
 |---|---|---|
-| `Lmcoordstx` | 0.82 | 11 operators under `face/coords/lm_world` |
-| `Lmcoordspx` | 0.68 | 11 under `face/coords/lm_pixels` |
+| `Coordstx` (`Screen Space Coords`) | **1.08** | every world half in all three streams, the face's landmark half included |
+| `Coordspx` (`Pixel Coords`) | **0.90** | the pixel halves, the same |
 | `Presence` | 0.24 | 71 under `temporal`, plus its slice of `derive()` |
-| `Coordstx` | 0.20 | 37 under `coords/world` and `coords/dv_world` |
-| `Coordspx` | 0.18 | 37 under the pixel halves |
 | `Gestures` | 0.18 | 49 under `latches`, plus `derive()` |
 | `Core` `Contacts` `Pose` `Twohands` `Tilt` | 0.01 each | `derive()` only |
 | `Descriptor` | 0.03 | `derive()` only |
@@ -238,9 +236,21 @@ so its cost is the operators inside it, from `tools/td_profile.py` across 89 fra
 DERIVE group changes what `derive()` computes, so it was measured in Python with no
 TouchDesigner at all - every group against every-group-but-one, 500 calls, median.
 
-**The face answer**: `Lmcoordstx` + `Lmcoordspx` is 1.5 ms of it, which is 174 face
-landmark points converted into two coordinate spaces. Switch off the space you are not
-reading.
+**The face answer**: the face's landmark halves are 1.46 ms of the 1.98, which is
+174 points converted into two coordinate spaces. Switch off the space you are not
+reading, or switch on `Face Key Points` and keep neither.
+
+**RE-MEASURED 2026-08-24**, after `Lmcoordstx`/`Lmcoordspx` were collapsed into the
+two toggles above. What each is worth now, 89 frames, everything cooking:
+
+```
+Coordstx  1.0789 = face/lm_world 0.8015 + face/world 0.1330 + hands/dv_world 0.0364
+                 + hands/world 0.0579 + pose/world 0.0500
+Coordspx  0.9037 = 0.6631 + 0.1158 + 0.0306 + 0.0510 + 0.0432
+```
+
+The old pair read 0.82 / 0.68 for the landmark halves and 0.20 / 0.18 for everything
+else. Measured again rather than added: the panel's figures come from a run.
 
 ### `Face Key Points` — what the swap is worth
 
@@ -265,7 +275,7 @@ says "saves" rather than a cost, because putting `1.18 ms` beside a switch that 
 you 1.18 ms back reads as exactly the opposite of what it does.
 
 **What it costs when it is OFF: 0.1012 ms.** The four points are composed beside the
-bounding box under `Coordstx`/`Coordspx` rather than behind `Lmcoordstx`, which is
+bounding box rather than in the landmark halves, which is
 what lets the cheap half survive when the expensive one freezes - and it means they
 are computed whether the toggle is on or not. That is 2.9% of the component with
 everything enabled, and it is the price of `f0_eye_left_tx` being there without a

@@ -485,8 +485,6 @@ stream has two more of its own:
 
 | group | channels | default |
 |---|---|---|
-| `Lmcoordstx` — `_tx`/`_ty` for all 174 face landmark points | 348 | on |
-| `Lmcoordspx` — `_px`/`_py` for the same | 348 | off |
 
 Separate from `Coordstx`/`Coordspx` because they are two orders of magnitude
 bigger: the face's own bounding box is 8 channels and its landmark points are 348,
@@ -504,10 +502,8 @@ belong to - a page you have to scroll is a page nobody tunes.
 | parameter | type | default | what it does |
 |---|---|---|---|
 | `Level of Detail` | menu | Interaction | Minimal / Interaction / Everything. Sets the toggles below in one click |
-| `Coordstx` | toggle | on | `_tx`/`_ty`, EVERY stream, wire contract AND derived. Freezes `coords/world` and `coords/dv_world` |
-| `Coordspx` | toggle | on | `_px`/`_py`, the same. Freezes `coords/pixels` and `coords/dv_pixels` |
-| `Lmcoordstx` | toggle | on | `_tx`/`_ty` for the 174 FACE landmark points |
-| `Lmcoordspx` | toggle | off | `_px`/`_py` for the same. 348 channels, 1.08 ms |
+| `Screen Space Coords` (`Coordstx`) | toggle | on | `_tx`/`_ty`, EVERY stream, wire contract AND derived, **including the face's 174 landmark points**. Freezes `coords/world`, `coords/dv_world` and `coords/lm_world`. **1.08 ms** |
+| `Pixel Coords` (`Coordspx`) | toggle | on | `_px`/`_py`, the same. Freezes `coords/pixels`, `coords/dv_pixels` and `coords/lm_pixels`. **0.90 ms** |
 | `Core` | toggle | on | palm, size, bbox |
 | `Presence` | toggle | on | |
 | `Contacts` | toggle | on | |
@@ -598,7 +594,7 @@ Three kinds of toggle, and the label says which:
 | toggles | what switching it off saves |
 |---|---|
 | `Core` `Presence` `Contacts` `Pose` `Twohands` `Gestures` `Descriptor` | `derive()` does not compute the group, and its channels leave the output |
-| `Presence` (→ `temporal`), `Gestures` (→ `latches`), `Coordstx` `Coordspx` (→ `coords/world`, `coords/pixels` in all three streams), `Lmcoordstx` `Lmcoordspx` (→ the face's landmark halves) | the group COMP stops cooking entirely, via `allowCooking`. Its channels stay, holding their last value — which is why `trim_empty` removes them from the output |
+| `Presence` (→ `temporal`), `Gestures` (→ `latches`), `Coordstx` `Coordspx` (→ `coords/world`, `coords/pixels` and `coords/lm_*` in all three streams) | the group COMP stops cooking entirely, via `allowCooking`. Its channels stay, holding their last value — which is why `trim_empty` removes them from the output |
 | `Temporal` `Latches` | a VETO: off freezes the group whatever the toggles above say. See below |
 | `Finger Tips Only` `Hand Box and Size` | the OUTPUT only. Neither gates cooking and neither can: the 15 non-tip joints feed every curl and spread `derive()` computes, and the bounding boxes feed `hands_overlap` |
 | `One Face Only` | the OUTPUT only, and it cannot gate: `box_f1_tx` and `box_f0_tx` are separate operators in the same COMP, and `allowCooking` freezes a COMP. Splitting the halves per face would cost four more COMP boundaries at ~0.11 ms, which is most of what it would save |
@@ -801,7 +797,7 @@ coordinate is
     _tx = point_x * (bbox_w * K)  +  (bbox_x - 0.5) * K
 
 which is one Math CHOP with `gain` and `postoff` as expressions. Every point gets
-`_tx`/`_ty` and, with `Lmcoordspx` on, `_px`/`_py`. The RAW box-relative `_x`/`_y`
+`_tx`/`_ty` and, with `Pixel Coords` on, `_px`/`_py`. The RAW box-relative `_x`/`_y`
 stay — they are the right space for anything about a face's SHAPE rather than its
 position, and the box channels are on the wire so either form recovers the other.
 
@@ -1091,7 +1087,7 @@ f<i>_mouth_x,     f<i>_mouth_y               the mean of inner_lips
 
 Box-normalised like every landmark, so they compose through the box the same way -
 and unlike the landmarks they DO have `_tx`/`_ty`/`_px`/`_py` companions, computed
-beside the bounding box rather than behind `Lmcoordstx`. `Face Key Points` on the
+in the landmark halves. `Face Key Points` on the
 Attributes page swaps them for the 348.
 
 **Two of the four are not points Vision publishes.** Every region except the pupils

@@ -894,7 +894,7 @@ caught the three figures this project has had to throw away.
 |---|---|---|
 | **before this phase**: three streams, every space, nothing gated | **1.6686** | 238 / 238 |
 | like for like now: three streams, world + pixel, no landmark coords | 1.7381 | 207 / 287 |
-| three streams + face landmark WORLD coords (`Lmcoordstx` on) | 2.3854 | 193 / 287 |
+| three streams + face landmark WORLD coords (its own toggle then) | 2.3854 | 193 / 287 |
 | hands only, world only | 1.1367 | 142 / 277 |
 | hands only, both spaces, attribute layer off | **0.6031** | 29 / 287 |
 
@@ -1492,6 +1492,42 @@ Face Only` gates no cooking whatsoever and still saves **0.39 ms**, because it m
 the keep list 362 names shorter. Anything removed anywhere upstream of the trim is
 paid back at the trim — a better argument for moving trims earlier than the coordinate
 saving that was expected to be the reason.
+
+---
+
+### 2.25 Two ways a builder can move a parameter it never wrote — 2026-08-24
+
+Collapsing `Lmcoordstx`/`Lmcoordspx` into `Coordstx`/`Coordspx` cost two rebuilds,
+and neither failure was in the change.
+
+**Assigning `menuNames` to an EXISTING menu resets it, and the reset is deferred.**
+Same mechanism as §2.17's `appendMenu`, a different call. `menu.menuNames = list(...)`
+put `Verbosity` on index 0 - "Minimal" - which fired the preset callback, and that
+callback runs at the END of the frame. The parameter's own value read back as
+"Everything" before anything could see otherwise; the queued preset ran anyway and
+switched off all nine derive groups, `Coordspx`, `Temporal` and `Latches`.
+`derive_chop` published 0 channels and the only visible symptom was a builder
+reporting `coords` 24 channels short.
+
+Writing the value back does not help - §2.17 says so and this confirmed it, because
+the queued callback outlives the restore. **Only assign when the list actually
+differs.** It almost never does.
+
+**Destroying a custom parameter disturbed three others on the same page.** After
+`RETIRED_PARS` destroyed the two collapsed toggles, `Handbox` had switched OFF and
+`Facekeypoints` and `Onefaceonly` had switched ON - three toggles no code in the
+builder writes, in no preset, on the same page as the two destroyed. **The mechanism
+is NOT established** and nothing here claims one; it is recorded because it happened
+and because the failure is silent - a wrong toggle looks exactly like a deliberate
+setting.
+
+`td_add_groups._page` now snapshots every custom parameter value before a retirement
+and writes back anything that changed, printing what it restored. A retirement is
+rare and this is cheap; it turns an invisible failure into a line in the build report.
+
+**The shape both share**: neither parameter was written by the code that moved it.
+Everything else in these builders is idempotent and says what it did, and these two
+were the exception because a TouchDesigner side effect is not a return value.
 
 ---
 

@@ -70,9 +70,9 @@ ROLE_ANGLE: Final = "angle"
 ROLE_BOX_RELATIVE: Final = "box_relative"
 # The four key points, which are box-relative in exactly the same way and get a
 # SEPARATE role for one reason: cost. The 348 landmark channels are the most
-# expensive thing in the component and live behind `Lmcoordstx`; the 16 key point
-# channels are a fiftieth of that and should not share a toggle with them. A
-# separate role is what lets the two land in different COMPs.
+# expensive thing in the component and live in a COMP `Facekeypoints` can freeze on
+# its own; the 16 key point channels are a fiftieth of that and have to survive that
+# freeze. A separate role is what lets the two land in different COMPs.
 ROLE_BOX_KEYPOINT: Final = "box_keypoint"
 ROLE_SCALAR: Final = "scalar"
 
@@ -380,9 +380,9 @@ def keypoint_branches(stream: str) -> list[BoxBranch]:
     Contract: identical arithmetic to `box_branches` - a key point is normalised to
               the face's box exactly as a landmark is - and a separate function only
               so the two can land in different COMPs. 4 channels per branch against
-              87, which is the whole reason for the split: `Lmcoordstx` freezes
-              1.21 ms of landmark composition, and a project that wants two pupils
-              and a mouth should not have to leave it on to get them.
+              87, which is the whole reason for the split: `Facekeypoints` freezes
+              1.5 ms of landmark composition, and a project that wants two pupils and
+              a mouth has to keep them when it does.
     """
     return _box_branches(stream, ROLE_BOX_KEYPOINT)
 

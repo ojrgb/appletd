@@ -2059,3 +2059,57 @@ parameter. Left for a session that wants it.
 
 `Screenspaceonly` cannot move at all: it removes the raw normalised channels that are
 `coords`' own input.
+
+---
+
+## Step 24 — one toggle per coordinate space — DONE 2026-08-24
+
+Asked for: *"Currently I need to enable both Coordstx and Lmcoordstx for the face
+coords to change. Let's just make Coordstx do the job of Lmcoordstx and collapse them
+to one toggle."* And the labels: `Coordstx` → **Screen Space Coords**, `Coordspx` →
+**Pixel Coords**.
+
+### 24.1 What changed, and what deliberately did not
+
+`face/coords/lm_world` is now gated by `Coordstx` and `lm_pixels` by `Coordspx`.
+`Lmcoordstx` and `Lmcoordspx` are in `RETIRED_PARS`, because removing the code that
+creates a parameter does not remove the parameter (step 10 item 4).
+
+**The COMPs stay split.** A toggle is not a boundary: `Facekeypoints` freezes exactly
+those two halves and nothing else, so merging them into `world`/`pixels` would take
+that away. Only the parameter that names them changed.
+
+**RE-MEASURED, not added.** Each toggle now gates its stream's bounding-box branches
+AND the face's 348 landmark channels:
+
+```
+Coordstx  1.0789 = face/lm_world 0.8015 + face/world 0.1330 + hands/dv_world 0.0364
+                 + hands/world 0.0579 + pose/world 0.0500
+Coordspx  0.9037 = 0.6631 + 0.1158 + 0.0306 + 0.0510 + 0.0432
+```
+
+**`LABELS`** is a new table in `td_add_groups.py`: a GROUPS toggle whose parameter
+NAME is the wrong word for a panel gets its label from there. `Coordstx` and
+`Coordspx` are names about the SUFFIX they produce, which is exactly backwards for
+somebody reading the panel to find out what they get.
+
+### 24.2 One consequence worth stating
+
+`Level of Detail = Minimal` is `Coordstx` alone, and `Coordstx` now brings the face's
+348 landmark world channels with it. Minimal is only minimal while `Streamface` is
+off - which is the default. A project that wants a face and a short list should use
+`Face Key Points`, which is what it is for.
+
+### 24.3 It cost two rebuilds, and neither failure was in the change
+
+Both are now in DESIGN.md 2.25, and both are silent:
+
+1. **Assigning `menuNames` to an existing menu resets it, and the reset is deferred**
+   - the same mechanism 2.17 records for `appendMenu`. `Verbosity` went to index 0,
+   the queued preset switched off all nine derive groups plus `Coordspx`, `Temporal`
+   and `Latches`, and the only symptom was `coords` reporting 24 channels short. The
+   fix is to assign only when the list differs, which it almost never does.
+2. **Destroying a custom parameter disturbed three others on the same page** -
+   `Handbox` off, `Facekeypoints` and `Onefaceonly` on, none of them written by any
+   code in the builder. Mechanism NOT established. `_page` now snapshots every value
+   before a retirement and restores anything that moved, printing what it did.

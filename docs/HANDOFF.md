@@ -217,13 +217,20 @@ Their second list, in their numbering. `BUILD_PLAN.md` steps 11-13 have the deta
 | 5b | hand/finger Z from hand size | `Depth` group, off by default |
 | 6 | hand XY angles | `Tilt`/`Tilt_axis`, NOT pitch and yaw - the sign is unrecoverable |
 | 7 | toggles for temporal and latches | `Temporal`/`Latches`, a new VETO mechanism |
-| 8 | is only-Lmcoordstx already minimal? | **Yes, proven by cook count.** 221 operators frozen |
+| 8 | is only-Lmcoordstx already minimal? | **Yes, proven by cook count.** 221 operators frozen. That toggle no longer exists — step 24 |
 
 **Cook cost as shipped: 2.3728 ms at 60.0 fps**, 244 of 325 operators cooking, with
 all three streams on and the face landmark world coords enabled. `face/coords/lm_world`
 is 0.93 of that and has its own toggle.
 
 ## The state this project's TouchDesigner file is in
+
+**Written 2026-08-21 and NOT re-verified since.** Two things named below no
+longer exist: `Lmcoordstx` and `Lmcoordspx` were collapsed into `Coordstx` and
+`Coordspx` on 2026-08-24 (BUILD_PLAN step 24). As of that date the file has
+`Streamhands` and `Streampose` off, `Streamface` on, `Verbosity = Everything`,
+`Screenspaceonly` and `Fingertipsonly` on, `Handbox` on, and both new toggles
+(`Facekeypoints`, `Onefaceonly`) off.
 
 **Read this before changing a parameter.** The user's own network consumes all three
 streams, and two things in it depend on toggles that now gate cooking:
@@ -237,7 +244,8 @@ streams, and two things in it depend on toggles that now gate cooking:
 | | those two select the RAW box-relative points (88 channels each, 87 landmarks plus `f0_bbox_x`). Now that `f0_*_tx`/`_ty` exist they may want `*f0*_tx` instead — the raw points are normalised to the face's box, so drawing them directly puts the whole face in the bottom-left corner of the frame | |
 
 `Screenspaceonly` is OFF. **The streams are NOT all on right now** - the user has
-`Streampose`, `Streamface`, `Coordspx`, `Lmcoordspx`, `Temporal`, `Latches`, `Pose`,
+`Streampose`, `Streamface`, `Coordspx`, the face's pixel landmarks, `Temporal`,
+`Latches`, `Pose`,
 `Motion`, `Descriptor`, `Depth` and `Tilt` off, which is why the output is 306
 channels and `select5`/`select6`/`select7` are empty. That is a deliberate
 configuration, not a fault - leave it alone. `select3`/`select4`/`select5` were
@@ -317,7 +325,7 @@ All measured here. 1–10 are older and still true; 11 onwards are this session'
 ### A. Face key points — DONE, commit `072511b`
 
 `Face Key Points` swaps 664 face landmark channels for 32. Four points per face on the
-wire, composed beside the bounding box rather than behind `Lmcoordstx`, so the cheap
+wire, composed beside the bounding box rather than in the landmark halves, so the cheap
 half survives when the expensive one freezes. Face stream 1.9644 -> 0.7872 ms.
 BUILD_PLAN step 22, DESIGN.md 2.23, BENCHMARKS.
 
@@ -557,7 +565,7 @@ comes from somewhere else - a fraction, or "use input" - can change `.width` wit
   better. It also puts main-thread Python in the coordinate path to do arithmetic
   that native CHOPs can already do correctly, which this project has deliberately
   avoided everywhere except atan2. **Do not do (c) without asking.**
-- **A `Coordspx`-style default hazard exists for `Lmcoordspx`** and does not matter
+- **A `Coordspx`-style default hazard existed for the face's pixel landmarks** and does not matter
   yet, because nothing has read those channels. It will the moment something does.
 - **Phase-2 temporal channels**: `hands_twist`, `steadiness`, `dwell`,
   `hands_scale`, and the swipe/wave/cross/twist events. BUILD_PLAN step 2 lists what
