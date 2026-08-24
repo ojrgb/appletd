@@ -489,19 +489,63 @@ def removing_patterns(comp):
     return patterns
 
 
-def _apply_early_trim(comp):
+def _apply_early_trim(comp, wanted=None):
     """Write `early_trim`'s scope from the toggles, or bypass it. Returns the list.
 
     BYPASSED WHEN THERE IS NOTHING TO REMOVE, because a Delete CHOP with an empty
     scope is not free and a bypassed one is (0.0003 ms, DESIGN.md 2.15).
+
+    IT ALSO DROPS A SWITCHED-OFF STREAM, and that is what makes it worth its own
+    operator. MEASURED 2026-08-24 on a live camera with `Streamface` on and the other
+    two off: `screen_only` cost 0.4424 ms and this operator 0.2932 - 68% of the whole
+    component - and almost all of it was spent scanning hands and pose channels that
+    a frozen COMP was holding and the output was going to drop anyway.
+
+    A frozen stream's channels stop here now, so nothing downstream sees them: not
+    `coords`, which was composing coordinates for people who are not there, and not
+    `screen_only` or `trim_empty`, whose cost is list length x INPUT CHANNELS
+    (DESIGN.md 2.26).
+
+    They are still on `merge_streams`, which is upstream, so `housekeeping_sel` still
+    finds `sc_*` and the sidecar's status is readable whatever the streams are doing.
     """
     node = comp.op(EARLY_CHOP)
     if node is None:
         return []
     patterns = removing_patterns(comp)
+    for group_name, enabled in (wanted or {}).items():
+        if not enabled:
+            patterns += list(STREAM_CHANNELS.get(group_name, ()))
     node.par.delscope = " ".join(patterns)
     node.bypass = not patterns
     return patterns
+
+
+def _guard_screen_space(comp, wanted):
+    """Bypass `screen_only` when NO coordinate half is cooking. Returns True if it did.
+
+    `Screenspaceonly` deletes a raw normalised channel because a composed twin carries
+    the same information - "the toggle removes second copies, never only copies", as
+    appletd/spaces.py puts it. That promise depends on the twin EXISTING, and both
+    coordinate toggles being off means it does not.
+
+    MEASURED 2026-08-24, live: with `Screen Space Coords` and `Pixel Coords` both off
+    and `Screen Space Only` on, the output was **13 channels**. The raw ones were
+    deleted for having twins, and the twins were frozen and then dropped by
+    `trim_empty` for not cooking. Each operator did exactly its job and the component
+    published nothing.
+
+    So the guard is here rather than a warning: the combination is reachable with two
+    clicks and its failure looks like a broken component, not like a setting.
+    """
+    node = comp.op("screen_only")
+    if node is None:
+        return False
+    halves = [name for name in wanted if name.startswith("coords/")]
+    if halves and not any(wanted[name] for name in halves):
+        node.bypass = True
+        return True
+    return False
 
 
 def _trim_keep(comp, wanted):
@@ -824,7 +868,8 @@ def _apply_gating(comp):
     # LAST, after every allowCooking above: `_trim_keep` reads the groups' channels,
     # and a group cooked for the first time only has them once that has happened.
     # BEFORE the keep list is built, because it changes what reaches the trim.
-    _apply_early_trim(comp)
+    _apply_early_trim(comp, wanted)
+    _guard_screen_space(comp, wanted)
     trim = comp.op(TRIM_CHOP)
     if trim is not None:
         toggle = getattr(comp.par, TRIM_TOGGLE, None)
@@ -950,7 +995,10 @@ def _apply_trim(comp, wanted, verbose=False):
     """
     report = []
     # BEFORE the keep list is built, because it changes what reaches the trim.
-    early = _apply_early_trim(comp)
+    early = _apply_early_trim(comp, wanted)
+    if _guard_screen_space(comp, wanted):
+        report.append("screen_only: BYPASSED - no coordinate half is cooking, so a "
+                      "raw channel has no twin to be a second copy of")
     if comp.op(EARLY_CHOP) is not None:
         report.append("%s: %s"
                       % (EARLY_CHOP,

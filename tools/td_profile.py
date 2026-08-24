@@ -27,7 +27,8 @@ that blocks the frame loop it is trying to measure, and it reports:
               median rather than a mean because the first cook after a rebuild is
               always an outlier and one outlier moves a mean.
 
-AND IT PROVES THE INPUT WAS MOVING. `seq` on the hands stream has to change between
+AND IT PROVES THE INPUT WAS MOVING. The stream counters - `seq`, `pose_seq`,
+`face_seq` - are summed, and the sum has to change between
 the first sample and the last, or the whole run is discarded with a message saying
 so - which is the check that would have caught the dead feeder immediately.
 
@@ -110,11 +111,28 @@ def sample():
     comp = op(MASTER_PATH)
     if comp is None:
         return
-    hands = comp.op("hands/in1")
+    # WHICHEVER STREAM IS ACTUALLY SENDING, not hands. Until 2026-08-24 this read
+    # `seq` off the hands stream alone, which meant every run with `Streamhands` off
+    # was DISCARDED as "the input never moved" - the one configuration the component
+    # is most often in, and the one whose measurements were therefore never trusted.
+    # The counter is per stream: `seq` on hands, `pose_seq`, `face_seq`.
     seq = None
-    if hands is not None:
-        channel = hands.chan("seq")
-        seq = None if channel is None else channel[0]
+    for stream, name in (("hands", "seq"), ("pose", "pose_seq"),
+                         ("face", "face_seq")):
+        # `%%s` and `%%%%`: this whole block is a TEMPLATE, formatted into a Text
+        # DAT further down, so a bare `%%s` here is eaten by that format and raises
+        # "not enough arguments for format string" at build. Fourth time in this
+        # repo; docs/JOURNAL.md records the other three.
+        node = comp.op("%%s/in1" %% stream)
+        if node is None:
+            continue
+        channel = node.chan(name)
+        if channel is None:
+            continue
+        # Summed rather than "first one found": a stream that is switched off holds a
+        # STATIC counter, so taking the first present one would still discard a run
+        # where another stream was streaming perfectly well.
+        seq = (seq or 0) + channel[0]
     _store().append({"frame": absTime.frame, "seq": seq,
                      "clock": absTime.seconds, "ops": _snapshot(comp)})
 
