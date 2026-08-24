@@ -1566,6 +1566,26 @@ never cost more than 0.49.
 and two sets of duplicated branches it removed were worth 1.44 ms in this case, which
 was a deliberate trade and is recorded as one.
 
+**AND IT BROKE `Streamhands` off, which is the failure worth remembering.** `trim_empty`
+drops a frozen group's channels by reading that group's own `out1` - exact, and needing
+no channel-to-group map, which is why it was built that way. It stopped being exact the
+moment `coords` left the streams: a frozen `hands/out1` carries only the RAW channels,
+so `h0_index_tip_x` was dropped and `h0_index_tip_tx` stayed on the output holding a
+stale value. The user found it within the hour, on a live camera, with the stream
+switched off.
+
+Two halves to the fix, and the second is the interesting one. Composed twins are
+derivable from a raw name by string surgery (`_x` -> `_tx`, `_px`), so a frozen group's
+held channels can take their coordinates with them. But **a frozen COMP holds only what
+it last COOKED**, which for a stream frozen while its attribute layer was already gated
+is less than it publishes - `hands_center_tx` survived because `hands_center_x` was not
+on the frozen output to derive a twin from. A whole STREAM, unlike a group, has a
+prefix, so `STREAM_CHANNELS` covers it exactly: verified at build to match all 159, 123
+and 387 of each stream's channels and not one of another's.
+
+The general lesson: **"read it off the network" is exact only while the network is where
+the thing lives.** Moving an operator moved the answer.
+
 ---
 
 ## 3. Traps — all of these cost real time in the spike

@@ -381,6 +381,64 @@ ONEFACE_TOGGLE = "Onefaceonly"
 SECOND_FACE_CHANNELS = ("f[1-9]_*",)
 
 
+# The suffixes a raw channel's composed twins carry, and the axes that have them.
+# `h0_wrist_x` -> `h0_wrist_tx` and `h0_wrist_px`; `f0_bbox_w` -> `_tw` and `_pw`.
+# Written out here rather than imported from appletd.spaces because everything between
+# the TRIM SCOPE markers is pasted into a generated DAT that may import nothing but the
+# standard library.
+# What a whole STREAM's channels look like, as patterns. Used when that stream's COMP
+# is frozen - `Streamhands` off, say - to take everything of its, raw and composed, off
+# the output in one go.
+#
+# WHY THE NETWORK IS NOT ENOUGH HERE, and this is the second half of the same
+# 2026-08-24 regression. `_trim_keep` drops a frozen group's channels by reading its
+# `out1`, which is exact and needs no channel-to-group map - except that a frozen COMP
+# holds whatever it last cooked, which for a stream that was already frozen when its
+# attribute layer was gated is only PART of what it publishes. `hands_center_tx` and
+# `index_center_tx` survived `Streamhands` off for exactly that reason: their raw names
+# were not on the frozen `hands/out1` to derive a twin from.
+#
+# A stream, unlike a group, HAS a prefix. VERIFIED against the contracts: these three
+# cover every channel each stream publishes - 159, 123 and 387 - and not one channel of
+# another stream. `_check_stream_patterns()` re-checks at build.
+#
+# `sc_*`, `seq` and `age_ms` are deliberately uncovered: they arrive on the hands port
+# but belong to the SIDECAR, not to hands, and NEVER_ON_OUTPUT drops them regardless.
+STREAM_CHANNELS = {
+    "hands": ("h?_*", "hands_*", "index_*", "n_hands"),
+    "pose": ("p?_*", "pose_*"),
+    "face": ("f?_*", "face_*"),
+}
+
+COMPOSED_KINDS = ("t", "p")
+COMPOSED_AXES = ("x", "y", "w", "h")
+
+
+def composed_twins(raw):
+    """The `_tx`/`_px`/`_tw`/... names that `coords` would build from `raw`. A list.
+
+    WHY THIS EXISTS, and it is a 2026-08-24 regression fix. `_trim_keep` drops a
+    frozen group's channels by reading that group's OWN `out1` - which was exactly
+    right while `coords` lived inside each stream, because freezing `hands` froze its
+    coordinate branches with it and both sets of names came off `hands/out1`.
+
+    `coords` is one group at the master now (BUILD_PLAN step 25). A frozen stream's
+    `out1` carries only its RAW channels; the composed ones come from `coords/world`,
+    which is cooking. So `Streamhands` off dropped `h0_index_tip_x` and left
+    `h0_index_tip_tx` on the output, holding whatever it last saw - a plausible wrong
+    number, which is the precise failure `trim_empty` exists to prevent.
+
+    Names, not patterns: `h?_*` would also match the derived channels, and the whole
+    reason this list is built from the network is that no channel-to-group map exists.
+    """
+    twins = []
+    for name in raw:
+        if len(name) > 2 and name[-2] == "_" and name[-1] in COMPOSED_AXES:
+            for kind in COMPOSED_KINDS:
+                twins.append(name[:-1] + kind + name[-1])
+    return twins
+
+
 def trim_input(comp):
     """The operator `trim_empty` reads, which is where its keep list comes from.
 
@@ -476,6 +534,7 @@ def _trim_keep(comp, wanted):
     so separating them needs the channel-to-group map this deliberately avoids.
     """
     drop = set()
+    stream_patterns = []
     for group_name, enabled in wanted.items():
         if enabled:
             continue
@@ -483,7 +542,15 @@ def _trim_keep(comp, wanted):
         out = None if group is None else group.op("out1")
         if out is None:
             continue
-        drop.update(chan.name for chan in out.chans())
+        held = [chan.name for chan in out.chans()]
+        drop.update(held)
+        # AND their composed twins, which come from `coords` at the master and are
+        # therefore not on this group's output at all. See `composed_twins`.
+        drop.update(composed_twins(held))
+        # AND, for a whole STREAM, everything with its prefix - because a frozen COMP
+        # holds only what it last cooked, which can be less than it publishes. See
+        # STREAM_CHANNELS.
+        stream_patterns += list(STREAM_CHANNELS.get(group_name, ()))
     merged = trim_input(comp)
     if merged is None:
         return None
@@ -495,7 +562,7 @@ def _trim_keep(comp, wanted):
     # The two output-only toggles, read off the COMP the way `_apply_trim` reads
     # `Deleteempty`: a parameter that is not there yet means "leave it alone"
     # rather than an exception on a half-built network.
-    optional = removing_patterns(comp)
+    optional = removing_patterns(comp) + stream_patterns
     if optional:
         drop.update(name for name in names
                     if any(fnmatchcase(name, pattern) for pattern in optional))
@@ -540,6 +607,47 @@ def _check_joint_split():
             "NON_TIP_JOINTS has drifted from types.JOINT_NAMES.\n"
             "  literal:  %s\n  contract: %s"
             % (" ".join(NON_TIP_JOINTS), " ".join(expected)))
+
+
+def _check_stream_patterns():
+    """`STREAM_CHANNELS` must cover each stream's whole contract and nothing else.
+
+    A literal inside the TRIM SCOPE markers, so it is a second copy of something the
+    package owns, and it fails silently both ways: a pattern that misses a channel
+    leaves it on the output when its stream is off, and one that over-reaches takes
+    another stream's channels with it. Neither errors.
+
+    `sc_*`, `seq` and `age_ms` are exempt - they arrive on the hands port and belong
+    to the sidecar, and NEVER_ON_OUTPUT drops them whatever a stream is doing.
+    """
+    from appletd.spaces import DERIVED_SOURCES, channel_roles, derived_roles
+
+    exempt = ("sc_", )
+    owned = {}
+    for stream in STREAM_CHANNELS:
+        names = list(channel_roles(stream))
+        if stream == "hands":
+            for source in DERIVED_SOURCES:
+                names += [n for n in derived_roles(source) if n not in names]
+        owned[stream] = set(names)
+    for stream, patterns in STREAM_CHANNELS.items():
+        hit = {name for name in owned[stream]
+               if any(fnmatchcase(name, pattern) for pattern in patterns)}
+        missing = sorted(n for n in owned[stream] - hit
+                         if not n.startswith(exempt) and n not in ("seq", "age_ms"))
+        if missing:
+            raise RuntimeError(
+                "STREAM_CHANNELS[%r] does not cover %d of its own channels: %s"
+                % (stream, len(missing), " ".join(missing[:6])))
+        for other, theirs in owned.items():
+            if other == stream:
+                continue
+            stolen = sorted(n for n in theirs
+                            if any(fnmatchcase(n, p) for p in patterns))
+            if stolen:
+                raise RuntimeError(
+                    "STREAM_CHANNELS[%r] also matches %d %s channels: %s"
+                    % (stream, len(stolen), other, " ".join(stolen[:6])))
 
 
 def _check_face_slots():
@@ -1094,6 +1202,8 @@ def _page(comp, name="Attributes"):
         box = page.appendToggle(HANDBOX_TOGGLE, label="Hand Box and Size")[0]
         box.default = True
         box.val = True
+    # NOTE what is deliberately absent: an `else` that writes anything. Everything on
+    # this page that already exists is left alone unless it demonstrably differs.
 
     # The face's abbreviated form. OFF by default, which keeps the output identical
     # to the one this component produced before the key points existed.
@@ -1142,7 +1252,14 @@ def _page(comp, name="Attributes"):
     if list(menu.menuNames) != names:
         menu.menuNames = names
         menu.menuLabels = names
-    menu.default = "Interaction"
+    # AND `default` ONLY WHEN IT DIFFERS, for the same reason. Every unconditional
+    # write to this menu is a chance to fire the preset callback, and that callback
+    # is DEFERRED - it runs at the end of the frame, after `_page` has finished and
+    # after the snapshot below has already put everything back. A guard cannot undo
+    # a reset that has not happened yet, which is why this file's rule is now: touch
+    # nothing that does not need touching.
+    if menu.default != "Interaction":
+        menu.default = "Interaction"
 
     cost_gating = {name for names in COOK_GATED.values() for name in names}
     for group, default, gated in GROUPS:
@@ -1163,7 +1280,11 @@ def _page(comp, name="Attributes"):
             # reaching the panel - and a stale millisecond figure next to a toggle is
             # exactly the kind of confident wrong number this project keeps removing.
             par.label = label
-        par.default = default
+        # ONLY WHEN IT DIFFERS - see the menu above. A `default` is not a value, but
+        # writing one is still a write, and this loop runs over every toggle on the
+        # page on every build.
+        if par.default != default:
+            par.default = default
 
     # LAST, after every append, destroy, relabel and default above.
     moved = []
@@ -1197,6 +1318,7 @@ def main():
     _check_joint_split()
     _check_keypoint_names()
     _check_face_slots()
+    _check_stream_patterns()
 
     master = op(MASTER_PATH)
     comp = op(COMP_PATH)
