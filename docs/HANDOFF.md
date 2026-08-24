@@ -1,6 +1,9 @@
-# Handoff — 2026-08-21
+# Handoff — 2026-08-24
 
-**430 tests**, `ruff check` and `mypy appletd` clean. Working tree clean apart
+**611 tests**, `ruff check` and `mypy appletd` clean. The three items agreed on
+2026-08-24 are under **Done 2026-08-24** below; only the `.tox` updater and a licence
+decision on YOLO26 are outstanding from that list. Everything above that heading is
+older and still true unless it says otherwise. Working tree clean apart
 from `tools/vision_landmarks.py` and `tools/vision_landmarks_live.py`, which are the
 user's own untracked files — leave them alone. (`ruff check` at the repo root will
 fail on one of those two; lint `appletd/` and `tools/td_*.py tools/send_*.py
@@ -30,7 +33,7 @@ entry is what went wrong on the way.
 
       hands_osc 10000  ->  hands  --+                505 channels
       pose_osc  10001  ->  pose   --+-> merge_streams -> trim_empty -> out1  (CHOP)
-      face_osc  10002  ->  face   --+   1,863 chans  |  258 kept
+      face_osc  10002  ->  face   --+   2,041 chans  |  258 kept
                                                      +-> housekeeping  10 chans
       status                                   the sidecar's own sc_* channels
 
@@ -297,78 +300,84 @@ All measured here. 1–10 are older and still true; 11 onwards are this session'
     fails pickle's IDENTITY check and the project saves "with errors" — and **storage
     outlives the code that wrote it**, so removing the `store()` call is not enough,
     you have to `unstore` the key.
-19. **Gating costs about 0.11 ms per COMP boundary crossing at these channel
+19. **A pattern that `fnmatchcase` accepts is not a pattern TouchDesigner
+    accepts.** A three-range character class - `h?_[a-ce-oq-z]*_x` - expands
+    correctly offline and selects NOTHING in TD. `*`, `?` and `[0-9]` are what
+    2.11 records as verified, and that is the limit rather than a starting point.
+20. **A freshly created operator does not report its channels in the frame it was
+    made in.** Three attempts to probe TD's matcher with a scratch Delete CHOP
+    returned 0 channels for every candidate INCLUDING a control that could not fail.
+    Use a builder's own report, one frame later.
+21. **Gating costs about 0.11 ms per COMP boundary crossing at these channel
     counts**, paid whether the gate is open or shut. Do not wrap something in a COMP
     to make it switchable unless it is worth more than that switched off.
 
-## Next — agreed 2026-08-24, in this order
+## Done 2026-08-24, and what each left behind
 
-### A. Face key points, five per face, from the COMPOSED channels
+### A. Face key points — DONE, commit `072511b`
 
-A toggle that replaces 348 landmark channels with a handful. **Decided: no ears** -
-Vision has twelve landmark regions and none is an ear, so there is nothing to select.
+`Face Key Points` swaps 664 face landmark channels for 32. Four points per face on the
+wire, composed beside the bounding box rather than behind `Lmcoordstx`, so the cheap
+half survives when the expensive one freezes. Face stream 1.9644 -> 0.7872 ms.
+BUILD_PLAN step 22, DESIGN.md 2.23, BENCHMARKS.
 
-| point | where it comes from | status |
-|---|---|---|
-| left eye centre | `f<i>_left_pupil_00` | **free** - Vision publishes the pupil as a single-point region, it IS the centre |
-| right eye centre | `f<i>_right_pupil_00` | free |
-| nose tip | one index of `nose` (8 points) or `nose_crest` (6) | **NEEDS ONE MEASUREMENT** - which index is not recorded anywhere, and the fixture is hands-only so it cannot be found without a face in front of the camera |
-| mouth centre | mean of `inner_lips` (6 points) | **computed, not selected** - both lip regions are rings and neither has a centre point |
+**The nose tip never needed the camera.** Step 16's overlap arithmetic already pinned
+exactly one point in three regions at once, and that point is the tip - so it is found
+by intersecting `nose`, `noseCrest` and `medianLine` on every frame rather than by an
+index measured once. Better than the measurement would have been.
 
-**None of the ring regions has a centre point.** `left_eye_00`..`_05` trace around the
-eye. That is why the pupils matter: they are the only single-point regions Vision gives.
+**One thing still needs a face**, and it is the only outstanding piece: whether
+`leftPupil` is the SUBJECT's left or the IMAGE's left. `f{i}_eye_left` mirrors the
+region name and every doc says the side is UNMEASURED.
+`tools/probe_face_regions.py --keypoints` answers it in one run, prints nothing to
+disk, and needs the camera - **so ask first.**
 
-**SELECT FROM THE COMPOSED CHANNELS, not the raw ones** - decided, and it is the part
-that would otherwise be got wrong. Landmarks are normalised to the FACE'S BOUNDING BOX,
-not the image, which is why they have no `_tx`/`_px` companions. Raw values put every
-feature inside a unit box. The composition already exists in the coords layer's box
-branches: `image_x = f0_bbox_x + point_x * f0_bbox_w`.
+### B. Move the removing toggles earlier — ANSWERED, and the answer was elsewhere
 
-### B. Move the removing toggles EARLIER in the chain
+The suspicion was right and the money was not where the plan said. Everything cooking
+is 4.1350 ms, and the two most expensive operators outside the face landmarks are both
+FILTERS: `trim_empty` 0.5075 ms and `hands/screen_only` 0.4885 ms.
 
-**The suspicion was right, and here is the measurement.** The hands chain:
+**Fixed**: `hands/screen_only` from 100 literal names to 24 patterns, 0.4885 ->
+0.2170 ms. **Found**: `trim_empty` scales with the KEEP list, so an output-only toggle
+still saves real time - `One Face Only` gates no cooking and saves 0.39 ms.
 
-    in1 145 -> filter 145 -> coords 200 + derive_chop 187 -> merge_out 635
-            -> screen_only 535 -> out1        ... and trim_empty removes at the MASTER
+**NOT done, and worth about 0.1 ms**: `Fingertipsonly` and `Handbox` still trim at the
+master. Moving them into the hands stream needs a FORK - `derive()` reads all 21
+joints - so it is a wiring change rather than a parameter. BUILD_PLAN 23.5.
 
-`Fingertipsonly` drops the fifteen non-tip joints **at the master trim** - after every
-one of them has been through the one-euro filter and converted into up to four
-coordinate spaces. Same for `Handbox`.
+### C. A `.tox` updater button — NOT STARTED
 
-What can move, and what cannot:
+Unchanged from the plan below, and now the only one of the three outstanding.
 
-- **`Fingertipsonly` CAN move to just after `in1`**, before `filter`. That cuts the
-  filter, both coordinate spaces and the merges from 21 joints to 6.
-  **The catch**: `derive()` needs all 21 - curls, spreads and angles are computed from
-  the full hand - so the trim has to feed `coords` while `derive_chop` keeps reading
-  the untrimmed `filter`. A fork, not a filter in the line.
-- **`Handbox` likewise** - `hands_overlap` needs the boxes, so `derive` keeps them and
-  only the coords branch is trimmed.
-- **`Screenspaceonly` CANNOT move.** It removes the raw normalised channels that are
-  `coords`' own input. It is correctly placed at the end.
-- **`Coordstx`/`Coordspx`/`Lmcoordstx`/`Lmcoordspx` already gate cooking**, so they are
-  not paying for what they drop. Nothing to do.
+- `https://github.com/ojrgb/appletd/raw/main/appletd.tox` is the raw URL; GitHub
+  serves it as `application/octet-stream`, which `curl` does not mind.
+- **The hazard is the COMP replacing itself** from a script inside it. Download to a
+  temp file and schedule the swap with `run(..., delayFrames=n)`.
+- `Sourceversion` already exists and is the right comparison - fetch, read the new
+  file's version, say "up to date" rather than reloading blindly.
+- It must not clobber a customised component silently. Every tuned parameter lives on
+  the COMP being replaced.
 
-Expected saving is the hands filter and coords falling to roughly a third when
-`Fingertipsonly` is on. UNMEASURED - measure before claiming it.
+### D. YOLO26 through Core ML — RESEARCHED 2026-08-24, blocked on a licence decision
 
-### C. A button that updates the .tox from GitHub
+Asked after the two above. Ultralytics documents a CoreML export for **YOLO26**, and
+technically it is a good fit: `model.export(format="coreml", quantize=8, imgsz=640)`
+produces an `.mlpackage`, YOLO26 is **NMS-free end to end** so the graph emits final
+detections with no post-processing to write, and the Neural Engine is reached with
+`computeUnits = .cpuAndNeuralEngine` - the same call `depth.py` already makes. Export
+runs on macOS; inference is macOS-only, which this repo already is.
 
-Download the latest `appletd.tox` from the repo and replace the component in place.
+**The blocker is the licence, not the code.** Ultralytics ships under **AGPL-3.0** or
+a paid Enterprise licence. This repo is MIT and public. Shipping YOLO26 weights or
+the export path inside it would put an AGPL obligation on anything that links it, and
+that is a decision for the user and for Gain, not a technical one.
 
-**What is already known and will shape it:**
+**The alternative that has no such problem** is the model the user originally named:
+`apple/coreml-YOLOv3` on Hugging Face, Apple's own conversion. Older and worse, and
+its licence is the one to read before starting.
 
-- GitHub serves repo files as `application/octet-stream`, which is fine for `curl` -
-  it only broke the `<video>` tag. The raw URL works:
-  `https://github.com/ojrgb/appletd/raw/main/appletd.tox`
-- **The hazard is that the COMP would be replacing itself**, from a script that lives
-  inside it. `loadTox` onto a running component is the one thing to design around -
-  most likely the download happens to a temp file, and the swap is scheduled with
-  `run(..., delayFrames=n)` so the calling script has finished.
-- `Sourceversion` already exists and is exactly the right comparison: fetch, read the
-  new file's version, and say "up to date" rather than reloading blindly.
-- It should NOT clobber a customised component silently. Every tuned parameter lives
-  on the COMP being replaced.
+Nothing has been written either way.
 
 ## Next
 
