@@ -108,6 +108,39 @@ def _comp():
     return op(COMP_PATH)
 
 
+def _migrate_root(comp):
+    """Blank an `Installroot` that belongs to somebody ELSE'S home. Returns it, or None.
+
+    A .tox built before 2026-08-24 carries the BUILDER'S expanded path -
+    `/Users/<whoever>/Library/Application Support/appletd` - because the parameter's
+    default was `os.path.expanduser(...)` evaluated on the machine that ran the
+    builder. On anybody else's Mac that points at a directory they do not have, and
+    Install fails on it. Found on a second machine, which is the only place it can be
+    found.
+
+    Newly built files ship this BLANK and the install code already reads blank as
+    "work it out" - `Installroot.eval() or DEFAULT_INSTALL_ROOT`, expanded here rather
+    than at build. This is the same fix for a file that is already out there: it runs
+    when the project opens, so the component heals itself rather than needing a
+    download.
+
+    CONSERVATIVE ON PURPOSE. Only a path under `/Users/` that is not under THIS home
+    is touched - so a deliberate `/Volumes/Work/appletd` or a shared location is left
+    exactly as it is, and so is a correct path on the machine that made it.
+    """
+    par = getattr(comp.par, "Installroot", None)
+    if par is None:
+        return None
+    root = str(par.eval())
+    home = os.path.expanduser("~")
+    if not root or not root.startswith("/Users/"):
+        return None
+    if root == home or root.startswith(home + os.sep):
+        return None
+    par.val = ""
+    return root
+
+
 def state(comp=None):
     """Look at the disk and write `Installstate`. Returns the string it wrote.
 
@@ -123,7 +156,13 @@ def state(comp=None):
         return text
 
     install = _install_module()
+    # BEFORE the path is read, because the whole point is that the stored one may
+    # belong to another machine.
+    stale = _migrate_root(comp)
     root = str(comp.par.Installroot.eval() or install.DEFAULT_INSTALL_ROOT)
+    if stale:
+        print("[appletd] Install Folder was %%r, which is not under this home "
+              "directory - cleared, so it resolves to %%r" %% (stale, root))
     wanted = str(comp.par.Sourceversion.eval())
     found = install.probe(root, wanted_version=wanted)
 

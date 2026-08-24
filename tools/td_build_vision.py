@@ -489,7 +489,7 @@ def stop():
     return len(pids)
 
 
-def list_cameras():
+def list_cameras(comp=None):
     """Print the capture devices, by asking the sidecar module rather than importing.
 
     `python -m appletd.sidecar --list-cameras` enumerates and exits. Two reasons
@@ -500,14 +500,29 @@ def list_cameras():
 
     Enumeration opens no device and starts no session, so this takes the camera from
     nothing and raises no permission prompt.
+
+    `comp` IS RESOLVED HERE, and it was not until 2026-08-24. This function read a
+    bare `comp` that no scope defined, so every call raised NameError - and the
+    `except Exception` below caught it, printed one line to the textport and returned
+    an empty list. **The camera menu was empty on every machine**, and it looked like
+    "this Mac has no cameras" rather than like a bug. Found when the component was
+    opened on a second machine, where there was no previously-populated menu to hide
+    it. The same `comp = comp or op(...)` idiom every other function here uses.
     """
+    comp = comp or op(%(comp)r)
     try:
         found = subprocess.run(
             [sidecar_python(comp), "-m", "appletd.sidecar", "--list-cameras"],
             cwd=package_root(comp) or None, capture_output=True, text=True,
             timeout=20)
     except Exception as exc:
-        print("[appletd] could not list cameras: %%r" %% (exc,))
+        # DELIBERATELY BROAD and deliberately reported: every failure here is "the
+        # interpreter would not run", and none of them is retryable from a button.
+        # It cost a silent empty menu once (see the docstring), so the message names
+        # the interpreter it tried - an empty list with no explanation is what made
+        # that bug invisible.
+        print("[appletd] could not list cameras with %%r: %%r"
+              %% (sidecar_python(comp), exc))
         return []
     if found.returncode != 0:
         print("[appletd] --list-cameras exited %%d: %%s"
@@ -536,7 +551,7 @@ def refresh_cameras(comp=None, want=None):
               refresh, and the pulse beside the menu is how you reach it.
     """
     comp = comp or op(%(comp)r)
-    names = list_cameras()
+    names = list_cameras(comp)
     if comp is None:
         return names
     # `want` overrides the live value, and the builder needs it: when `Camera` changes
@@ -1025,7 +1040,6 @@ def main():
     # `td_layout` is every coordinate a MASTER-level operator gets. One table,
     # because seven builders place operators in here and two of them once chose the
     # same spot with nothing able to notice.
-    from appletd.install import DEFAULT_INSTALL_ROOT as INSTALL_ROOT
     from appletd.install import PYTHON_URL
     from appletd.sidecar import DEFAULT_DEPTH_PATH, DEFAULT_MASK_PATH
     from appletd.streams import (
@@ -1132,6 +1146,24 @@ def main():
     # Vision beside the resolutions, and the two genuinely diagnostic parameters
     # (the status pulse and the process id) belong on Advanced with the other
     # internals.
+    # SNAPSHOT EVERY CUSTOM VALUE ACROSS THE DESTROY-AND-RE-APPEND PASS.
+    #
+    # MEASURED 2026-08-24, and it is the answer to something that had been blamed on
+    # td_add_groups three times: running THIS builder came back with `Facekeypoints`
+    # and `Onefaceonly` switched ON and `Coordspx` switched OFF - three toggles on the
+    # ATTRIBUTES page that this script does not touch, does not name, and has no
+    # opinion about. What it does do is destroy and re-append seven parameters on the
+    # VISION page a few lines below, and values on other pages moved with them.
+    #
+    # The mechanism is still NOT established and nothing here claims one. What is
+    # established is that the damage is silent - a wrong toggle is indistinguishable
+    # from a deliberate setting - and that it cost this project several rounds of
+    # blaming the wrong builder. So: read everything before, write back anything that
+    # changed after, and PRINT it.
+    #
+    # `previous` already captures the MOVED_PARS values for their own round trip;
+    # this is the wider net, for parameters nothing here was supposed to touch.
+    was = {par.name: par.eval() for par in comp.customPars}
     retired_pars = _retire(comp, RETIRED_PARS + MOVED_PARS, RETIRED_PAGES)
 
     # -- the shared parameters --------------------------------------------
@@ -1392,9 +1424,23 @@ def main():
     # install's own interpreter, then the documented venv, then what is on PATH, and
     # downloads one only if none of them can actually import pyobjc. Set it and it
     # goes first. It is a path and not a menu because the answer is a path.
+    # BLANK, and that is the fix for a .tox that only installed on one machine.
+    #
+    # This used to default to `install.DEFAULT_INSTALL_ROOT`, which is
+    # `os.path.expanduser("~/Library/Application Support/appletd")` - expanded on the
+    # machine that RAN THE BUILDER. So the shipped .tox carried one person's home
+    # directory, and on anybody else's Mac Install pointed at a path they do not have.
+    # Exactly the mistake this file's own header records for `BUILT_AT` and
+    # `SIDECAR_PYTHON_DEFAULT` on 2026-08-23; this parameter was missed.
+    #
+    # Blank means "work it out", which the install code ALREADY did -
+    # `comp.par.Installroot.eval() or install.DEFAULT_INSTALL_ROOT` - and that
+    # fallback is evaluated on the machine that opens the file. Same idiom as
+    # `Sidecarpython` below, and the label says so. Typing a path still overrides it.
     par_installroot = advanced.appendStr(
-        "Installroot", label="Install Folder")[0]
-    par_installroot.default = INSTALL_ROOT
+        "Installroot",
+        label="Install Folder  (blank = Application Support)")[0]
+    par_installroot.default = ""
     par_sidecarpy = advanced.appendStr(
         "Sidecarpython", label="Sidecar Python  (blank = find or install one)")[0]
     par_sidecarpy.default = ""
@@ -1506,6 +1552,20 @@ def main():
         # Reported because it is destructive and idempotent: the FIRST run after the
         # page reorganisation removes these, and every run after it finds nothing.
         print("2. retired %s" % ", ".join(retired_pars))
+    # LAST, after every append and every default written above: put back anything that
+    # moved and was not meant to. Only names present before are restored, so a
+    # parameter created during this build keeps the default it was given.
+    moved = []
+    for par in comp.customPars:
+        before = was.get(par.name)
+        if before is not None and par.eval() != before:
+            par.val = before
+            moved.append("%s %r -> %r" % (par.name, before, par.eval()))
+    if moved:
+        print("   RESTORED %d parameter(s) this build moved without being written:"
+              % len(moved))
+        for line in moved:
+            print("      " + line)
     print("   pages: %s" % ", ".join(p.name for p in comp.customPages))
     print("   Active=%s, Camera=%r, OSC base port %d, source %dx%d, render %dx%d, "
           "Orthowidth=%.3f, Smoothing=%s"
