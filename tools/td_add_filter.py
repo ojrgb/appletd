@@ -418,7 +418,18 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures, scope
     merged back together (DESIGN.md 2.11); a builder that stops asking is a builder
     that will not notice the next time the shape changes.
     """
-    source = child.op("in1")
+    # `strip` if the stream has one, `in1` otherwise. The order lives in
+    # `appletd.td_layout.STREAM_HEAD` because two builders own stages of it -
+    # tools/td_add_groups.py creates `strip`, and it runs AFTER this script, so on a
+    # first build there is nothing between `in1` and here. Naming a neighbour would be
+    # right only for the build order this script was written against (DESIGN.md 2.11).
+    from appletd.td_layout import STREAM_HEAD
+
+    source = None
+    for name in reversed(STREAM_HEAD[:STREAM_HEAD.index("filter")]):
+        source = child.op(name)
+        if source is not None:
+            break
     if source is None:
         failures.append("no in1 in %s" % child.path)
         return (stream, 0, 0, 0.0)

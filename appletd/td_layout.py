@@ -66,7 +66,10 @@ ROW_H: Final = 150
 # ---------------------------------------------------------------------------
 STREAM_NODES: Final[dict[str, tuple[int, int]]] = {
     # the data path, row 0
-    "in1": (-4 * COL_W, 0),
+    # Row 0 starts one column further left than it used to, to make room for
+    # `strip` between the OSC In CHOP and the filter.
+    "in1": (-5 * COL_W, 0),
+    "strip": (-4 * COL_W, 0),
     "filter": (-3 * COL_W, 0),
     "merge_out": (2 * COL_W, 0),
     "out1": (4 * COL_W, 0),
@@ -81,11 +84,11 @@ STREAM_NODES: Final[dict[str, tuple[int, int]]] = {
     "temporal": (-1 * COL_W, -4 * ROW_H),
     "latches": (-1 * COL_W, -6 * ROW_H),
     # documentation, above the path and out of it
-    "notes": (-4 * COL_W, 2 * ROW_H),
+    "notes": (-5 * COL_W, 2 * ROW_H),
     # `tools/td_verify_latches.py`'s stored counter baseline. Not part of the
     # network - it holds one run's numbers so the next run can diff them - so it
     # sits well clear of everything, below the attribute layer.
-    "ver_baseline": (-4 * COL_W, -8 * ROW_H),
+    "ver_baseline": (-5 * COL_W, -8 * ROW_H),
 }
 
 # ---------------------------------------------------------------------------
@@ -197,6 +200,47 @@ MASTER_CHAIN: Final[tuple[str, ...]] = (
 )
 
 
+# The head of a STREAM's data path, for the same reason MASTER_CHAIN exists: two
+# builders own stages of it. `in1` and `filter` come from tools/td_build_vision.py and
+# tools/td_add_filter.py; `strip` comes from tools/td_add_groups.py, which owns the
+# toggles that fill it.
+#
+# `strip` is the OUTPUT-SHAPING toggles applied as early as they possibly can be -
+# immediately after the OSC In CHOP, so what they remove never reaches the filter, the
+# merge or anything at the master. Only channels NOTHING ELSE IN THE STREAM NEEDS can
+# go here, which in practice means the face's: `Facekeypoints` and `Onefaceonly`.
+#
+# WHY HANDS HAS NO `strip`. `derive_chop` reads `filter` and needs all 21 joints for
+# its curls, spreads and angles, so `Fingertipsonly` cannot be applied before it - the
+# earliest safe place for that one is a FORK after the filter, feeding the raw branch
+# of `merge_out` only. And `Handbox`'s channels do not exist here at all: `h?_bbox_*`
+# and `h?_size` are computed by `derive_chop`, and `hands_overlap` needs them.
+STREAM_HEAD: Final[tuple[str, ...]] = ("in1", "strip", "filter")
+
+
+def rewire_stream_head(child: Any) -> list[tuple[str, str]]:
+    """Connect one stream's `in1 -> [strip] -> filter`. Returns what it wired.
+
+    Idempotent, and safe from either builder: a stream with no `strip` gets the
+    two-node chain it always had.
+    """
+    present = [name for name in STREAM_HEAD if child.op(name) is not None]
+    wired: list[tuple[str, str]] = []
+    for upstream, downstream in _pairs(STREAM_HEAD, present):
+        source = child.op(upstream)
+        target = child.op(downstream)
+        target.inputConnectors[0].connect(
+            source.outputConnectors[0] if source.isCOMP else source)
+        wired.append((upstream, downstream))
+    return wired
+
+
+def _pairs(order: Iterable[str], present: Iterable[str]) -> list[tuple[str, str]]:
+    """Adjacent pairs of whichever names in `order` are `present`, in `order` order."""
+    available = set(present)
+    return list(pairwise([name for name in order if name in available]))
+
+
 def chain_pairs(present: Iterable[str]) -> list[tuple[str, str]]:
     """`(upstream, downstream)` for every adjacent pair of stages that EXISTS. Pure.
 
@@ -209,13 +253,11 @@ def chain_pairs(present: Iterable[str]) -> list[tuple[str, str]]:
               only way to check the one property that matters - that `trim_empty` is
               always last before `out1` however many stages are missing.
     """
-    # Materialised ONCE. `set(present)` inside the comprehension is re-evaluated per
-    # item, so an ITERATOR argument would be consumed by the first name tested and
-    # every later one would miss - which is a chain that silently drops stages
+    # `_pairs` materialises `present` ONCE. `set(present)` inside a comprehension is
+    # re-evaluated per item, so an ITERATOR argument would be consumed by the first
+    # name tested and every later one would miss - a chain that silently drops stages
     # depending on how the caller happened to build its list.
-    available = set(present)
-    stages = [name for name in MASTER_CHAIN if name in available]
-    return list(pairwise(stages))
+    return _pairs(MASTER_CHAIN, present)
 
 
 def rewire_master_chain(master: Any) -> list[tuple[str, str]]:

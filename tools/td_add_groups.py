@@ -458,6 +458,27 @@ def trim_input(comp):
     return comp.op(MERGE_CHOP)
 
 
+# Which stream can strip which toggles' channels AT ITS OWN INPUT, before the filter.
+#
+# Only channels nothing else in that stream needs can go here. The face qualifies for
+# both of its toggles: it has no attribute layer, so nothing reads a landmark except
+# the coordinate composition at the master.
+#
+# HANDS QUALIFIES FOR NEITHER, and the reasons are worth having. `derive_chop` reads
+# `filter` and needs all 21 joints for its curls, spreads and angles, so
+# `Fingertipsonly` cannot be applied before it - the earliest safe place is a FORK
+# after the filter, feeding only the raw branch of `merge_out`. And `Handbox`'s
+# channels do not exist at the OSC at all: `h?_bbox_*` and `h?_size` are computed by
+# `derive_chop`, and `hands_overlap` needs them.
+STRIP_TOGGLES = {"face": (KEYPOINTS_TOGGLE, ONEFACE_TOGGLE)}
+
+
+def strip_patterns(comp, stream):
+    """What one stream can remove at its own input. A list, empty for most streams."""
+    allowed = STRIP_TOGGLES.get(stream, ())
+    return [pattern for toggle, pattern in _shaping(comp) if toggle in allowed]
+
+
 def removing_patterns(comp):
     """The channel patterns the OUTPUT-SHAPING toggles ask to remove. Returns a list.
 
@@ -470,23 +491,119 @@ def removing_patterns(comp):
     A parameter that is not there yet means "leave it alone" rather than an exception
     on a half-built network.
     """
-    patterns = []
+    stripped = {toggle for toggles in STRIP_TOGGLES.values() for toggle in toggles}
+    # Anything a STREAM strips at its own input is already gone by the time
+    # `early_trim` runs, and a Delete CHOP charges for a term whether it matches or
+    # not - so naming it twice is pure cost.
+    return [pattern for toggle, pattern in _shaping(comp)
+            if toggle not in stripped]
+
+
+def _shaping(comp):
+    """(toggle, pattern) for every channel the output-shaping toggles remove.
+
+    One list, tagged by which toggle asked, so a caller can take the subset it is
+    allowed to apply where it is. A parameter that is not there yet means "leave it
+    alone" rather than an exception on a half-built network.
+    """
+    pairs = []
     tips = getattr(comp.par, FINGERTIPS_TOGGLE, None)
     if tips is not None and tips.eval():
-        patterns += ["h?_%s_*" % joint for joint in NON_TIP_JOINTS]
+        pairs += [(FINGERTIPS_TOGGLE, "h?_%s_*" % joint)
+                  for joint in NON_TIP_JOINTS]
     box = getattr(comp.par, HANDBOX_TOGGLE, None)
     if box is not None and not box.eval():
-        patterns += list(HANDBOX_CHANNELS)
+        pairs += [(HANDBOX_TOGGLE, pattern) for pattern in HANDBOX_CHANNELS]
     # The face swap. Both directions are explicit: whichever set is not wanted is
     # named, so neither can survive by being forgotten.
     points = getattr(comp.par, KEYPOINTS_TOGGLE, None)
     if points is not None:
-        patterns += list(FACE_LANDMARK_CHANNELS if points.eval()
-                         else KEYPOINT_CHANNELS)
+        # TAGGED DIFFERENTLY IN THE TWO DIRECTIONS, and it is a cost decision.
+        #
+        # ON removes 348 landmark channels, which is worth stripping at the OSC:
+        # MEASURED, the face filter drops from 387 channels to 39 and nothing
+        # downstream ever sees them.
+        #
+        # OFF removes 16 key point channels, which is NOT. MEASURED 2026-08-24: a
+        # `strip` carrying only those cost 0.0580 ms to save less than that further
+        # down - the component went 3.2008 -> 3.2969 ms. So the off direction is
+        # tagged with a name no stream strips, and `early_trim` takes it at the
+        # master as it always did.
+        pairs += [(KEYPOINTS_TOGGLE, pattern)
+                  for pattern in FACE_LANDMARK_CHANNELS] if points.eval() else [
+            (KEYPOINTS_TOGGLE + " (off)", pattern)
+            for pattern in KEYPOINT_CHANNELS]
     one_face = getattr(comp.par, ONEFACE_TOGGLE, None)
     if one_face is not None and one_face.eval():
-        patterns += list(SECOND_FACE_CHANNELS)
-    return patterns
+        pairs += [(ONEFACE_TOGGLE, pattern) for pattern in SECOND_FACE_CHANNELS]
+    return pairs
+
+
+def apply_strips(comp):
+    """Write each stream's own `strip` scope. Returns {stream: pattern count}.
+
+    THE EARLIEST A CHANNEL CAN BE REMOVED: immediately after the OSC In CHOP, so what
+    goes never reaches the filter, the stream's merge, `merge_streams` or anything at
+    the master. Bypassed when there is nothing to strip, because a Delete CHOP with an
+    empty scope is not free and a bypassed one is.
+    """
+    applied = {}
+    for stream in STRIP_TOGGLES:
+        child = comp.op(stream)
+        node = None if child is None else child.op("strip")
+        if node is None:
+            continue
+        patterns = strip_patterns(comp, stream)
+        scope = " ".join(patterns)
+        # Reported only when it actually MOVES, because a caller uses that to know
+        # the shape downstream is about to change - see the note in `_apply_trim`.
+        if scope != node.par.delscope.eval() or node.bypass != (not patterns):
+            applied[stream] = len(patterns)
+        node.par.delscope = scope
+        node.bypass = not patterns
+    return applied
+
+
+def apply_stream_wiring(comp, wanted):
+    """Connect only the streams that are ON to `merge_streams`. Returns their names.
+
+    THE CHEAPEST POSSIBLE VERSION of "a switched-off stream costs nothing": it is not
+    in the merge, so nothing downstream has ever heard of it. Every operator after
+    this point costs list length x INPUT CHANNELS (DESIGN.md 2.26), so removing a
+    stream at the merge is worth more than removing it anywhere later - which is what
+    `early_trim` was doing until 2026-08-24, with patterns, over the full width.
+
+    ON `wanted` AND NOT `cooking`: `Active` off freezes every group but must not empty
+    the output - a project's references have to survive switching capture off, and a
+    frozen stream holds its channels for exactly that reason. Only the `Stream*`
+    toggles disconnect.
+
+    WHAT GOES WITH IT, stated because it is a real loss: a disconnected stream's
+    `*_seq` and `*_age_ms` leave `housekeeping` too, and with hands off that includes
+    the `sc_*` status channels. The sidecar's own state is still on `status`, which
+    reads `hands_osc` DIRECTLY and never went through the stream - that is what that
+    operator is for.
+
+    Order is preserved among the live ones, so `out1`'s channel order does not depend
+    on which streams happen to be off.
+    """
+    merge = comp.op(MERGE_CHOP)
+    if merge is None:
+        return [], False
+    live = [name for name in STREAM_CHANNELS if wanted.get(name, True)]
+    was = [connection.owner.name for connector in merge.inputConnectors
+           for connection in connector.connections]
+    for connector in merge.inputConnectors:
+        if connector.connections:
+            connector.disconnect()
+    attached = []
+    for index, name in enumerate(live):
+        child = comp.op(name)
+        if child is None:
+            continue
+        merge.inputConnectors[index].connect(child.outputConnectors[0])
+        attached.append(name)
+    return attached, was != attached
 
 
 def _apply_early_trim(comp, wanted=None):
@@ -512,40 +629,14 @@ def _apply_early_trim(comp, wanted=None):
     node = comp.op(EARLY_CHOP)
     if node is None:
         return []
+    # NO STREAM PATTERNS any more: `apply_stream_wiring` takes a switched-off stream
+    # out of `merge_streams` entirely, so its channels never reach this operator and a
+    # pattern for them would be pure cost - a Delete charges for a term whether it
+    # matches or not.
     patterns = removing_patterns(comp)
-    for group_name, enabled in (wanted or {}).items():
-        if not enabled:
-            patterns += list(STREAM_CHANNELS.get(group_name, ()))
     node.par.delscope = " ".join(patterns)
     node.bypass = not patterns
     return patterns
-
-
-def _guard_screen_space(comp, wanted):
-    """Bypass `screen_only` when NO coordinate half is cooking. Returns True if it did.
-
-    `Screenspaceonly` deletes a raw normalised channel because a composed twin carries
-    the same information - "the toggle removes second copies, never only copies", as
-    appletd/spaces.py puts it. That promise depends on the twin EXISTING, and both
-    coordinate toggles being off means it does not.
-
-    MEASURED 2026-08-24, live: with `Screen Space Coords` and `Pixel Coords` both off
-    and `Screen Space Only` on, the output was **13 channels**. The raw ones were
-    deleted for having twins, and the twins were frozen and then dropped by
-    `trim_empty` for not cooking. Each operator did exactly its job and the component
-    published nothing.
-
-    So the guard is here rather than a warning: the combination is reachable with two
-    clicks and its failure looks like a broken component, not like a setting.
-    """
-    node = comp.op("screen_only")
-    if node is None:
-        return False
-    halves = [name for name in wanted if name.startswith("coords/")]
-    if halves and not any(wanted[name] for name in halves):
-        node.bypass = True
-        return True
-    return False
 
 
 def _trim_keep(comp, wanted):
@@ -867,9 +958,13 @@ def _apply_gating(comp):
         group.allowCooking = enabled
     # LAST, after every allowCooking above: `_trim_keep` reads the groups' channels,
     # and a group cooked for the first time only has them once that has happened.
-    # BEFORE the keep list is built, because it changes what reaches the trim.
+    # FIRST, and in this order: what each stream strips at its own input, then what
+    # is in the merge at all. Both decide what everything downstream even sees.
+    moved = bool(apply_strips(comp))
+    _live, rewired = apply_stream_wiring(comp, wanted)
+    moved = moved or rewired
+    # THEN the keep list, because both of these change what reaches the trim.
     _apply_early_trim(comp, wanted)
-    _guard_screen_space(comp, wanted)
     trim = comp.op(TRIM_CHOP)
     if trim is not None:
         toggle = getattr(comp.par, TRIM_TOGGLE, None)
@@ -881,6 +976,23 @@ def _apply_gating(comp):
     house = comp.op("housekeeping_sel")
     if house is not None:
         house.par.channames = " ".join(_housekeeping_names(comp))
+    # AND ONE MORE PASS, NEXT FRAME, IF THE SHAPE MOVED.
+    #
+    # `_trim_keep` builds its keep list from the channels at the trim's INPUT, and a
+    # strip or a rewire has just changed what those are - in THIS frame, so nothing
+    # downstream has recooked and the list is built from the old set.
+    #
+    # MEASURED 2026-08-24: switching `Face Key Points` on wrote a 29-name keep list
+    # with no key points in it. The channels were there and cooking; the list did not
+    # know yet, and calling this function a second time fixed it. It is DESIGN.md
+    # 2.11's opening rule - nothing crossing a frame boundary can be verified inside
+    # one script - arriving as a wrong parameter rather than a wrong reading.
+    #
+    # Guarded on `moved`, so it cannot recur: the second pass changes no scope and no
+    # wiring, so it schedules nothing.
+    if moved:
+        run("op(%%r).op('groups_callbacks').module._apply_gating(op(%%r))"
+            %% (comp.path, comp.path), delayFrames=1)
 '''
 
 
@@ -995,10 +1107,15 @@ def _apply_trim(comp, wanted, verbose=False):
     """
     report = []
     # BEFORE the keep list is built, because it changes what reaches the trim.
+    stripped = apply_strips(comp)
+    for stream, count in sorted(stripped.items()):
+        report.append("%s/strip: %s" % (
+            stream, "%d pattern(s), before the filter" % count if count
+            else "BYPASSED, nothing to strip"))
+    live, rewired = apply_stream_wiring(comp, wanted)
+    moved = bool(stripped) or rewired
+    report.append("%s: %s" % (MERGE_CHOP, ", ".join(live) or "nothing connected"))
     early = _apply_early_trim(comp, wanted)
-    if _guard_screen_space(comp, wanted):
-        report.append("screen_only: BYPASSED - no coordinate half is cooking, so a "
-                      "raw channel has no twin to be a second copy of")
     if comp.op(EARLY_CHOP) is not None:
         report.append("%s: %s"
                       % (EARLY_CHOP,
@@ -1035,6 +1152,15 @@ def _apply_trim(comp, wanted, verbose=False):
     house = comp.op("housekeeping_sel")
     if house is not None:
         house.par.channames = " ".join(_housekeeping_names(comp))
+    if moved:
+        # See the note in the generated copy. `td.run` and not a bare `run`: this
+        # half runs in the builder's exec context, which has neither name, and a
+        # scheduled string that raises NameError does so SILENTLY (DESIGN.md 2.11).
+        import td
+        td.run("op(%r).op('groups_callbacks').module._apply_gating(op(%r))"
+               % (comp.path, comp.path), delayFrames=1)
+        report.append("scheduled a second pass next frame: a strip or the wiring "
+                      "moved, so the keep list is a frame behind")
     merged = trim_input(comp)
     total = 0 if merged is None else len(merged.chans())
     if keep is None:
@@ -1379,7 +1505,26 @@ def main():
     # A Delete CHOP: its list is PATTERNS, and both operators cost list length x
     # input channels - the Delete's constant is only the worse one when the list is
     # literal names (BENCHMARKS.md, measured 2026-08-24).
-    from appletd.td_layout import master_xy, rewire_master_chain
+    from appletd.td_layout import master_xy, rewire_master_chain, rewire_stream_head, stream_xy
+
+    # One `strip` per stream that has something it can remove at its own input.
+    for stream in STRIP_TOGGLES:
+        child = master.op(stream)
+        if child is None:
+            continue
+        node = child.op("strip")
+        if node is None:
+            node = child.create(td.deleteCHOP, "strip")
+            node.par.delchannels = True
+            node.par.delsamples = False
+            node.par.select = "byname"
+            node.par.discard = "scoped"
+            node.bypass = True
+        node.nodeX, node.nodeY = stream_xy("strip")
+        node.color = (0.5, 0.32, 0.32)
+        node.comment = ("the output-shaping toggles this stream can apply at its own "
+                        "input, before the filter. tools/td_add_groups.py writes it.")
+        rewire_stream_head(child)
 
     early = master.op(EARLY_CHOP)
     if early is None:

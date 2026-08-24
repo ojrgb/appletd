@@ -390,6 +390,47 @@ The trade was taken deliberately: 45 fewer operators and one set of branches ins
 three, for 1.44 ms, on a component whose stated goal for this change was not
 milliseconds.
 
+### Removing a channel as early as it can be removed — measured 2026-08-24
+
+Live camera, face stream on, hands and pose off, 89 frames, a Null at Cook Type
+Always on `out1` so the chain is definitely cooking. **This is the configuration the
+component is usually in, and until today `td_profile.py` discarded every run of it** —
+it proved the input was moving by watching `seq` on the hands stream alone.
+
+| | before | after |
+|---|---|---|
+| **whole component** | **3.9747 ms** | **3.2319 ms** |
+| `screen_only` | 0.8285 | 0.5686 |
+| `early_trim` | 0.2491 | 0.0925 |
+| `merge_streams` | 0.0816 | 0.0317 |
+| `trim_empty` | 0.2854 | 0.2807 |
+| `face/strip` | — | 0.0011 (bypassed) |
+
+Three changes, in order of what they were worth:
+
+**A switched-off stream is disconnected from `merge_streams`**, by the same Parameter
+Execute DAT that gates the cooking. 945 channels in the merge became 387. Every
+operator after it costs list length × INPUT CHANNELS, so this is the one that pays
+everywhere at once.
+
+**`screen_only`'s scope follows the live streams**: 42 pattern terms became 14, because
+26 of them were hands and pose terms that could not match anything. A Delete CHOP
+charges for a term whether it matches or not.
+
+**A `strip` after the face's OSC In CHOP**, for the two toggles whose channels nothing
+else in that stream needs. With `Face Key Points` ON the face filter drops from **387
+channels to 39** and nothing downstream ever sees the 348 landmarks.
+
+**And it carries only the removals worth carrying.** The first version also stripped the
+16 key point channels when the toggle was OFF, and that cost **0.0580 ms to save less
+than that** further down - the component went 3.2008 → 3.2969. The off direction went
+back to `early_trim` and the strip is bypassed by default, at 0.0011 ms.
+
+**What cannot move to the OSC**, measured or reasoned, so nobody tries again:
+`Fingertipsonly` — `derive()` reads `filter` and needs all 21 joints; the earliest safe
+point is a fork after the filter. `Handbox` — `h?_bbox_*` and `h?_size` do not exist at
+the OSC, `derive_chop` computes them.
+
 ### The whole COMP, by configuration
 
 Sampled over 90 render frames from a scheduled callback, medians of cooks where
