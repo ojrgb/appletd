@@ -708,6 +708,43 @@ RETIRED_PARS = ("Landmarks", "Triggers", "Motion", "Events")
 # name -> the label it should now have. See the note in `_page`: labels on existing
 # parameters are left alone by default, so a rename has to be listed here or it only
 # ever applies to somebody building the network from scratch.
+# What each toggle COSTS, in milliseconds per frame, shown in its own label.
+#
+# MEASURED 2026-08-24 on the reference M4 Pro, and in two different ways because these
+# are two different kinds of toggle:
+#
+#   NATIVE groups gate a COMP's `allowCooking`, so their cost is the sum of the
+#   operators inside it - taken from tools/td_profile.py across 89 frames with the
+#   chain unfrozen.
+#
+#   DERIVE groups change what `derive()` computes, so their cost is inside
+#   `derive_chop`. Measured in Python with no TouchDesigner at all: `derive()` with
+#   every group against `derive()` with one removed, 500 calls, median.
+#
+# They are LITERALS rather than measured at build time, deliberately. Measuring on
+# every build would make the panel depend on what else the machine was doing, and
+# docs/STANDARDS.md 3 does not accept a number taken under unknown load. A figure that
+# drifts is corrected here, with a re-measurement, the way BENCHMARKS.md is.
+#
+# The number is what the toggle costs WHEN ON. Zero would be misleading for the two
+# master switches, which cost nothing themselves and gate a great deal.
+MEASURED_MS = {
+    "Lmcoordstx": 0.82, "Lmcoordspx": 0.68,
+    "Coordstx": 0.20, "Coordspx": 0.18,
+    "Presence": 0.24, "Gestures": 0.18,
+    "Core": 0.01, "Contacts": 0.01, "Pose": 0.01, "Twohands": 0.01,
+    "Descriptor": 0.03, "Depth": 0.02, "Tilt": 0.01,
+}
+
+
+def _costed(name, label):
+    """`label` with its measured cost appended, or unchanged when none is known."""
+    ms = MEASURED_MS.get(name)
+    if ms is None:
+        return label
+    return "%s  (%.2f ms)" % (label, ms)
+
+
 RELABELLED = {
     # "Verbosity" is a word about the CODE. What the menu actually chooses is how
     # much the component computes, which is a level of detail.
@@ -787,13 +824,22 @@ def _page(comp, name="Attributes"):
     cost_gating = {name for names in COOK_GATED.values() for name in names}
     for group, default, gated in GROUPS:
         par = existing.get(group)
+        if gated == "derive" or group in cost_gating:
+            suffix = ""
+        else:
+            suffix = "  (channels only)"
+        label = _costed(group, group + suffix)
         if par is None:
-            if gated == "derive" or group in cost_gating:
-                suffix = ""
-            else:
-                suffix = "  (channels only)"
-            par = page.appendToggle(group, label=group + suffix)[0]
+            par = page.appendToggle(group, label=label)[0]
             par.val = default
+        elif par.label != label:
+            # THE ONE PLACE A LABEL IS OVERWRITTEN ON AN EXISTING PARAMETER, and it is
+            # deliberate. Everywhere else this file leaves labels alone, because a
+            # rebuild must not discard one somebody edited. Here the label CONTAINS A
+            # GENERATED NUMBER, so leaving it alone would mean a re-measured cost never
+            # reaching the panel - and a stale millisecond figure next to a toggle is
+            # exactly the kind of confident wrong number this project keeps removing.
+            par.label = label
         par.default = default
     return page
 

@@ -4295,3 +4295,44 @@ switched capture off, and a channel that vanishes breaks every reference with no
 
 Verified both ways: switching `Active` back on unfreezes everything, `out1` is
 unchanged at 1,082, and no operator is in error.
+
+---
+
+## 2026-08-24 — every toggle now says what it costs, measured two ways
+
+`Coordstx  (0.20 ms)`, `Lmcoordstx  (0.82 ms)`, and so on, straight in the label.
+
+### Two kinds of toggle need two instruments
+
+A NATIVE group gates a COMP's `allowCooking`, so its cost is the operators inside it -
+`tools/td_profile.py` across 89 frames, attributed by path. A DERIVE group changes what
+`derive()` computes, so its cost is buried inside `derive_chop` and no profiler can see
+it. That half was measured in Python with no TouchDesigner: `derive()` with all nine
+groups against `derive()` with one removed, 500 calls, median.
+
+    Lmcoordstx 0.82   Lmcoordspx 0.68   Presence 0.24   Coordstx 0.20
+    Coordspx   0.18   Gestures   0.18   Descriptor 0.03  Depth 0.02
+    Core / Contacts / Pose / Twohands / Tilt  0.01 each
+
+**The face question answered**: the two landmark coordinate spaces are 1.5 ms of it,
+which is 174 points converted twice. Switching off the space you are not reading is the
+whole fix.
+
+### A forced cook measured 0.0013 ms and meant nothing
+
+First attempt: toggle a group, `out1.cook(force=True)` twenty-five times, take the
+delta. The whole COMP came back at 0.0013 ms because nothing upstream was dirty, so
+forcing the terminal cooks the terminal and nothing else. `td_profile.py`'s own
+docstring records the same mistake twice - "2.946 ms, read immediately after a
+cook(force=True), against a real 1.030" - and I made it again before reading it.
+
+### The labels overwrite existing ones, which is the one place that is right
+
+Everywhere else this builder leaves labels alone, because a rebuild must not discard
+one somebody edited. These CONTAIN A GENERATED NUMBER, so leaving them alone would
+mean a re-measurement never reaching the panel, and a stale millisecond next to a
+toggle is the confident wrong number this project keeps deleting.
+
+The figures are LITERALS in `MEASURED_MS`, not measured at build. Measuring on every
+build would make the panel depend on whatever else the machine was doing, and
+STANDARDS.md 3 does not accept a number taken under unknown load.

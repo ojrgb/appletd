@@ -203,6 +203,45 @@ channels, not cooks.
 So the value is written instead, by `reconcile_source_size()` in the launcher, when
 the sidecar starts. Back to 0.0109 ms after the revert.
 
+### What each toggle costs, and what it costs to do nothing
+
+Measured 2026-08-24 in a fresh project, and these are the figures the Attributes page
+now shows in its own labels.
+
+**Doing nothing was the expensive part.** With the sidecar switched OFF:
+
+| | operators cooking | cost |
+|---|---|---|
+| before | 230 of 365 | **5.8208 ms** |
+| after `face/screen_only` became a pattern | 230 of 365 | 3.8795 ms |
+| after `Active` became a cook veto | **0 of 365** | **0.0000 ms** |
+
+An OSC In CHOP cooks whether or not a datagram arrives, so the whole chain ran at
+60 fps deriving attributes from channels nothing had touched.
+
+**Per toggle**, chain unfrozen, 259 operators, 4.0929 ms in total:
+
+| toggle | ms | how it was measured |
+|---|---|---|
+| `Lmcoordstx` | 0.82 | 11 operators under `face/coords/lm_world` |
+| `Lmcoordspx` | 0.68 | 11 under `face/coords/lm_pixels` |
+| `Presence` | 0.24 | 71 under `temporal`, plus its slice of `derive()` |
+| `Coordstx` | 0.20 | 37 under `coords/world` and `coords/dv_world` |
+| `Coordspx` | 0.18 | 37 under the pixel halves |
+| `Gestures` | 0.18 | 49 under `latches`, plus `derive()` |
+| `Core` `Contacts` `Pose` `Twohands` `Tilt` | 0.01 each | `derive()` only |
+| `Descriptor` | 0.03 | `derive()` only |
+| `Depth` | 0.02 | `derive()` only |
+
+Two instruments, because these are two kinds of toggle. A NATIVE group gates a COMP,
+so its cost is the operators inside it, from `tools/td_profile.py` across 89 frames. A
+DERIVE group changes what `derive()` computes, so it was measured in Python with no
+TouchDesigner at all - every group against every-group-but-one, 500 calls, median.
+
+**The face answer**: `Lmcoordstx` + `Lmcoordspx` is 1.5 ms of it, which is 174 face
+landmark points converted into two coordinate spaces. Switch off the space you are not
+reading.
+
 ### The whole COMP, by configuration
 
 Sampled over 90 render frames from a scheduled callback, medians of cooks where
