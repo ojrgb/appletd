@@ -381,15 +381,23 @@ The failure mode a generated network protects against is the one where a change
 *looks* applied. A builder that prints "207 of 287 cooking, 258 channels out" is
 making a claim you can check.
 
-### A Select, not a Delete
+### A Select where the list is literal, a Delete where it is patterns
 
 The single largest margin found in this project, on the same 1,863-channel input
-and the same reduction:
+and the same reduction - and note that BOTH rows carry the same literal list, which
+is the whole reason the Delete is so slow:
 
 | operator | list | cost |
 |---|---|---|
 | Delete CHOP | 306 literal keep names | **3.3618 ms** |
 | Select CHOP | 306 literal keep names | **0.0555 ms** |
+| Delete CHOP | 6 drop patterns | 0.0772 ms |
+
+So the rule is not "Select beats Delete" - it is **a short pattern list beats a long
+literal one, whichever operator carries it.** The three `screen_only` operators are
+Deletes because their DROP set is pattern-expressible, and a 2026-08-24 measurement
+against literal-keep Selects had them winning on two streams of three and by 1.8x on
+face. `trim_empty` is a Select because its KEEP set is not pattern-expressible.
 
 The Delete CHOP's cost grows with list length × input channels; the Select's barely
 moves. 60× for choosing the other operator.

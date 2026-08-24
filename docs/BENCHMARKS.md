@@ -155,9 +155,31 @@ reduction, is the largest single margin found in this project:
 | Select CHOP | 306 literal keep names | **0.0555 ms** |
 | Select CHOP | one pattern | 0.0313 ms |
 
-The Delete CHOP's cost grows with list length × input channels; the Select's barely
-moves. 306 names cost the Select 1.8× what one pattern does, and cost the Delete 43× what
-a six-pattern list does.
+The Delete CHOP's cost grows with list length × input channels. So does the Select's,
+just far more slowly: 306 names cost the Select 1.8× what one pattern does, and cost the
+Delete 43× what a six-pattern list does.
+
+**"Select beats Delete" is the wrong rule, and this is the measurement that corrects
+it.** The table above compares a Delete carrying 306 LITERAL NAMES against a Select
+carrying the same 306. Once the Delete carries PATTERNS instead, it is the cheaper of
+the two. MEASURED 2026-08-24, the three `screen_only` operators against a scratch
+Select given the exact complement of each one's delete list, 89 frames each, senders
+running:
+
+| stream | Delete, patterns | Select, literal keep list |
+|---|---|---|
+| hands | 0.2187 ms (24 terms) | 0.2023 ms (535 names) |
+| pose | **0.0392 ms** (4 terms) | 0.0535 ms (199 names) |
+| face | **0.1314 ms** (4 terms) | 0.2352 ms (759 names) |
+
+Delete wins overall by about 0.06 ms, and on face by 1.8×. Hands is a wash inside the
+noise. **The real rule is: a short pattern list beats a long literal list, whichever
+operator carries it** - which is why `screen_only` is a Delete (its DROP set is
+pattern-expressible) and `trim_empty` is a Select (its KEEP set is not, and a Delete
+would be charged 471 × 1,581 for the complement).
+
+These are the only three Delete CHOPs in the component. The other 76 channel-selecting
+operators are already Selects.
 
 ### The mask path
 

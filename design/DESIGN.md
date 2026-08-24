@@ -933,7 +933,10 @@ channels in the shipping configuration rather than 1,863.
 
 **The trim started as a Delete CHOP and had to stop being one.** Same input (the
 1,863-channel merge), same reduction, same 306 channels out, median of 30–40 forced
-cooks:
+cooks. Read the LIST column, not the operator: a Delete carrying patterns is the
+cheap one, and §2.24's 2026-08-24 measurement of the three `screen_only` operators
+against literal-keep Selects confirms it - Delete won on two streams of three and by
+1.8× on face:
 
 | operator | list | ms |
 |---|---|---|
