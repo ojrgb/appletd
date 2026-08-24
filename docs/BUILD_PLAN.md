@@ -2116,7 +2116,7 @@ Both are now in DESIGN.md 2.25, and both are silent:
 
 ---
 
-## Step 25 — one `coords` at the master, and the box expression that makes it safe — IN PROGRESS 2026-08-24
+## Step 25 — one `coords` at the master, and the box expression that makes it safe — DONE 2026-08-24
 
 Asked for: *"the coords transformation happens in both hands, pose, and face. Shouldn't
 it just be one COMP post trim_empty?"* — with the goal stated as **not milliseconds**.
@@ -2213,7 +2213,64 @@ three times the size: `*_x` sweeps the 348 box-relative points, the four key poi
 of a channel that IS a position — 12 terms for x, 12 for y, 2 per extent — verified
 exactly, `?` and `*` only.
 
-### 25.5 What remains
+### 25.5 What it cost, measured — and the finding is not the one that was expected
+
+**It works and it is correct.** 22 composed channels checked against hand-computed
+values across all three streams and both composition rules — a hands joint, a pose
+joint, the face box, and landmarks composed through `f0` and `f1`'s boxes — worst
+delta **1.14e-05**, which is float32 on values up to 700.
+
+**The simplification is real.** `coords` is **77 operators in four halves** where it
+was 122 in ten, and there is one set of branches instead of three. The `dv_*` halves
+are gone entirely: once the streams are merged, a derived position is just a position.
+
+**And it costs 1.44 ms more.** 89 frames, everything cooking, senders on all three
+ports:
+
+| | per-stream | one master group |
+|---|---|---|
+| whole component | **3.4519 ms** | **4.8862 ms** |
+| operators cooking | 275 | **209** |
+| `coords` | ~1.98 ms | 2.3979 ms |
+| `screen_only` | 0.389 ms (three) | 1.0614 ms (one) |
+| `early_trim` | — | 0.2185 ms |
+
+**Why, and it is worth writing down: a channel operator's cost scales with its INPUT
+WIDTH as well as its list length.** Per stream, `face/screen_only` saw 1,131 channels
+and `pose/screen_only` saw 275. Merged, every stage sees all 1,783. The three Deletes
+did 20,864 term-channel comparisons between them; the one does 74,886.
+
+`screen_only` would have been far worse still. Its first merged build fell through to
+the literal list — **564 names over 1,783 channels, 4.4211 ms a frame**, more than the
+entire component had cost before the move — and it took a 38-term merged candidate in
+`SCOPE_CANDIDATES` to bring it back to 1.06. That is the Delete cost model doing
+exactly what BENCHMARKS.md says it does, at a scale the per-stream design never
+reached.
+
+**The trade, stated plainly**: 45 fewer operators and one set of branches instead of
+three, for 1.44 ms. The goal was explicitly not milliseconds, and this is what that
+choice cost. Reverting is `git revert` on this step's commit; nothing else depends on
+the merge.
+
+### 25.6 Three TouchDesigner behaviours this turned up
+
+1. **A COMP is connected by its OUTPUT CONNECTOR, not by itself.**
+   `inputConnectors[0].connect(some_comp)` raises `Invalid number or type of
+   arguments`, and `coords` becoming a baseCOMP at the master is what found it.
+   Same for reading channels: a COMP has no `.chans()` - they live on its `out1`.
+2. **A Select CHOP emits in PATTERN-TERM order, not input order.** With one term -
+   which is every pattern the per-stream builder ever used - the two are identical.
+   The merged position pattern has twelve, so `h?_w*_x h?_t*_x ...` produced
+   `h0_wrist_tx, h1_wrist_tx, h0_thumb_cmc_tx` where the contract order is
+   `h0_wrist, h0_thumb_cmc, h0_thumb_mp`. Nothing was wrong; the sequence was.
+   `_apply_rename` compares multisets now, and the comment says why that still
+   catches the failure it was written for.
+3. **A build-time check must compare against what ARRIVED, not against the
+   contract.** `early_trim` legitimately removes channels before `coords`, so
+   checking a branch against `spaces`' full list reported four failures on a network
+   that was right. Every count in this builder is now against the live input.
+
+### 25.7 What remains
 
 The builders. `td_add_coords.py` becomes master-level (four halves, ~70 operators
 against 122, and the `dv_*` halves disappear because derived positions and rates are

@@ -361,6 +361,35 @@ So `One Face Only` — which gates no cooking at all — **saves 0.39 ms** simpl
 making the keep list 362 names shorter. Removing a channel anywhere upstream of the
 trim is paid back at the trim.
 
+### One `coords` at the master instead of three — measured 2026-08-24
+
+89 frames, everything cooking, synthetic senders on all three ports.
+
+| | per-stream | one master group |
+|---|---|---|
+| whole component | **3.4519 ms** | **4.8862 ms** |
+| operators cooking | 275 | **209** |
+| `coords` (all halves) | ~1.98 ms | 2.3979 ms |
+| `screen_only` | 0.389 ms (three operators) | 1.0614 ms (one) |
+| `early_trim` | — | 0.2185 ms |
+| `trim_empty` | 0.0235 ms (bypassed) | 0.4198 ms |
+| `coords` operators | 122 in ten halves | **77 in four** |
+
+**A channel operator's cost scales with its INPUT WIDTH as well as its list length**,
+and that is the whole explanation. Per stream, `pose/screen_only` saw 275 channels and
+`face/screen_only` saw 1,131. Merged, every stage sees all 1,783: the three Deletes did
+20,864 term-channel comparisons between them, the one does 74,886.
+
+**And the fallback is much more expensive at this width.** `screen_only`'s first merged
+build had no verified pattern and used the literal list - **564 names over 1,783
+channels, 4.4211 ms a frame**, more than the whole component had cost before the move.
+A 38-term merged candidate brought it to 1.06. Per-stream the same fallback never cost
+more than 0.49.
+
+The trade was taken deliberately: 45 fewer operators and one set of branches instead of
+three, for 1.44 ms, on a component whose stated goal for this change was not
+milliseconds.
+
 ### The whole COMP, by configuration
 
 Sampled over 90 render frames from a scheduled callback, medians of cooks where

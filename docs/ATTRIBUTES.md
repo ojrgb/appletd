@@ -875,6 +875,18 @@ moved to Advanced.
 | `Deleteempty` | **on** | keep only the channels that are actually being computed. `sc_*`, `seq`, `age_ms` and the per-joint `*_conf` are off the output either way — see `housekeeping` |
 | `Keeplayout` | off | builders leave existing nodes where you put them |
 
+**The output path has six stages as of 2026-08-24** (BUILD_PLAN step 25):
+
+```
+merge_streams -> early_trim -> coords -> screen_only -> trim_empty -> out1
+```
+
+`early_trim` applies the toggles that REMOVE channels — `Finger Tips Only`, `Hand Box
+and Size`, `One Face Only`, `Face Key Points` — before `coords` composes anything, so
+what they drop is never converted into a coordinate space. `coords` is one group for
+all three streams. `screen_only` is `Screen Space Only`. `trim_empty` is last because
+a frozen group HOLDS its channels rather than dropping them.
+
 **`Delete Empty Channels` is why the output is short.** The COMP has ONE output —
 `hands`, `pose` and `face` merge into it — and with every stream and space enabled
 that is 2,041 channels (MEASURED 2026-08-24: 635 hands, 275 pose, 1,131 face).

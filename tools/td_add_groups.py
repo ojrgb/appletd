@@ -176,25 +176,20 @@ COOK_GATED = {
     # microseconds per channel per operator, which is more than everything else in
     # the COMP put together. `Coordspx` ships OFF, so a project that only wants
     # world coordinates does not pay for pixel ones.
-    "hands/coords/world": ("Coordstx",),
-    "hands/coords/pixels": ("Coordspx",),
-    "pose/coords/world": ("Coordstx",),
-    "pose/coords/pixels": ("Coordspx",),
-    "face/coords/world": ("Coordstx",),
-    "face/coords/pixels": ("Coordspx",),
+    #
+    # ONE GROUP as of 2026-08-24, not three. `coords` moved to the master and reads
+    # all three streams merged (BUILD_PLAN step 25), so there are four halves here
+    # where there were ten - the two `dv_*` halves went with them, because a derived
+    # position is just a position once the streams are merged.
+    "coords/world": ("Coordstx",),
+    "coords/pixels": ("Coordspx",),
     # The face's LANDMARK halves, on the same two toggles as everything else since
     # 2026-08-24. They cost two orders of magnitude more than the bounding box beside
     # them - 348 channels against 24, MEASURED - which is why they are still their own
     # COMPs and why `Facekeypoints` can freeze them on their own. What changed is only
     # which parameter says so.
-    "face/coords/lm_world": ("Coordstx",),
-    "face/coords/lm_pixels": ("Coordspx",),
-    # And only HANDS has an attribute layer, so only hands has coordinate branches
-    # reading `derive_chop` and `temporal` - palm, pinch, the two centres, and the
-    # velocity channels. Same toggles as the wire-contract halves, because they are
-    # the same spaces; separate COMPs because they read a different input.
-    "hands/coords/dv_world": ("Coordstx",),
-    "hands/coords/dv_pixels": ("Coordspx",),
+    "coords/lm_world": ("Coordstx",),
+    "coords/lm_pixels": ("Coordspx",),
 }
 
 # `latches` READS `temporal`'s second output - the liveness/presence gate that
@@ -252,8 +247,8 @@ COOK_VETOED = {
 # INSIDE the TRIM SCOPE markers below, because the generated DAT needs it and the
 # DAT gets that block verbatim. `_check_keypoint_names()` holds the two together.
 COOK_SUPPRESSED = {
-    "face/coords/lm_world": ("Facekeypoints",),
-    "face/coords/lm_pixels": ("Facekeypoints",),
+    "coords/lm_world": ("Facekeypoints",),
+    "coords/lm_pixels": ("Facekeypoints",),
 }
 
 
@@ -267,6 +262,24 @@ COOK_SUPPRESSED = {
 TRIM_CHOP = "trim_empty"
 TRIM_TOGGLE = "Deleteempty"
 MERGE_CHOP = "merge_streams"
+
+# THE SECOND TRIM, and the reason there are two.
+#
+# `trim_empty` removes the channels of groups that are not COOKING, and it has to be
+# LAST in the chain: a frozen COMP HOLDS its channels rather than dropping them, so a
+# coords half frozen by `Coordstx` leaves stale coordinates on the output unless
+# something downstream removes them (DESIGN.md 2.15).
+#
+# `early_trim` removes the channels a TOGGLE has asked for - `Fingertipsonly`,
+# `Handbox`, `Onefaceonly`, `Facekeypoints` - and it has to be FIRST, before `coords`.
+# What it drops is never converted into a coordinate space, which is what turns those
+# toggles from list-shorteners into savings. Before 2026-08-24 they trimmed at the
+# master, after the composition, which is the thing the user asked about.
+#
+# A DELETE CHOP and not a Select, because its list is PATTERNS. Measured 2026-08-24:
+# both operators cost list length x input channels, and the Delete's constant is only
+# worse when the list is literal names - with patterns it wins (BENCHMARKS.md).
+EARLY_CHOP = "early_trim"
 
 # Channels the output never carries, whatever the toggles say. Asked for by the user
 # 2026-08-22, and the reason is the same one the trim exists for: a beginner reading
@@ -368,6 +381,71 @@ ONEFACE_TOGGLE = "Onefaceonly"
 SECOND_FACE_CHANNELS = ("f[1-9]_*",)
 
 
+def trim_input(comp):
+    """The operator `trim_empty` reads, which is where its keep list comes from.
+
+    NOT `merge_streams` any more, and that is the correction that made the trim work
+    again after 2026-08-24: `coords` sits between them, so the composed `_tx`/`_px`
+    channels only exist downstream of the merge. A keep list built from the merge
+    would name none of them, and a Select fails CLOSED - the entire coordinate output
+    would vanish, silently, which is exactly the failure mode this list has.
+
+    Falls back to `merge_streams` so a half-built chain still produces a list.
+    """
+    trim = comp.op(TRIM_CHOP)
+    if trim is not None:
+        for connector in trim.inputConnectors:
+            for connection in connector.connections:
+                return connection.owner
+    return comp.op(MERGE_CHOP)
+
+
+def removing_patterns(comp):
+    """The channel patterns the OUTPUT-SHAPING toggles ask to remove. Returns a list.
+
+    One function, two consumers, and that is the point: `early_trim` deletes these
+    BEFORE `coords` composes anything, and `_trim_keep` still excludes them from the
+    keep list afterwards. The second pass is redundant while `early_trim` is engaged
+    and is what keeps the output correct when it is bypassed - a keep list fails
+    CLOSED, so leaving them in would put them back.
+
+    A parameter that is not there yet means "leave it alone" rather than an exception
+    on a half-built network.
+    """
+    patterns = []
+    tips = getattr(comp.par, FINGERTIPS_TOGGLE, None)
+    if tips is not None and tips.eval():
+        patterns += ["h?_%s_*" % joint for joint in NON_TIP_JOINTS]
+    box = getattr(comp.par, HANDBOX_TOGGLE, None)
+    if box is not None and not box.eval():
+        patterns += list(HANDBOX_CHANNELS)
+    # The face swap. Both directions are explicit: whichever set is not wanted is
+    # named, so neither can survive by being forgotten.
+    points = getattr(comp.par, KEYPOINTS_TOGGLE, None)
+    if points is not None:
+        patterns += list(FACE_LANDMARK_CHANNELS if points.eval()
+                         else KEYPOINT_CHANNELS)
+    one_face = getattr(comp.par, ONEFACE_TOGGLE, None)
+    if one_face is not None and one_face.eval():
+        patterns += list(SECOND_FACE_CHANNELS)
+    return patterns
+
+
+def _apply_early_trim(comp):
+    """Write `early_trim`'s scope from the toggles, or bypass it. Returns the list.
+
+    BYPASSED WHEN THERE IS NOTHING TO REMOVE, because a Delete CHOP with an empty
+    scope is not free and a bypassed one is (0.0003 ms, DESIGN.md 2.15).
+    """
+    node = comp.op(EARLY_CHOP)
+    if node is None:
+        return []
+    patterns = removing_patterns(comp)
+    node.par.delscope = " ".join(patterns)
+    node.bypass = not patterns
+    return patterns
+
+
 def _trim_keep(comp, wanted):
     """The channels to KEEP on the single output, in merge order. Returns a list.
 
@@ -406,7 +484,7 @@ def _trim_keep(comp, wanted):
         if out is None:
             continue
         drop.update(chan.name for chan in out.chans())
-    merged = comp.op(MERGE_CHOP)
+    merged = trim_input(comp)
     if merged is None:
         return None
     names = [chan.name for chan in merged.chans()]
@@ -417,22 +495,7 @@ def _trim_keep(comp, wanted):
     # The two output-only toggles, read off the COMP the way `_apply_trim` reads
     # `Deleteempty`: a parameter that is not there yet means "leave it alone"
     # rather than an exception on a half-built network.
-    optional = []
-    tips = getattr(comp.par, FINGERTIPS_TOGGLE, None)
-    if tips is not None and tips.eval():
-        optional += ["h?_%s_*" % joint for joint in NON_TIP_JOINTS]
-    box = getattr(comp.par, HANDBOX_TOGGLE, None)
-    if box is not None and not box.eval():
-        optional += list(HANDBOX_CHANNELS)
-    # The face swap. Both directions are explicit: whichever set is not wanted is
-    # named, so neither can survive by being forgotten.
-    points = getattr(comp.par, KEYPOINTS_TOGGLE, None)
-    if points is not None:
-        optional += list(FACE_LANDMARK_CHANNELS if points.eval()
-                         else KEYPOINT_CHANNELS)
-    one_face = getattr(comp.par, ONEFACE_TOGGLE, None)
-    if one_face is not None and one_face.eval():
-        optional += list(SECOND_FACE_CHANNELS)
+    optional = removing_patterns(comp)
     if optional:
         drop.update(name for name in names
                     if any(fnmatchcase(name, pattern) for pattern in optional))
@@ -652,6 +715,8 @@ def _apply_gating(comp):
         group.allowCooking = enabled
     # LAST, after every allowCooking above: `_trim_keep` reads the groups' channels,
     # and a group cooked for the first time only has them once that has happened.
+    # BEFORE the keep list is built, because it changes what reaches the trim.
+    _apply_early_trim(comp)
     trim = comp.op(TRIM_CHOP)
     if trim is not None:
         toggle = getattr(comp.par, TRIM_TOGGLE, None)
@@ -776,6 +841,13 @@ def _apply_trim(comp, wanted, verbose=False):
     Parameter Execute DAT on every change, the same pattern `allowCooking` uses.
     """
     report = []
+    # BEFORE the keep list is built, because it changes what reaches the trim.
+    early = _apply_early_trim(comp)
+    if comp.op(EARLY_CHOP) is not None:
+        report.append("%s: %s"
+                      % (EARLY_CHOP,
+                         "%d pattern(s), before `coords`" % len(early) if early
+                         else "BYPASSED, no output-shaping toggle is removing"))
     trim = comp.op(TRIM_CHOP)
     if trim is None:
         return ["%s: MISSING" % TRIM_CHOP]
@@ -807,7 +879,7 @@ def _apply_trim(comp, wanted, verbose=False):
     house = comp.op("housekeeping_sel")
     if house is not None:
         house.par.channames = " ".join(_housekeeping_names(comp))
-    merged = comp.op(MERGE_CHOP)
+    merged = trim_input(comp)
     total = 0 if merged is None else len(merged.chans())
     if keep is None:
         report.append("%s: BYPASSED, nothing to trim (%d channels out)"
@@ -1132,6 +1204,28 @@ def main():
         print("FAIL no COMP at %s - run tools/td_build_vision.py first"
               % (MASTER_PATH if master is None else COMP_PATH))
         return
+
+    # `early_trim`, created here because this script owns the toggles that fill it.
+    # A Delete CHOP: its list is PATTERNS, and both operators cost list length x
+    # input channels - the Delete's constant is only the worse one when the list is
+    # literal names (BENCHMARKS.md, measured 2026-08-24).
+    from appletd.td_layout import master_xy, rewire_master_chain
+
+    early = master.op(EARLY_CHOP)
+    if early is None:
+        early = master.create(td.deleteCHOP, EARLY_CHOP)
+        early.par.delchannels = True
+        early.par.delsamples = False
+        early.par.select = "byname"
+        early.par.discard = "scoped"
+        early.bypass = True
+    early.nodeX, early.nodeY = master_xy(EARLY_CHOP)
+    early.color = (0.5, 0.32, 0.32)
+    early.comment = ("the OUTPUT-SHAPING toggles, applied BEFORE coords composes "
+                     "anything. tools/td_add_groups.py writes the scope.")
+    wired = rewire_master_chain(master)
+    print("0. chain: %s" % " -> ".join(
+        [pair[0] for pair in wired] + [wired[-1][1]] if wired else ["(nothing)"]))
 
     # The page and the gating both belong to the MASTER: the toggles are controls,
     # and `allowCooking` is written on groups that live inside a stream.

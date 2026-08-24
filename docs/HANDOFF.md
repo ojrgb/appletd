@@ -31,9 +31,12 @@ entry is what went wrong on the way.
 
     /project1/appletd            every parameter, SEVEN pages, the capture control
 
-      hands_osc 10000  ->  hands  --+                505 channels
-      pose_osc  10001  ->  pose   --+-> merge_streams -> trim_empty -> out1  (CHOP)
-      face_osc  10002  ->  face   --+   2,041 chans  |  258 kept
+      hands_osc 10000  ->  hands  --+
+      pose_osc  10001  ->  pose   --+-> merge_streams -> early_trim -> coords
+      face_osc  10002  ->  face   --+        -> screen_only -> trim_empty -> out1
+
+      SIX STAGES since 2026-08-24, BUILD_PLAN step 25: `coords` and `screen_only`
+      moved out of the three streams to one group each at the master.
                                                      +-> housekeeping  10 chans
       status                                   the sidecar's own sc_* channels
 

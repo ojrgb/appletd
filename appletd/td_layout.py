@@ -227,13 +227,17 @@ def rewire_master_chain(master: Any) -> list[tuple[str, str]]:
 
     Traps: `inputConnectors[0].connect()` and NOT `.inputs`, because `op.inputs` goes
            stale and has lied about this exact question before (DESIGN.md 2.11).
+           And a COMP is connected by its OUTPUT CONNECTOR, not by itself - passing
+           the COMP raises `Invalid number or type of arguments`, which is what
+           `coords` becoming a baseCOMP at the master turned up on its first run.
     """
     present = [name for name in MASTER_CHAIN if master.op(name) is not None]
     wired: list[tuple[str, str]] = []
     for upstream, downstream in chain_pairs(present):
         source = master.op(upstream)
         target = master.op(downstream)
-        target.inputConnectors[0].connect(source)
+        target.inputConnectors[0].connect(
+            source.outputConnectors[0] if source.isCOMP else source)
         wired.append((upstream, downstream))
     return wired
 

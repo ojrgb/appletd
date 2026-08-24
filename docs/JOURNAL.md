@@ -4494,3 +4494,56 @@ effect is not a return value.
 **What it cost in practice**: about forty minutes, most of it spent believing the
 network rather than the report — the coords builder said "24 channels short" on the
 first run and that was the whole diagnosis, three calls before I read it properly.
+
+---
+
+## Milestone — one `coords` at the master, and what a merge actually costs
+2026-08-24
+
+**Built.** `coords` and `screen_only` moved out of the three streams to one of each at
+the master, and `early_trim` joined them. Six stages where there were three:
+
+    merge_streams -> early_trim -> coords -> screen_only -> trim_empty -> out1
+
+**Correct**: 22 composed channels checked against hand-computed values across all
+three streams and both composition rules, worst delta 1.14e-05 - float32 on values up
+to 700. **Simpler**: 77 operators in four halves where there were 122 in ten, one set
+of branches instead of three, and the `dv_*` halves gone entirely because a derived
+position is just a position once the streams are merged.
+
+**And 1.44 ms more expensive**, 3.4519 -> 4.8862 ms with 66 FEWER operators cooking.
+
+**The finding, and it is the one worth keeping: a channel operator's cost scales with
+its INPUT WIDTH as well as its list length.** Every use of DESIGN 2.15's cost model so
+far held the input constant and argued about the list. This held the list constant and
+changed the input. Per stream, `pose/screen_only` saw 275 channels and
+`face/screen_only` saw 1,131; merged, every stage sees all 1,783. The three Deletes did
+20,864 term-channel comparisons between them, the one does 74,886.
+
+**The scale the fallback reaches at that width was the shock.** `screen_only`'s first
+merged build had no verified pattern and used the literal list - 564 names over 1,783
+channels, **4.4211 ms a frame**, more than the entire component had cost before the
+move. A 38-term merged candidate brought it to 1.06. Per-stream the same fallback had
+never cost more than 0.49, which is why nobody had noticed the width term.
+
+**Three TouchDesigner behaviours, all found by a builder failing loudly:**
+
+A COMP is connected by its OUTPUT CONNECTOR, not by itself - `connect(some_comp)`
+raises - and a COMP has no `.chans()`; they live on its `out1`. Both showed up the
+moment `coords` became a baseCOMP at the master rather than inside a stream.
+
+**A Select CHOP emits in PATTERN-TERM order, not input order.** With one term - every
+pattern the per-stream builder ever used - the two are identical. The merged position
+pattern has twelve, so `h?_w*_x h?_t*_x ...` gave `h0_wrist_tx, h1_wrist_tx,
+h0_thumb_cmc_tx` where the contract order is `h0_wrist, h0_thumb_cmc, h0_thumb_mp`.
+Nothing was wrong; the sequence was. The rename check compares multisets now.
+
+**A build-time check has to compare against what ARRIVED, not against the contract.**
+`early_trim` removes channels before `coords` by design, so checking a branch against
+`spaces`' full list reported four failures on a network that was right - the
+crying-wolf shape this project keeps deleting. Every count in that builder is now
+against the live input, and it prints how many contract channels were trimmed away.
+
+**The trade, stated as one**: 45 fewer operators and one set of branches instead of
+three, for 1.44 ms, on a change whose stated goal was explicitly not milliseconds.
+Reverting is one `git revert`; nothing else depends on the merge.

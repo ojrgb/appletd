@@ -826,6 +826,15 @@ OTHER_BUILDERS_OWN = {
     "groups_callbacks": "td_add_groups.py",
     "lat_threshold_callbacks": "td_add_latches.py",
     "screenspace_callbacks": "td_add_screenspace.py",
+    # THE THREE CHAIN STAGES THIS SCRIPT DOES NOT OWN, added 2026-08-24 with
+    # BUILD_PLAN step 25. `coords` moved to the master from the three streams,
+    # `screen_only` came with it, and `early_trim` is new. Destroying any of them
+    # here would leave a gap in `MASTER_CHAIN` that only the owning builder can
+    # fill - and `td_rebuild.py` does not run them after a master rebuild.
+    "coords": "td_add_coords.py",
+    "screen_only": "td_add_screenspace.py",
+    "screen_only_notes": "td_add_screenspace.py",
+    "early_trim": "td_add_groups.py",
     "profiler": "tools/td_profile.py",
     "seg_mask": "td_add_segmentation.py",
     "seg_fit": "td_add_segmentation.py",
@@ -1025,7 +1034,7 @@ def main():
         STATUS_PREFIX,
         port_for,
     )
-    from appletd.td_layout import COL_W, master_xy, stream_row
+    from appletd.td_layout import COL_W, master_xy, rewire_master_chain, stream_row
 
     parent = op(PARENT_PATH)
     if parent is None:
@@ -1604,7 +1613,12 @@ def main():
         empty.bypass = True
     _at(empty, master_xy("trim_empty"), keep_layout, empty_existed)
     empty.color = (0.5, 0.32, 0.32)
-    empty.inputConnectors[0].connect(merge)
+    # NOT wired to the merge directly any more. Four builders own a stage of the
+    # master's data path since 2026-08-24, so the order lives in
+    # `appletd.td_layout.MASTER_CHAIN` and every one of them asks for the whole chain
+    # to be rewired after creating its own operator. Wiring a neighbour by name here
+    # would be right only for the build order this script was written against.
+    rewire_master_chain(comp)
 
     # The housekeeping, which the output deliberately does NOT carry: `sc_*`, `seq`
     # and `age_ms`. Asked for 2026-08-22 - they are diagnostics, and a beginner
@@ -1636,7 +1650,9 @@ def main():
     _at(out, master_xy("out1"), keep_layout, out_existed)
     # PRESERVED, never recreated - an Out CHOP IS the COMP's output connector, and
     # destroying it disconnects whatever the project had wired to it (DESIGN.md 2.11).
-    out.inputConnectors[0].connect(empty)
+    # `rewire_master_chain` connects the whole path in MASTER_CHAIN order,
+    # including this one - `out1` reads whatever the last stage turns out to be.
+    rewire_master_chain(comp)
 
     # -- retire the two outputs this replaces ------------------------------
     # EVERY consumer on EVERY output connector is captured first and reconnected to

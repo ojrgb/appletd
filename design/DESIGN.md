@@ -1537,6 +1537,37 @@ were the exception because a TouchDesigner side effect is not a return value.
 
 ---
 
+### 2.26 A channel operator's cost scales with its INPUT WIDTH — measured 2026-08-24
+
+§2.15 established that a Select or Delete costs list length x input channels, and
+every use of that since has held the input constant and argued about the list. Moving
+`coords` and `screen_only` from the three streams to one master group (BUILD_PLAN
+step 25) held the LIST roughly constant and changed the input, and the other half of
+the model showed up.
+
+```
+                       per stream                 merged
+screen_only    0.389 ms over 275/635/1,131    1.0614 ms over 1,783
+coords         ~1.98 ms                        2.3979 ms
+whole COMP     3.4519 ms, 275 cooking          4.8862 ms, 209 cooking
+```
+
+The three Deletes did 20,864 term-channel comparisons between them; the one does
+74,886. Nothing got slower per comparison - there are simply more of them, because
+every stage now sees every stream's channels rather than its own.
+
+**The scale it reaches is worth knowing before designing anything else this way.**
+`screen_only`'s first merged build fell through to a literal list: **564 names over
+1,783 channels, 4.4211 ms a frame**, more than the entire component had cost before
+the move. A 38-term pattern brought it to 1.06. Per-stream, the same fallback had
+never cost more than 0.49.
+
+**So a merge is not free even when it computes the same channels.** The 45 operators
+and two sets of duplicated branches it removed were worth 1.44 ms in this case, which
+was a deliberate trade and is recorded as one.
+
+---
+
 ## 3. Traps — all of these cost real time in the spike
 
 **GIL starvation from a polling main thread.** A tight
