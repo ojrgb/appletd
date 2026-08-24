@@ -947,6 +947,27 @@ def _page(comp, name="Attributes"):
            name. And `appendToggle`/`appendMenu` on an existing parameter reset it,
            so the current values are read first and written back.
     """
+    # SNAPSHOT EVERY CUSTOM PARAMETER, AND RESTORE ANYTHING THAT MOVED.
+    #
+    # MEASURED THE HARD WAY, twice on 2026-08-24. Running this function came back
+    # with `Handbox` switched off and `Facekeypoints` and `Onefaceonly` switched ON -
+    # three toggles no code here writes, none of them in a preset, all three on the
+    # same page as a parameter that had just been created or destroyed. The first fix
+    # snapshotted only around the `RETIRED_PARS` destroy loop; it happened again on a
+    # run that retired nothing, so the destroy was not the trigger.
+    #
+    # THE MECHANISM IS NOT ESTABLISHED and nothing here claims one. What is
+    # established is that touching a custom page can move a value on it, and that a
+    # wrong toggle is completely silent - it looks exactly like a deliberate setting,
+    # and it cost this project a session's worth of confusion twice in one day.
+    #
+    # So: read everything before, write back anything that changed, and PRINT it.
+    # Only values that existed before are restored, so a parameter created below
+    # keeps the default it was given. The two callers that legitimately change a
+    # value - a new toggle's `val`, a new menu's `val` - both act on names that were
+    # not in the snapshot.
+    was = {par.name: par.eval() for par in comp.customPars}
+
     page = None
     for existing in comp.customPages:
         if existing.name == name:
@@ -973,28 +994,11 @@ def _page(comp, name="Attributes"):
     # RETIRED FIRST, so a name that is being retired cannot also be relabelled or
     # counted as existing further down.
     #
-    # AND SNAPSHOT EVERY VALUE AROUND IT, because on 2026-08-24 destroying
-    # `Lmcoordstx` and `Lmcoordspx` came back with `Handbox` switched off and
-    # `Facekeypoints` and `Onefaceonly` switched ON - three toggles on the same page
-    # that no code in this file writes, and that no preset covers. The mechanism was
-    # not established and this does not claim one; what it does is make the damage
-    # impossible to keep. A retirement is rare and a wrong toggle is silent, so the
-    # check is worth its cost every build.
-    before = {par.name: par.eval() for par in comp.customPars}
-    retired = []
     for name in RETIRED_PARS:
         for par in list(comp.customPars):
             if par.name == name:
                 print("   retired %s (was on the %s page)" % (name, par.page.name))
                 par.destroy()
-                retired.append(name)
-    if retired:
-        for par in comp.customPars:
-            was = before.get(par.name)
-            if was is not None and par.eval() != was:
-                print("   RESTORED %s: destroying %s changed it from %r to %r"
-                      % (par.name, ", ".join(retired), was, par.eval()))
-                par.val = was
 
     existing = {par.name: par for par in comp.customPars}
 
@@ -1088,6 +1092,19 @@ def _page(comp, name="Attributes"):
             # exactly the kind of confident wrong number this project keeps removing.
             par.label = label
         par.default = default
+
+    # LAST, after every append, destroy, relabel and default above.
+    moved = []
+    for par in comp.customPars:
+        before = was.get(par.name)
+        if before is not None and par.eval() != before:
+            par.val = before
+            moved.append("%s %r -> %r" % (par.name, before, par.eval()))
+    if moved:
+        print("   RESTORED %d parameter(s) this pass moved without being written:"
+              % len(moved))
+        for line in moved:
+            print("      " + line)
     return page
 
 

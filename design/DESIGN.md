@@ -1516,17 +1516,20 @@ Writing the value back does not help - §2.17 says so and this confirmed it, bec
 the queued callback outlives the restore. **Only assign when the list actually
 differs.** It almost never does.
 
-**Destroying a custom parameter disturbed three others on the same page.** After
-`RETIRED_PARS` destroyed the two collapsed toggles, `Handbox` had switched OFF and
-`Facekeypoints` and `Onefaceonly` had switched ON - three toggles no code in the
-builder writes, in no preset, on the same page as the two destroyed. **The mechanism
-is NOT established** and nothing here claims one; it is recorded because it happened
-and because the failure is silent - a wrong toggle looks exactly like a deliberate
-setting.
+**Touching a custom page moved values on it, twice.** After `RETIRED_PARS` destroyed
+the two collapsed toggles, `Handbox` had switched OFF and `Facekeypoints` and
+`Onefaceonly` had switched ON - three toggles no code in the builder writes, in no
+preset. The first fix snapshotted values only around the destroy loop. **It happened
+again on a run that retired nothing**, which rules the destroy out as the trigger.
 
-`td_add_groups._page` now snapshots every custom parameter value before a retirement
-and writes back anything that changed, printing what it restored. A retirement is
-rare and this is cheap; it turns an invisible failure into a line in the build report.
+**The mechanism is NOT established** and nothing here claims one. What is established:
+running `_page` can move a value on a page it touched, and the failure is completely
+silent - a wrong toggle looks exactly like a deliberate setting, and it cost a
+session's worth of confusion twice in one day.
+
+So `_page` now snapshots EVERY custom parameter at entry and writes back anything that
+changed at exit, printing each one. Only names present in the snapshot are restored, so
+a parameter created during the pass keeps the default it was given.
 
 **The shape both share**: neither parameter was written by the code that moved it.
 Everything else in these builders is idempotent and says what it did, and these two
