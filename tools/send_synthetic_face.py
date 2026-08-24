@@ -15,7 +15,7 @@
     port interleave into one set of channels, which looks like data rather than a
     fault. `--force` overrides.
 
-WHAT IT IS FOR. Proving the face plumbing with the camera left alone - all 371
+WHAT IT IS FOR. Proving the face plumbing with the camera left alone - all 387
 channels, their names, the port, the left-to-right slot rule, the DEGREES convention
 on roll/yaw/pitch, and since the constellation was measured, every one of the 348
 landmark channels.

@@ -26,6 +26,7 @@ import pytest
 from appletd.face_types import (
     BLANK_FACE,
     CONSTELLATION_DISTINCT_POINTS,
+    FACE_KEYPOINTS,
     FACE_REGION_NAMES,
     FACE_REGIONS,
     FACE_SCALARS,
@@ -37,7 +38,10 @@ from appletd.face_types import (
     blank_face_frame,
     face_channel_names,
     face_channel_values,
+    face_keypoints,
+    nose_tip_point,
     order_faces,
+    region_center,
 )
 from appletd.types import Confidence, NormX, NormY
 
@@ -138,14 +142,15 @@ def test_every_region_has_a_distinct_accessor() -> None:
 # The channel list
 # ---------------------------------------------------------------------------
 def test_the_channel_count_is_what_the_table_implies() -> None:
-    """371 with the landmarks published: 3 frame scalars, 10 per face, and 87 region
-    slots x 2 axes x 2 faces. MEASURED at 12,208 bytes on the wire - 75% of a 16 KB
-    datagram, which makes this stream the size constraint and MAX_FACES = 2 the
-    ceiling for a single bundle (appletd/osc.py)."""
+    """387 with the landmarks published: 3 frame scalars, 10 per face, 4 key points
+    and 87 region slots, both x 2 axes x 2 faces. MEASURED at 12,640 bytes on the
+    wire - 77% of a 16 KB datagram, which makes this stream the size constraint and
+    MAX_FACES = 2 the ceiling for a single bundle (appletd/osc.py)."""
     assert N_FACE_CHANNELS == len(face_channel_names())
     scalars = 3 + MAX_FACES * len(FACE_SCALARS)
     if LANDMARKS_PUBLISHED:
-        assert N_FACE_CHANNELS == scalars + MAX_FACES * REGION_SLOT_TOTAL * 2 == 371
+        points = MAX_FACES * (len(FACE_KEYPOINTS) + REGION_SLOT_TOTAL) * 2
+        assert N_FACE_CHANNELS == scalars + points == 387
     else:
         assert N_FACE_CHANNELS == scalars == 23
 
@@ -239,3 +244,137 @@ def test_empty_slots_share_one_frozen_object() -> None:
     """No per-frame allocation on the capture thread."""
     assert order_faces([])[0] is BLANK_FACE
     assert blank_face_frame().faces[1] is BLANK_FACE
+
+
+# ---------------------------------------------------------------------------
+# The four key points
+#
+# Three of the four are not points Vision publishes, so each of them is a small
+# piece of arithmetic that can be silently wrong: a mouth centre averaged over the
+# wrong ring, or a nose tip taken from the wrong index, both look entirely plausible
+# on screen. These check the arithmetic against hand-built landmark tables rather
+# than against a face.
+# ---------------------------------------------------------------------------
+def _landmarks(**regions: tuple[tuple[float, float], ...]
+               ) -> tuple[tuple[str, tuple[tuple[float, float], ...]], ...]:
+    """A landmarks tuple in `Face.landmarks` shape, from keyword regions."""
+    return tuple(regions.items())
+
+
+def _face_with(**regions: tuple[tuple[float, float], ...]) -> Face:
+    return dataclasses.replace(BLANK_FACE, found=True,
+                               landmarks=_landmarks(**regions))
+
+
+def test_the_nose_tip_is_the_point_all_three_regions_carry() -> None:
+    """The whole identification rule, and the reason no index is pinned anywhere:
+    MEASURED 2026-08-21, exactly one point belongs to `nose`, `nose_crest` and
+    `median_line` at once (DESIGN.md 2.12)."""
+    tip = (0.5, 0.38)
+    found = nose_tip_point(_landmarks(
+        nose=((0.4, 0.34), tip, (0.6, 0.34)),
+        nose_crest=((0.5, 0.6), (0.5, 0.5), tip),
+        median_line=((0.5, 0.9), tip, (0.5, 0.1))))
+    assert found == tip
+
+
+def test_the_nose_tip_is_published_unrounded() -> None:
+    """The rounding is how the point is IDENTIFIED, not what is published. A tip
+    quantised to 1e-6 while the 348 channels beside it are not would be a second
+    precision convention for one channel."""
+    tip = (0.5000004999, 0.3800002001)
+    found = nose_tip_point(_landmarks(
+        nose=(tip,), nose_crest=(tip,), median_line=(tip,)))
+    assert found == tip
+
+
+def test_a_nose_tip_shared_by_only_two_regions_is_not_one() -> None:
+    """A point in two regions is one of the NINE ordinary duplicates. Accepting it
+    would publish a nostril and call it a tip."""
+    assert nose_tip_point(_landmarks(
+        nose=((0.5, 0.38),),
+        nose_crest=((0.5, 0.38),),
+        median_line=((0.5, 0.9), (0.5, 0.1)))) is None
+
+
+def test_two_triple_shared_points_are_refused() -> None:
+    """Two candidates is as wrong as none: the assumption this is built on - one
+    triple-shared point - would no longer hold, and picking either would be a
+    guess."""
+    a, b = (0.5, 0.38), (0.5, 0.40)
+    assert nose_tip_point(_landmarks(
+        nose=(a, b), nose_crest=(a, b), median_line=(a, b))) is None
+
+
+def test_a_missing_region_gives_no_nose_tip() -> None:
+    """`_region_points` returns () for a region this Vision does not have, and an
+    empty region must not silently become an intersection of the other two."""
+    assert nose_tip_point(_landmarks(
+        nose=((0.5, 0.38),), nose_crest=((0.5, 0.38),), median_line=())) is None
+    assert nose_tip_point(_landmarks(nose=((0.5, 0.38),))) is None
+
+
+def test_the_region_centre_is_the_mean_of_its_points() -> None:
+    """Not the centre of its bounding box: an opening mouth moves one side only, and
+    a box centre would follow the extreme rather than the aperture."""
+    assert region_center(_landmarks(inner_lips=((0.0, 0.0), (1.0, 0.5))),
+                         "inner_lips") == (0.5, 0.25)
+    assert region_center(_landmarks(inner_lips=()), "inner_lips") is None
+    assert region_center(_landmarks(), "inner_lips") is None
+
+
+def test_the_pupils_are_taken_as_the_eye_centres_untouched() -> None:
+    """`leftPupil` and `rightPupil` are the only SINGLE-POINT regions Vision gives,
+    so each already IS a centre. Averaging one would be arithmetic for its own
+    sake."""
+    face = _face_with(left_pupil=((0.7, 0.64),), right_pupil=((0.3, 0.64),))
+    eye_left, eye_right, _tip, _mouth = face_keypoints(face)
+    assert eye_left == (0.7, 0.64)
+    assert eye_right == (0.3, 0.64)
+
+
+def test_every_key_point_a_face_cannot_supply_reads_zero() -> None:
+    """Never omitted: a short list would shift every later channel onto the wrong
+    data, which is the failure the fixed-list discipline here exists to prevent."""
+    assert face_keypoints(BLANK_FACE) == ((0.0, 0.0),) * len(FACE_KEYPOINTS)
+    assert len(face_keypoints(_face_with())) == len(FACE_KEYPOINTS)
+    assert face_keypoints(_face_with(left_pupil=((0.7, 0.6),))) == (
+        (0.7, 0.6), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0))
+
+
+def test_the_key_point_channels_carry_the_key_point_values() -> None:
+    """Names and values are built in two separate loops, so the thing worth checking
+    is that the second lands where the first says - by INDEX, not by count."""
+    face = _face_with(left_pupil=((0.7, 0.64),), right_pupil=((0.3, 0.64),),
+                      inner_lips=((0.4, 0.2), (0.6, 0.2)))
+    frame = dataclasses.replace(blank_face_frame(),
+                                faces=(face, BLANK_FACE))
+    names = face_channel_names()
+    values = face_channel_values(frame, 0.0, 1)
+    channels = dict(zip(names, values, strict=False))
+    assert channels["f0_eye_left_x"] == 0.7
+    assert channels["f0_eye_right_x"] == 0.3
+    assert channels["f0_mouth_x"] == 0.5
+    assert channels["f0_nose_tip_x"] == 0.0
+    assert channels["f1_eye_left_x"] == 0.0
+
+
+def test_the_key_points_come_before_the_regions() -> None:
+    """Order is the contract. A project reading the list should meet four points
+    before it meets 174, and `spaces.compact_pattern` compares ORDERED lists - a
+    reordering here would silently defeat every pattern it verifies."""
+    names = list(face_channel_names())
+    first_region = names.index("f0_face_contour_00_x")
+    for point in FACE_KEYPOINTS:
+        assert names.index("f0_%s_x" % point) < first_region
+
+
+def test_no_key_point_name_collides_with_a_landmark_pattern() -> None:
+    """`f0_*_[0-9][0-9]_x` is what separates the 348 landmarks from the key points in
+    every Select CHOP this contract feeds. It works because a landmark carries a
+    two-digit point index and a key point carries none."""
+    from fnmatch import fnmatchcase
+    for point in FACE_KEYPOINTS:
+        for axis in ("x", "y"):
+            name = "f0_%s_%s" % (point, axis)
+            assert not fnmatchcase(name, "f0_*_[0-9][0-9]_%s" % axis), name

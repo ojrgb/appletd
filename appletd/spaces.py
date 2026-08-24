@@ -48,7 +48,7 @@ from collections.abc import Iterable, Sequence
 from fnmatch import fnmatchcase
 from typing import Final, NamedTuple
 
-from appletd.face_types import FACE_REGION_NAMES, face_channel_names
+from appletd.face_types import FACE_KEYPOINTS, FACE_REGION_NAMES, face_channel_names
 from appletd.pose_types import pose_channel_names
 from appletd.streams import (
     STREAM_FACE,
@@ -68,6 +68,12 @@ ROLE_EXTENT_X: Final = "extent_x"
 ROLE_EXTENT_Y: Final = "extent_y"
 ROLE_ANGLE: Final = "angle"
 ROLE_BOX_RELATIVE: Final = "box_relative"
+# The four key points, which are box-relative in exactly the same way and get a
+# SEPARATE role for one reason: cost. The 348 landmark channels are the most
+# expensive thing in the component and live behind `Lmcoordstx`; the 16 key point
+# channels are a fiftieth of that and should not share a toggle with them. A
+# separate role is what lets the two land in different COMPs.
+ROLE_BOX_KEYPOINT: Final = "box_keypoint"
 ROLE_SCALAR: Final = "scalar"
 
 # Which roles the one-euro filter touches: everything continuous and physical.
@@ -75,7 +81,7 @@ ROLE_SCALAR: Final = "scalar"
 # thing it is gating, and `found` is a boolean whose midpoint means nothing.
 SMOOTHED_ROLES: Final[frozenset[str]] = frozenset({
     ROLE_POSITION_X, ROLE_POSITION_Y, ROLE_EXTENT_X, ROLE_EXTENT_Y,
-    ROLE_ANGLE, ROLE_BOX_RELATIVE,
+    ROLE_ANGLE, ROLE_BOX_RELATIVE, ROLE_BOX_KEYPOINT,
 })
 
 # Which roles get world and pixel companions. Angles and box-relative points are
@@ -99,6 +105,12 @@ _SUFFIXES: Final[dict[str, tuple[str, str, str]]] = {
 # `f0_roll` gives a suffix-matcher nothing to go on.
 _FACE_ANGLES: Final = ("_roll", "_yaw", "_pitch")
 
+# The key point channel endings, built from the contract rather than written out -
+# `face_types.py` owns which four points there are.
+_FACE_KEYPOINT_SUFFIXES: Final[tuple[str, ...]] = tuple(
+    "_%s_%s" % (point, axis)
+    for point in FACE_KEYPOINTS for axis in ("x", "y"))
+
 
 def _role_of(stream: str, name: str) -> str:
     """One channel's role. The single place any of this is decided."""
@@ -110,6 +122,11 @@ def _role_of(stream: str, name: str) -> str:
                     "w": ROLE_EXTENT_X, "h": ROLE_EXTENT_Y}[name[-1]]
         if name.endswith(_FACE_ANGLES):
             return ROLE_ANGLE
+        # Before the landmark rule, and it cannot collide with it: every landmark
+        # name carries a two-digit point index (`f0_nose_00_x`) and no key point
+        # does (`f0_nose_tip_x`).
+        if name.endswith(_FACE_KEYPOINT_SUFFIXES):
+            return ROLE_BOX_KEYPOINT
         # A landmark point: `f0_left_eye_03_x`. Normalised to the BOX, not the
         # image (DESIGN.md 2.12), so it is emphatically not a position.
         if any("_%s_" % region in name for region in FACE_REGION_NAMES):
@@ -159,7 +176,7 @@ def names_by_role(stream: str) -> dict[str, list[str]]:
     grouped: dict[str, list[str]] = {
         role: [] for role in (ROLE_POSITION_X, ROLE_POSITION_Y, ROLE_EXTENT_X,
                               ROLE_EXTENT_Y, ROLE_ANGLE, ROLE_BOX_RELATIVE,
-                              ROLE_SCALAR)}
+                              ROLE_BOX_KEYPOINT, ROLE_SCALAR)}
     for name, role in channel_roles(stream).items():
         grouped[role].append(name)
     return grouped
@@ -344,8 +361,8 @@ def transform_branches(stream: str) -> list[Branch]:
 
 
 def box_branches(stream: str) -> list[BoxBranch]:
-    """Every coordinate branch for BOX-RELATIVE channels, one per (subject, axis,
-    space). Empty for hands and pose, so a caller needs no special case.
+    """Every coordinate branch for the 348 LANDMARK channels, one per (subject,
+    axis, space). Empty for hands and pose, so a caller needs no special case.
 
     Why per subject: each point needs ITS OWN face's box, and a Math CHOP does NOT
               broadcast a one-channel input across many - MEASURED, it concatenated
@@ -354,8 +371,26 @@ def box_branches(stream: str) -> list[BoxBranch]:
               a per-face branch needs no per-channel second operand at all.
     Ref:      DESIGN.md 2.12 (`normalizedPoints`), 7, docs/ATTRIBUTES.md.
     """
+    return _box_branches(stream, ROLE_BOX_RELATIVE)
+
+
+def keypoint_branches(stream: str) -> list[BoxBranch]:
+    """The same thing for the four KEY POINTS. Empty for hands and pose.
+
+    Contract: identical arithmetic to `box_branches` - a key point is normalised to
+              the face's box exactly as a landmark is - and a separate function only
+              so the two can land in different COMPs. 4 channels per branch against
+              87, which is the whole reason for the split: `Lmcoordstx` freezes
+              1.21 ms of landmark composition, and a project that wants two pupils
+              and a mouth should not have to leave it on to get them.
+    """
+    return _box_branches(stream, ROLE_BOX_KEYPOINT)
+
+
+def _box_branches(stream: str, role: str) -> list[BoxBranch]:
+    """`box_branches` and `keypoint_branches` share every line of this."""
     grouped = names_by_role(stream)
-    relative = grouped[ROLE_BOX_RELATIVE]
+    relative = grouped[role]
     if not relative:
         return []
     universe = list(channel_roles(stream))
@@ -385,13 +420,24 @@ def box_branches(stream: str) -> list[BoxBranch]:
         # before the suffix, which `<subject>_bbox_<axis>` does not have. That is
         # what lets one pattern separate the points from the box, and it is checked
         # against the contract rather than believed.
+        # Candidates most specific first. The landmarks all carry a two-digit point
+        # index, which is what separates them from `<subject>_bbox_<axis>`; the key
+        # points carry none, so their only honest candidate is the names themselves
+        # - four of them, and `compact_pattern` still EXPANDS it and checks, which
+        # is what catches a contract reordering.
         pattern = compact_pattern(
             names, universe,
-            ["%s_*_[0-9][0-9]_%s" % (subject, axis), "%s_*_%s" % (subject, axis)])
+            ["%s_*_[0-9][0-9]_%s" % (subject, axis), " ".join(names),
+             "%s_*_%s" % (subject, axis)])
         for suffix in suffixes:
             offset = -0.5 if suffix in ("_tx", "_ty") else 0.0
+            # The label becomes an operator name, and the two roles produce a
+            # branch per (subject, axis, space) each - so without the prefix the
+            # key point branch and the landmark branch would both want to be
+            # `f0_tx`, in the same stream, and one would silently rename itself.
+            label = ("kp_" if role == ROLE_BOX_KEYPOINT else "") + subject + suffix
             branches.append(BoxBranch(
-                subject + suffix, "_" + axis, suffix, names, pattern,
+                label, "_" + axis, suffix, names, pattern,
                 subject + origin_suffix, subject + extent_suffix, offset))
     return branches
 
@@ -443,7 +489,7 @@ def companioned_names(stream: str) -> list[str]:
     with_companion: set[str] = set()
     for branch in transform_branches(stream):
         with_companion.update(branch.names)
-    for box in box_branches(stream):
+    for box in box_branches(stream) + keypoint_branches(stream):
         with_companion.update(box.names)
     return [name for name in channel_roles(stream) if name in with_companion]
 
@@ -600,7 +646,9 @@ def _self_check() -> None:
                                 + [(b.pattern, b.names)
                                    for b in transform_branches(stream)]
                                 + [(b.pattern, b.names)
-                                   for b in box_branches(stream)]):
+                                   for b in box_branches(stream)]
+                                + [(b.pattern, b.names)
+                                   for b in keypoint_branches(stream)]):
             tokens = pattern.split()
             got = [name for name in roles
                    if any(fnmatchcase(name, token) for token in tokens)]

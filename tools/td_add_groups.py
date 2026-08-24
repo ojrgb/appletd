@@ -223,6 +223,35 @@ COOK_VETOED = {
     "hands/latches": ("Latches", "Temporal"),
 }
 
+# The MIRROR of COOK_VETOED: a group frozen when a listed toggle is ON.
+#
+# WHY A THIRD TABLE rather than a fourth term in one of the other two. COOK_GATED
+# and COOK_VETOED both read "more on means more cooking" - one as an OR, one as an
+# AND - and every toggle in this file until now added capability. `Facekeypoints`
+# REMOVES it: turning it on is a request for fewer channels, and the saving only
+# exists if the composition that produced them stops. Expressing that in COOK_GATED
+# would mean listing every OTHER toggle as a term, and expressing it in COOK_VETOED
+# would mean inverting the parameter's meaning in the panel, which is worse.
+#
+#     cooking = any(COOK_GATED) and all(COOK_VETOED) and not any(COOK_SUPPRESSED)
+#
+# Applied in the same pass as the veto and with the same precedence, so a group
+# cannot be forced back on by COOK_REQUIRES.
+#
+# THE SAVING, and why it is worth a third mechanism: `face/coords/lm_world` composes
+# 348 channels for 0.82 ms per cook and `lm_pixels` another 0.68. The four key points
+# that replace them are composed in `face/coords/world` and `face/coords/pixels`,
+# beside the bounding box, which is exactly why they are a separate role in
+# appletd/spaces.py - so the cheap half survives when the expensive one freezes.
+#
+# The toggle is spelled out rather than referenced: `KEYPOINTS_TOGGLE` is defined
+# INSIDE the TRIM SCOPE markers below, because the generated DAT needs it and the
+# DAT gets that block verbatim. `_check_keypoint_names()` holds the two together.
+COOK_SUPPRESSED = {
+    "face/coords/lm_world": ("Facekeypoints",),
+    "face/coords/lm_pixels": ("Facekeypoints",),
+}
+
 
 # >>> TRIM SCOPE - everything between these markers is copied VERBATIM into the
 # generated Parameter Execute DAT (see _trim_source), so that the DAT and this
@@ -290,6 +319,31 @@ NON_TIP_JOINTS = ("thumb_cmc", "thumb_mp", "thumb_ip",
                   "little_mcp", "little_pip", "little_dip")
 HANDBOX_CHANNELS = ("h?_bbox_*", "h?_size")
 
+# The face's abbreviated form, asked for 2026-08-24. Unlike the two above this one
+# DOES gate cost - see COOK_SUPPRESSED - because the 348 landmark channels are the
+# most expensive thing in the component and the four points that replace them are
+# composed in a different COMP.
+#
+# It reads as a swap rather than a filter: ON removes the 348 and leaves the 16 key
+# point channels, OFF removes the 16 and leaves the 348. OFF is the default and the
+# output it produces is byte-for-byte the one this component produced before the key
+# points existed, which is the rule every new toggle here follows - a toggle that
+# changes what an existing project receives is a silent breakage.
+KEYPOINTS_TOGGLE = "Facekeypoints"
+
+# A LITERAL copy of `face_types.FACE_KEYPOINTS`, for the same reason NON_TIP_JOINTS
+# is a literal copy of the joint table: everything between the TRIM SCOPE markers is
+# pasted verbatim into a generated DAT that may import nothing but the standard
+# library. `_check_keypoint_names()` below the markers holds it against the
+# contract, so it cannot drift silently.
+FACE_KEYPOINT_NAMES = ("eye_left", "eye_right", "nose_tip", "mouth")
+KEYPOINT_CHANNELS = tuple("f?_%s_*" % point for point in FACE_KEYPOINT_NAMES)
+
+# Every LANDMARK channel of every face, raw and composed - `f0_left_eye_00_x` and
+# `f0_left_eye_00_tx` alike. The two-digit point index is what separates them from
+# the bounding box, the head angles and the key points, none of which carries one.
+FACE_LANDMARK_CHANNELS = ("f?_*_[0-9][0-9]_*",)
+
 
 def _trim_keep(comp, wanted):
     """The channels to KEEP on the single output, in merge order. Returns a list.
@@ -347,6 +401,12 @@ def _trim_keep(comp, wanted):
     box = getattr(comp.par, HANDBOX_TOGGLE, None)
     if box is not None and not box.eval():
         optional += list(HANDBOX_CHANNELS)
+    # The face swap. Both directions are explicit: whichever set is not wanted is
+    # named, so neither can survive by being forgotten.
+    points = getattr(comp.par, KEYPOINTS_TOGGLE, None)
+    if points is not None:
+        optional += list(FACE_LANDMARK_CHANNELS if points.eval()
+                         else KEYPOINT_CHANNELS)
     if optional:
         drop.update(name for name in names
                     if any(fnmatchcase(name, pattern) for pattern in optional))
@@ -391,6 +451,28 @@ def _check_joint_split():
             "NON_TIP_JOINTS has drifted from types.JOINT_NAMES.\n"
             "  literal:  %s\n  contract: %s"
             % (" ".join(NON_TIP_JOINTS), " ".join(expected)))
+
+
+def _check_keypoint_names():
+    """`FACE_KEYPOINT_NAMES` must be exactly the contract's key points, and
+    `KEYPOINTS_TOGGLE` must be the name `COOK_SUPPRESSED` spells out.
+
+    Both are literals inside the TRIM SCOPE markers, which means both are second
+    copies of something owned elsewhere, and both fail silently if they drift: a
+    renamed key point would simply never be trimmed, and a mistyped toggle would
+    freeze nothing while the panel went on offering the switch.
+    """
+    from appletd.face_types import FACE_KEYPOINTS
+    if tuple(FACE_KEYPOINT_NAMES) != tuple(FACE_KEYPOINTS):
+        raise RuntimeError(
+            "FACE_KEYPOINT_NAMES has drifted from face_types.FACE_KEYPOINTS.\n"
+            "  literal:  %s\n  contract: %s"
+            % (" ".join(FACE_KEYPOINT_NAMES), " ".join(FACE_KEYPOINTS)))
+    suppressors = {name for names in COOK_SUPPRESSED.values() for name in names}
+    if suppressors != {KEYPOINTS_TOGGLE}:
+        raise RuntimeError(
+            "COOK_SUPPRESSED names %s and KEYPOINTS_TOGGLE is %r"
+            % (sorted(suppressors), KEYPOINTS_TOGGLE))
 
 
 def _trim_source():
@@ -439,6 +521,7 @@ PRESETS = %(presets)r
 COOK_GATED = %(cook_gated)r
 COOK_REQUIRES = %(cook_requires)r
 COOK_VETOED = %(cook_vetoed)r
+COOK_SUPPRESSED = %(cook_suppressed)r
 
 from fnmatch import fnmatchcase  # noqa: E402  - stdlib, no repo on sys.path needed
 
@@ -485,6 +568,11 @@ def _apply_gating(comp):
     for group_name, vetoes in COOK_VETOED.items():
         if any(hasattr(comp.par, v) and not bool(getattr(comp.par, v).eval())
                for v in vetoes):
+            wanted[group_name] = False
+    # And the mirror of it: a group frozen when a toggle is ON rather than off.
+    for group_name, suppressors in COOK_SUPPRESSED.items():
+        if any(hasattr(comp.par, x) and bool(getattr(comp.par, x).eval())
+               for x in suppressors):
             wanted[group_name] = False
     # ACTIVE IS A COOK VETO, AND NOTHING ELSE.
     #
@@ -571,6 +659,14 @@ def _apply_gating(comp, verbose=False):
         if blocked and wanted.get(group_name):
             report.append("%s: FROZEN by %s" % (group_name, ", ".join(blocked)))
         if blocked:
+            wanted[group_name] = False
+    # And the mirror of it: a group frozen when a toggle is ON rather than off.
+    for group_name, suppressors in COOK_SUPPRESSED.items():
+        on = [x for x in suppressors
+              if hasattr(comp.par, x) and bool(getattr(comp.par, x).eval())]
+        if on and wanted.get(group_name):
+            report.append("%s: FROZEN by %s being ON" % (group_name, ", ".join(on)))
+        if on:
             wanted[group_name] = False
 
     # ACTIVE IS A COOK VETO, AND NOTHING ELSE.
@@ -737,8 +833,26 @@ MEASURED_MS = {
 }
 
 
+# What a REDUCING toggle is worth. Separate from MEASURED_MS because the sign is
+# the whole point: every entry above is what a toggle COSTS when it is on, and
+# putting "1.18 ms" beside a switch that gives you 1.18 ms back would read as
+# exactly the opposite of what it does.
+#
+# MEASURED 2026-08-24 on the reference M4 Pro, 89 frames through tools/td_profile.py
+# with the synthetic face and hands senders running: the face stream cost 1.9644 ms
+# per cook with `Facekeypoints` off and 0.7872 ms with it on. See docs/BENCHMARKS.md
+# for the per-half split and for the 0.10 ms the key point branches cost when the
+# toggle is OFF, which is the price of having them always available.
+MEASURED_SAVING_MS = {
+    "Facekeypoints": 1.18,
+}
+
+
 def _costed(name, label):
     """`label` with its measured cost appended, or unchanged when none is known."""
+    saved = MEASURED_SAVING_MS.get(name)
+    if saved is not None:
+        return "%s  (saves %.2f ms)" % (label, saved)
     ms = MEASURED_MS.get(name)
     if ms is None:
         return label
@@ -813,6 +927,24 @@ def _page(comp, name="Attributes"):
         box.default = True
         box.val = True
 
+    # The face's abbreviated form. OFF by default, which keeps the output identical
+    # to the one this component produced before the key points existed.
+    #
+    # NOT in GROUPS, and that is the whole reason it is appended here by hand. Every
+    # entry in GROUPS is a capability, so `Verbosity = Everything` turns them all on;
+    # this one REMOVES channels, so "Everything" would switch it on and freeze the
+    # 348 landmarks a preset called Everything just promised.
+    keypoint_label = _costed(KEYPOINTS_TOGGLE, "Face Key Points")
+    if KEYPOINTS_TOGGLE not in existing:
+        points = page.appendToggle(KEYPOINTS_TOGGLE, label=keypoint_label)[0]
+        points.default = False
+        points.val = False
+    elif existing[KEYPOINTS_TOGGLE].label != keypoint_label:
+        # The label carries a GENERATED NUMBER, so it is one of the two places this
+        # file overwrites a label on an existing parameter - see the GROUPS loop
+        # below for why that is deliberate and why it is not done anywhere else.
+        existing[KEYPOINTS_TOGGLE].label = keypoint_label
+
     menu = existing.get("Verbosity")
     if menu is None:
         menu = page.appendMenu("Verbosity", label="Level of Detail")[0]
@@ -859,6 +991,7 @@ def main():
     # the output that `Fingertipsonly` claims to remove, and there is no point
     # building a network around a trim list that is already wrong.
     _check_joint_split()
+    _check_keypoint_names()
 
     master = op(MASTER_PATH)
     comp = op(COMP_PATH)
@@ -883,6 +1016,9 @@ def main():
     for group_name, vetoes in COOK_VETOED.items():
         for toggle in vetoes:
             freezes.setdefault(toggle, []).append(group_name + " (veto)")
+    for group_name, suppressors in COOK_SUPPRESSED.items():
+        for toggle in suppressors:
+            freezes.setdefault(toggle, []).append(group_name + " (when ON)")
     for group, _default, gated in GROUPS:
         if gated == "derive":
             reach = "gates derive()"
@@ -892,6 +1028,17 @@ def main():
             reach = "channels only, gates no cost yet"
         print("   %-12s %-3s  %s"
               % (group, "on" if getattr(master.par, group).eval() else "off", reach))
+    # The three toggles that are NOT in GROUPS: each removes channels rather than
+    # adding a capability, which is why none of them is in a Verbosity preset. They
+    # would be invisible in the report above, and `Facekeypoints` gates real cost.
+    for extra in (FINGERTIPS_TOGGLE, HANDBOX_TOGGLE, KEYPOINTS_TOGGLE):
+        par = getattr(master.par, extra, None)
+        if par is None:
+            continue
+        reach = ("freezes " + ", ".join(sorted(freezes[extra]))
+                 if extra in freezes else "output channels only")
+        print("   %-12s %-3s  %s"
+              % (extra, "on" if par.eval() else "off", reach))
     print("   Verbosity = %s" % master.par.Verbosity.eval())
 
     # The preset callback. A Parameter Execute DAT rather than an expression on
@@ -906,6 +1053,7 @@ def main():
         "cook_gated": {k: list(v) for k, v in COOK_GATED.items()},
         "cook_requires": {k: list(v) for k, v in COOK_REQUIRES.items()},
         "cook_vetoed": {k: list(v) for k, v in COOK_VETOED.items()},
+        "cook_suppressed": {k: list(v) for k, v in COOK_SUPPRESSED.items()},
         "trim_source": _trim_source(),
     }
     callbacks.par.op = master.path
@@ -922,6 +1070,11 @@ def main():
         # the trim is a Select with a KEEP list, so nothing rewriting the list means
         # a toggle that appears to do nothing at all.
         | {FINGERTIPS_TOGGLE, HANDBOX_TOGGLE}
+        # `Facekeypoints` rewrites the trim list AND freezes two coords halves, so
+        # it has to reach `_apply_gating` like any other gating toggle. It is not in
+        # GROUPS, so the last term of this union does not cover it.
+        | {KEYPOINTS_TOGGLE}
+        | {name for names in COOK_SUPPRESSED.values() for name in names}
         # `Active` vetoes cooking for every group, so flipping it has to re-run the
         # gating - otherwise switching capture off leaves the whole chain cooking
         # until something else happens to touch a toggle.

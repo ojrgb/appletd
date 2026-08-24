@@ -29,6 +29,7 @@ import pytest
 
 from appletd.face import (
     face_frame_from_observations,
+    keypoint_report,
     region_point_counts,
 )
 from appletd.face_types import FACE_REGION_NAMES, MAX_FACES, Face
@@ -222,3 +223,53 @@ def test_an_observation_with_no_landmarks_still_yields_a_face() -> None:
     face = _one(landmark_counts=None, roll=0.0)
     assert face.found is True
     assert face.landmarks == ()
+
+
+# ---------------------------------------------------------------------------
+# What `--keypoints` prints
+#
+# It changes no constant - the nose tip is found by intersection at runtime - so
+# what these check is that a REPORT nobody can verify by eye says the right thing.
+# ---------------------------------------------------------------------------
+def test_the_keypoint_report_says_which_index_the_nose_tip_occupies() -> None:
+    """The one number in the report that is genuinely hard to get any other way, and
+    the reassurance that the intersection landed where a person would have pointed."""
+    from appletd.synth_face import FacePose, synthetic_face_frame
+    report = keypoint_report(synthetic_face_frame((FacePose(),)))
+    indices = report["nose_tip_indices"]
+    assert isinstance(indices, dict)
+    assert set(indices) == {"nose", "nose_crest", "median_line"}
+    assert all(index is not None for index in indices.values())
+    # The synthetic template places the tip first in `nose` and last in the six-point
+    # `nose_crest`; if that stops being true the template has been redrawn, and the
+    # report is what would say so.
+    assert indices["nose"] == 0
+    assert indices["nose_crest"] == 5
+
+
+def test_the_keypoint_report_answers_which_pupil_is_at_larger_x() -> None:
+    """The open question in face_types.py, and the only thing in this report worth
+    pasting anywhere. The synthetic face is built with the SUBJECT's left at larger
+    x, so this is what a real face should also say if Vision names regions from the
+    subject's point of view."""
+    from appletd.synth_face import FacePose, synthetic_face_frame
+    report = keypoint_report(synthetic_face_frame((FacePose(),)))
+    assert report["left_pupil_is_right_of_image_centre"] is True
+
+
+def test_the_keypoint_report_is_empty_when_nothing_was_seen() -> None:
+    """{} rather than four zeroed points: a measurement that did not happen must not
+    look like one that came back empty-handed. Same rule as `region_point_counts`."""
+    from appletd.face_types import blank_face_frame
+    assert keypoint_report(blank_face_frame()) == {}
+
+
+def test_an_unanswerable_pupil_question_comes_back_as_None() -> None:
+    """Not False. A face whose pupils Vision did not report cannot say which side
+    `leftPupil` is on, and a confident False would be read as an answer."""
+    counts = dict.fromkeys(FACE_REGION_NAMES, 3)
+    counts["left_pupil"] = 0
+    frame = face_frame_from_observations(
+        [_StubObservation(landmark_counts=counts)], 1, 0.0, 1280, 720)
+    report = keypoint_report(frame)
+    assert report["left_pupil_is_right_of_image_centre"] is None

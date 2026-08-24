@@ -22,6 +22,14 @@ another's channels, and a nose in an eyebrow's channels looks entirely plausible
 until somebody wonders why the eyebrows never move. So the numbers get measured on
 the machine that will run them, or the channels do not ship.
 
+`--keypoints` ADDS A SECOND REPORT, and it exists for a question a fixture cannot
+answer: whether Vision's `leftPupil` is the SUBJECT's left or the IMAGE's left.
+`appletd/face_types.py` publishes `f{i}_eye_left` as a faithful mirror of the region
+name and says in as many words that the answer is unmeasured; this is what measures
+it. It also prints which index the nose tip occupies in each of the three regions
+that share it - a confirmation, not an input, because the tip is found by
+intersecting those regions on every frame and no index is pinned anywhere.
+
 WHAT TO DO WITH THE OUTPUT. Paste each count into the matching `FaceRegionSpec` in
 `appletd/face_types.py`, then re-run **`tools/td_add_filter.py`**. That is the
 script that matters: it splits each stream into smoothed and passthrough halves from
@@ -68,11 +76,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="seconds to wait for a face (default: %(default)s)")
     parser.add_argument("--camera", default=None,
                         help="substring of the camera name; never an index")
+    parser.add_argument("--keypoints", action="store_true",
+                        help="also report where the four key points come from: "
+                             "which index the nose tip occupies in each of its "
+                             "three regions, and whether Vision's `leftPupil` is "
+                             "on the left of the IMAGE or the subject's left")
     args = parser.parse_args(argv)
 
     # Imported here, not at module scope: this is the one tool that pulls in
     # pyobjc, and a `--help` should not.
-    from appletd.face import region_point_report
+    from appletd.face import keypoint_report, region_point_report
     from appletd.source import InProcessSource
     from appletd.streams import STREAM_FACE
 
@@ -94,11 +107,17 @@ def main(argv: list[str] | None = None) -> int:
 
     deadline = time.monotonic() + args.timeout
     report: dict[str, object] = {}
+    points: dict[str, object] = {}
     try:
         while time.monotonic() < deadline and not report:
             time.sleep(POLL_INTERVAL_S)
-            report = region_point_report(source.latest_face())
-            faces = sum(1 for face in source.latest_face().faces if face.found)
+            frame = source.latest_face()
+            report = region_point_report(frame)
+            # From the SAME frame as the counts, so the indices printed below
+            # belong to the table printed above rather than to whatever the face
+            # was doing a fifth of a second later.
+            points = keypoint_report(frame) if report else {}
+            faces = sum(1 for face in frame.faces if face.found)
             print("  waiting... faces in frame: %d" % faces, end="\r", flush=True)
     finally:
         # In a finally: a Ctrl-C must still release the capture session properly,
@@ -170,7 +189,62 @@ def main(argv: list[str] | None = None) -> int:
               % unnamed)
     print("Send this whole block back before pasting: the counts are the easy half,")
     print("and what they SUM to decides the shape of the contract.")
+    if args.keypoints:
+        _print_keypoints(points)
     return 0
+
+
+def _print_keypoints(points: dict[str, object]) -> None:
+    """The `--keypoints` half of the report. Nothing here changes any constant.
+
+    Both numbers it prints are CONFIRMATIONS rather than inputs: the nose tip is
+    found by intersecting three regions at runtime, so no index is pinned anywhere
+    and none of this has to be pasted back into the package. What it is for is the
+    one open question in `face_types.py` - which side of the IMAGE Vision's
+    `leftPupil` is on - and the reassurance that the intersection lands on the point
+    a person would have chosen.
+    """
+    print()
+    print("-" * 70)
+    if not points:
+        print("no key points: this face reported no landmarks.")
+        return
+    print("THE FOUR KEY POINTS, box-normalised, origin bottom left:")
+    values = points.get("points")
+    assert isinstance(values, dict)
+    for name, (x, y) in values.items():
+        print("    %-10s %.4f  %.4f%s"
+              % (name, x, y, "   <- NOT FOUND" if (x, y) == (0.0, 0.0) else ""))
+    print()
+    indices = points.get("nose_tip_indices")
+    assert isinstance(indices, dict)
+    if points.get("nose_tip") is None:
+        print("THE NOSE TIP WAS NOT FOUND. `nose`, `nose_crest` and `median_line` do")
+        print("not share exactly one point on this machine, which is the assumption")
+        print("appletd/face_types.py is built on - send this whole block back.")
+    else:
+        print("the nose tip is the one point three regions share, and it sits at:")
+        for region, index in indices.items():
+            print("    %-12s index %s" % (region, index))
+        print("Nothing depends on these indices - the point is found by")
+        print("intersection on every frame - but they are worth having written down.")
+    print()
+    side = points.get("left_pupil_is_right_of_image_centre")
+    if side is None:
+        print("one of the pupils was missing, so which side `leftPupil` is on")
+        print("cannot be answered from this frame.")
+    elif side:
+        print("`leftPupil` is at LARGER x than `rightPupil`, so Vision's `left` is")
+        print("the SUBJECT's left and appears on the RIGHT of an unmirrored image.")
+    else:
+        print("`leftPupil` is at SMALLER x than `rightPupil`, so Vision's `left` is")
+        print("the IMAGE's left.")
+    print("Either way `f{i}_eye_left` mirrors the region name; this is the sentence")
+    print("docs/ATTRIBUTES.md needs, and it is the one thing here worth pasting.")
+    missing = points.get("missing")
+    if missing:
+        print()
+        print("regions that reported NO points at all: %s" % missing)
 
 
 if __name__ == "__main__":

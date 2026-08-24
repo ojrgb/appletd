@@ -1889,3 +1889,83 @@ someone opens on another machine still has to be able to switch a group off.* Th
 mask and depth outputs need no install at all, and only `derive` and the sidecar do.
 
 Worth doing at the same time, because it shrinks what a broken install can break.
+
+---
+
+## Step 22 — the face's four key points, and a reverse gate — DONE 2026-08-24
+
+Asked for in the user's own words: *"a toggle that makes us select only abbreviated
+landmarks: one for center of each eye, one for the tip of the nose, one for the
+center of the lips"*. Ears were asked for too, then dropped once it was clear Vision
+has no ear region to select — twelve regions, and none of them is an ear.
+
+### 22.1 Where the four points come from
+
+Two are free and two are arithmetic, and knowing which is which is most of the step:
+
+| point | source |
+|---|---|
+| `eye_left` `eye_right` | `leftPupil` / `rightPupil`, unchanged. The ONLY single-point regions in the constellation, so each already IS the centre of its eye |
+| `mouth` | the mean of the six `innerLips` points. Every other region is a ring; `left_eye_00`..`_05` trace the lid and none of them is a centre |
+| `nose_tip` | the one point `nose`, `noseCrest` and `medianLine` all carry |
+
+**The nose tip is found rather than indexed**, and that is the decision worth
+recording. Step 16's overlap measurement pins exactly one point in three regions at
+once (DESIGN.md 2.12: nine points in two regions, one in three). A pinned index would
+be one number measured once against one face on one macOS, unverifiable afterwards,
+and on a Vision that renumbered a region it would publish a nostril and call it a
+tip. `face_types.nose_tip_point` intersects the three regions on every frame instead
+— 24 points of set arithmetic per face — and publishes zero if the answer is not
+exactly one point.
+
+### 22.2 Computed in the sidecar, composed in TouchDesigner
+
+The four points are box-normalised channels on the wire, `f{i}_eye_left_x` and
+friends, so the contract went 371 → **387** and the datagram 12208 → **12640 bytes**
+(MEASURED). Doing the mean and the intersection in the sidecar costs microseconds on
+the capture thread; doing them in TouchDesigner would have been eight Math CHOPs on
+the main thread, every frame, for ever.
+
+Unlike the 348 landmarks they DO get `_tx`/`_ty`/`_px`/`_py` companions — composed
+through the face's bounding box by the same arithmetic, in the same shape of Math
+CHOP, but in `coords/world` and `coords/pixels` rather than the landmark halves.
+That placement is the whole mechanism: it is what lets the expensive halves freeze
+while the four points survive, and it is why `spaces.py` gives them their own role
+(`ROLE_BOX_KEYPOINT`) rather than sharing `ROLE_BOX_RELATIVE`.
+
+### 22.3 A third gating mechanism, because this toggle removes capability
+
+`COOK_GATED` is an OR and `COOK_VETOED` is an AND, and both read *more on means more
+cooking*. Every toggle in this component until now added something. `Facekeypoints`
+takes 664 channels away, so it needed the mirror:
+
+```
+cooking = any(COOK_GATED) and all(COOK_VETOED) and not any(COOK_SUPPRESSED)
+```
+
+Two consequences, both deliberate. It is in **none of the `Verbosity` presets** —
+`Everything` would otherwise switch off the 348 landmarks it has just promised — and
+its panel label says **"saves 1.18 ms"** rather than a cost, because a millisecond
+figure beside a switch that gives you the millisecond back reads as the opposite of
+what it does.
+
+### 22.4 What it is worth, measured
+
+89 frames through `tools/td_profile.py` with the synthetic senders running. The face
+stream cost **1.9644 ms** per cook with the toggle off and **0.7872 ms** with it on;
+`out1` went from 1,082 channels to 418. Full table in `docs/BENCHMARKS.md`.
+
+**And what it costs when OFF: 0.1012 ms**, which is the four points being composed
+whether or not anybody asked for them. That is the price of `f0_eye_left_tx` existing
+without a toggle to find first, it is 2.9% of the component with everything enabled,
+and it is stated rather than buried because it is a real regression for a project
+that never touches the toggle.
+
+### 22.5 What is still unmeasured
+
+Whether `leftPupil` is the SUBJECT's left or the IMAGE's left. `f{i}_eye_left`
+mirrors the region name and `docs/ATTRIBUTES.md` says the side is unmeasured;
+`tools/probe_face_regions.py --keypoints` answers it in one run and needs a face in
+front of the camera. It also prints which index the tip occupies in each of its three
+regions — a confirmation that the intersection lands where a person would point, not
+an input to anything.

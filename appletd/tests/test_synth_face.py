@@ -69,7 +69,7 @@ def test_no_landmark_channel_of_a_present_face_is_exactly_zero() -> None:
     landmarks = {name: value for name, value in channels.items()
                  if name.startswith("f0_") and "bbox" not in name
                  and name[-2:] in ("_x", "_y")}
-    assert len(landmarks) == 174           # 87 slots x 2 axes
+    assert len(landmarks) == 182           # (87 slots + 4 key points) x 2 axes
     assert [n for n, v in landmarks.items() if v == 0.0] == []
 
 
@@ -155,7 +155,13 @@ def test_opening_the_mouth_moves_the_lips_and_nothing_else() -> None:
     changed = {name for name in closed
                if abs(closed[name] - open_wide[name]) > 1e-6}
     assert changed, "the mouth did not open at all"
-    assert all("lips" in name for name in changed), sorted(changed)[:4]
+    # `f0_mouth_*` is the MEAN of `inner_lips`, so it moves with them and is the
+    # only key point that may - an eye or a nose tip that moved when the mouth
+    # opened would be the scale this test exists to catch.
+    assert all("lips" in name or "_mouth_" in name for name in changed), \
+        sorted(changed)[:4]
+    assert {"f0_mouth_x", "f0_mouth_y"} & changed == {"f0_mouth_y"}, \
+        "the mouth centre should follow the lips vertically and not sideways"
     # And it opens DOWNWARD: the lower lip travels further than the upper.
     lower = "f0_outer_lips_10_y"            # below the mouth centre in the template
     assert open_wide[lower] < closed[lower]

@@ -516,6 +516,7 @@ belong to - a page you have to scroll is a page nobody tunes.
 | `Gestures` | toggle | on | held states. Also what gates `latches` cooking |
 | `Descriptor` | toggle | off | 84-channel pose signature |
 | `Hand Box and Size` | toggle | on | off drops `h?_bbox_*` and `h?_size` from the output |
+| `Face Key Points` | toggle | off | on swaps the 664 face landmark channels for 32: two pupils, a nose tip and a mouth centre per face. Freezes `face/coords/lm_world` and `lm_pixels`, and **saves 1.18 ms** |
 
 A disabled `derive` group's channels are excluded from the output. A disabled
 NATIVE group has `allowCooking` off, so it costs nothing and its channels are left
@@ -525,8 +526,9 @@ at their last value — which is deliberate, and 6.2 of `DESIGN.md` is why.
 Select in front of it (`trim_empty`) keeps only the channels that are actually being
 computed. So a group you switch off does not just stop costing anything — its
 channels leave the list. In the shipping configuration that is 258 channels on the
-output rather than 1,863. `Delete Empty Channels` on the Vision page turns the trim
-off if you would rather see everything, frozen values included.
+output rather than the 2,041 every stream and space produce (MEASURED 2026-08-24).
+`Delete Empty Channels` on the Vision page turns the trim off if you would rather
+see everything, frozen values included.
 
 **Five families never reach the output at all**, whatever the toggles say:
 
@@ -548,21 +550,29 @@ the advice has not changed, only where you read the channel. Reference it as
 `op('/project1/appletd/housekeeping')['h0_conf_median']`, or switch
 `Delete Empty Channels` off to get everything back on `out1`.
 
-#### Two toggles that only change the output
-
-Neither gates any cooking, and that is forced rather than lazy — the fifteen non-tip
-joints feed every curl, spread and angle `derive()` computes, and the bounding boxes
-feed `hands_overlap`. The work happens either way; these remove second copies from
-the list you read.
+#### Three toggles that shorten the list
 
 | toggle | default | does |
 |---|---|---|
 | `Finger Tips Only` | **off** | drops the 15 non-tip joints, leaving `wrist` and the five `*_tip`s — six points per hand instead of 21 |
 | `Hand Box and Size` | **on** | off drops `h?_bbox_*` and `h?_size` |
+| `Face Key Points` | **off** | on swaps 664 face landmark channels for 32 |
 
-Both defaults leave the output exactly as it was before they existed. `Finger Tips
-Only` keeps the **wrist**: it is not an mcp, pip or dip, it is the hand's anchor, and
-`hands_angle` is measured from it.
+All three defaults leave the output exactly as it was before they existed. `Finger
+Tips Only` keeps the **wrist**: it is not an mcp, pip or dip, it is the hand's
+anchor, and `hands_angle` is measured from it.
+
+**The first two change only the output, and that is forced rather than lazy** — the
+fifteen non-tip joints feed every curl, spread and angle `derive()` computes, and the
+bounding boxes feed `hands_overlap`. The work happens either way; they remove second
+copies from the list you read.
+
+**`Face Key Points` is the one that also saves time**, because the four points it
+leaves are composed somewhere else. MEASURED 2026-08-24: the face stream costs
+1.9644 ms per cook with it off and 0.7872 ms with it on — the landmark halves stop
+cooking entirely. It costs 0.10 ms when it is OFF, which is what the four points
+cost to compose alongside the bounding box, and is the price of their being there
+whether or not the toggle is.
 
 **Every toggle on the page now changes something.** Four that could not —
 `Landmarks`, `Triggers`, `Motion` and `Events` — were removed on 2026-08-23 rather
@@ -582,6 +592,7 @@ Three kinds of toggle, and the label says which:
 | `Presence` (→ `temporal`), `Gestures` (→ `latches`), `Coordstx` `Coordspx` (→ `coords/world`, `coords/pixels` in all three streams), `Lmcoordstx` `Lmcoordspx` (→ the face's landmark halves) | the group COMP stops cooking entirely, via `allowCooking`. Its channels stay, holding their last value — which is why `trim_empty` removes them from the output |
 | `Temporal` `Latches` | a VETO: off freezes the group whatever the toggles above say. See below |
 | `Finger Tips Only` `Hand Box and Size` | the OUTPUT only. Neither gates cooking and neither can: the 15 non-tip joints feed every curl and spread `derive()` computes, and the bounding boxes feed `hands_overlap` |
+| `Face Key Points` | a REVERSE veto: switching it ON freezes `face/coords/lm_world` and `lm_pixels`. The only toggle here that removes capability rather than adding it, which is why it is in none of the `Level of Detail` presets — `Everything` would otherwise switch off the 348 landmarks it has just promised |
 
 **`Temporal` and `Latches` are master switches, and they needed a second
 mechanism.** The table above is an OR — "any of these toggles being on keeps the
@@ -860,9 +871,10 @@ moved to Advanced.
 
 **`Delete Empty Channels` is why the output is short.** The COMP has ONE output —
 `hands`, `pose` and `face` merge into it — and with every stream and space enabled
-that is 1,863 channels. Nobody should meet a component that way. So a Select in
-front of the Out CHOP keeps only what the Attributes page has switched on: 258
-channels in the shipping configuration. Switch a group on later and its channels
+that is 2,041 channels (MEASURED 2026-08-24: 635 hands, 275 pose, 1,131 face).
+Nobody should meet a component that way. So a Select in front of the Out CHOP keeps
+only what the Attributes page has switched on: 258 channels in the shipping
+configuration. Switch a group on later and its channels
 appear; switch it off and they go. That is the intended behaviour, not a
 regression — a channel holding a frozen value is worse than a channel that is
 honestly absent, because nothing about the number says it stopped moving.
@@ -974,9 +986,10 @@ distance between two pose joints is measuring how far away the person is standin
 
 ## The face stream — head pose and a box, on a third port
 
-Built 2026-08-21. `visionface` is plumbing only: **387 channels**, no derived
-attributes. Build it with `tools/td_build_vision.py`; drive it with the Face
-Stream toggle, or with `tools/send_synthetic_face.py` and no camera.
+Built 2026-08-21. The face stream is plumbing plus four computed points: **387
+channels on the wire**, no attribute layer. Build it with `tools/td_build_vision.py`;
+drive it with the Face Stream toggle, or with `tools/send_synthetic_face.py` and no
+camera.
 
 ```
 face_n, face_seq, face_age_ms
@@ -1046,15 +1059,55 @@ image_x = f0_bbox_x + point_x * f0_bbox_w
 image_y = f0_bbox_y + point_y * f0_bbox_h
 ```
 
-**387 channels in total** on this COMP - 371 from the wire plus 16 transformed box
-components. The bundle is 12208 bytes, which is more than a default UDP socket will
-send; `appletd/osc.py` raises the send buffer, and `MAX_FACES = 2` is the
-practical ceiling for one datagram.
+The bundle is 12640 bytes, which is more than a default UDP socket will send;
+`appletd/osc.py` raises the send buffer, and `MAX_FACES = 2` is the practical
+ceiling for one datagram.
 
-`tools/send_synthetic_face.py` leaves the landmark channels at zero - the
-synthesiser has a box and three angles, not a face - so the way to watch them move
-is the Face Stream toggle and a camera. `tools/probe_face_regions.py` re-measures
-the counts on another machine or after a Vision update.
+`tools/send_synthetic_face.py` MOVES every landmark: `turn` sweeps them across the
+box, `tilt` rotates them and `speak` opens the mouth. `tools/probe_face_regions.py`
+re-measures the counts on another machine or after a Vision update, and
+`--keypoints` adds the report below.
+
+### The four key points
+
+Added 2026-08-24, published beside the regions and computed in the sidecar:
+
+```
+f<i>_eye_left_x,  f<i>_eye_left_y            leftPupil, unchanged
+f<i>_eye_right_x, f<i>_eye_right_y           rightPupil, unchanged
+f<i>_nose_tip_x,  f<i>_nose_tip_y            the point three regions share
+f<i>_mouth_x,     f<i>_mouth_y               the mean of inner_lips
+```
+
+Box-normalised like every landmark, so they compose through the box the same way -
+and unlike the landmarks they DO have `_tx`/`_ty`/`_px`/`_py` companions, computed
+beside the bounding box rather than behind `Lmcoordstx`. `Face Key Points` on the
+Attributes page swaps them for the 348.
+
+**Two of the four are not points Vision publishes.** Every region except the pupils
+is a RING - `left_eye_00`..`_05` trace around the eye and none of them is its centre
+- so the mouth centre is the MEAN of the six `inner_lips` points, and the nose tip is
+identified rather than indexed.
+
+**The nose tip is the one point that belongs to three regions.** `median_line` runs
+down the face, `nose_crest` down the bridge and `nose` around the base, and the
+arithmetic of the overlaps above pins exactly one point in all three (nine points sit
+in two regions, one sits in three). `appletd/face_types.nose_tip_point` intersects
+those three regions on every frame rather than pinning an index, because an index
+measured once is unverifiable afterwards and would publish a nostril without saying
+so on a Vision that renumbered a region. If the intersection is not exactly one
+point, the channel reads 0 and `--keypoints` says why.
+
+**There are no ears.** Vision has twelve landmark regions and none of them is an ear,
+so there is nothing to select. This was asked for and refused rather than
+approximated.
+
+**`eye_left` is `leftPupil`, whatever side of the frame that turns out to be.** The
+name mirrors Vision's; which side of an unmirrored image it appears on is
+**UNMEASURED** and `tools/probe_face_regions.py --keypoints` is what answers it.
+
+`Screenspaceonly` deletes the raw `f<i>_eye_left_x` and keeps `f<i>_eye_left_tx`,
+like any other channel with a companion.
 
 ### The sidecar's own status channels
 

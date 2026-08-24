@@ -133,6 +133,32 @@ _EYE_DX: Final = 0.22          # from the centre line to an eye's centre
 _MOUTH_Y: Final = 0.20
 _NOSE_TIP_Y: Final = 0.38
 
+# THE TIP IS ONE POINT IN THREE REGIONS, and this constant is what makes that true
+# here as well as on a real face. MEASURED on the live framework (DESIGN.md 2.12):
+# the 12 regions overlap, and exactly one point belongs to `nose`, `nose_crest` and
+# `median_line` at once - which is how `face_types.nose_tip_point` finds it without
+# a pinned index. A synthetic face whose regions were drawn independently would have
+# no such point, so `f0_nose_tip_*` would read zero on every synthetic frame while
+# reading correctly on the camera. The one tuple below is placed into all three
+# regions so the values are identical to the BIT, not merely close: `_oriented`
+# transforms each region separately, and two coordinates that agree to six places
+# before it can straddle a rounding boundary after it.
+_NOSE_TIP: Final[tuple[float, float]] = (0.5, _NOSE_TIP_Y)
+
+
+def _through_tip(points: tuple[tuple[float, float], ...]
+                 ) -> tuple[tuple[float, float], ...]:
+    """`points` with the one nearest the nose tip replaced by the tip itself.
+
+    For the regions that PASS THROUGH the tip rather than starting or ending at it.
+    Nearest rather than a fixed index so the substitution follows `_NOSE_TIP_Y` if
+    it is ever moved, instead of quietly displacing some other point.
+    """
+    nearest = min(range(len(points)),
+                  key=lambda i: (points[i][0] - _NOSE_TIP[0]) ** 2
+                  + (points[i][1] - _NOSE_TIP[1]) ** 2)
+    return (*points[:nearest], _NOSE_TIP, *points[nearest + 1:])
+
 
 def _template(expression: float) -> dict[str, tuple[tuple[float, float], ...]]:
     """The neutral constellation, with the mouth opened by `expression`.
@@ -159,8 +185,10 @@ def _template(expression: float) -> dict[str, tuple[tuple[float, float], ...]]:
         # empty" is a question tests ask constantly. Real points do not sit on the
         # boundary to the bit either.
         "face_contour": _arc(0.5, 0.76, 0.48, 0.74, 17, 180.0, 360.0),
-        # Forehead to chin down the centre, inset for the same reason.
-        "median_line": _line(0.5, 0.99, 0.5, 0.02, 10),
+        # Forehead to chin down the centre, inset for the same reason - and passing
+        # THROUGH the nose tip, which is the point it shares with `nose` and
+        # `nose_crest`. See `_NOSE_TIP`.
+        "median_line": _through_tip(_line(0.5, 0.99, 0.5, 0.02, 10)),
         # The subject's RIGHT is at SMALLER x. Both brows arc upward over the eye.
         "right_eyebrow": _arc(0.5 - _EYE_DX, _EYE_Y + 0.11, 0.13, 0.05, 6,
                               200.0, 340.0),
@@ -171,10 +199,16 @@ def _template(expression: float) -> dict[str, tuple[tuple[float, float], ...]]:
         "left_eye": _arc(0.5 + _EYE_DX, _EYE_Y, 0.11, 0.05, 6, 0.0, 300.0),
         "right_pupil": ((0.5 - _EYE_DX, _EYE_Y),),
         "left_pupil": ((0.5 + _EYE_DX, _EYE_Y),),
-        # The nose's base and nostrils, spread either side of the tip.
-        "nose": _arc(0.5, _NOSE_TIP_Y, 0.11, 0.06, 8, 200.0, 340.0),
-        # The bridge, from between the eyes down to the tip.
-        "nose_crest": _line(0.5, _EYE_Y - 0.03, 0.5, _NOSE_TIP_Y, 6),
+        # The tip, then the base and nostrils spread either side of it. Seven arc
+        # points rather than eight because the tip takes the eighth slot: the
+        # region's measured count is what the channel list is built from, so it has
+        # to stay 8.
+        "nose": (_NOSE_TIP, *_arc(0.5, _NOSE_TIP_Y, 0.11, 0.06, 7,
+                                  200.0, 340.0)),
+        # The bridge, from between the eyes down to the tip - which is the shared
+        # point, placed exactly rather than arrived at by interpolation.
+        "nose_crest": (*_line(0.5, _EYE_Y - 0.03, 0.5, _NOSE_TIP_Y, 6)[:-1],
+                       _NOSE_TIP),
         "outer_lips": tuple(
             (x, y - open_down if y < _MOUTH_Y else y + open_up)
             for x, y in _arc(0.5, _MOUTH_Y, 0.17, 0.075, 14, 0.0, 360.0 * 13 / 14)),

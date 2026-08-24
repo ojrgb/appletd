@@ -4336,3 +4336,69 @@ toggle is the confident wrong number this project keeps deleting.
 The figures are LITERALS in `MEASURED_MS`, not measured at build. Measuring on every
 build would make the panel depend on whatever else the machine was doing, and
 STANDARDS.md 3 does not accept a number taken under unknown load.
+
+---
+
+## Milestone — the face's four key points, and the first reverse gate
+2026-08-24
+
+**Built.** `Face Key Points`: a toggle that swaps 664 face landmark channels for 32.
+Four points per face on the wire (`f{i}_eye_left`, `eye_right`, `nose_tip`, `mouth`),
+composed into world and pixel space beside the bounding box, and a third gating
+mechanism to freeze the landmark halves when the toggle is ON. 387 channels on the
+face contract, up from 371. `tools/probe_face_regions.py --keypoints`. 611 tests.
+
+**Measured**, 89 frames through `td_profile.py` with the synthetic senders running:
+
+    face stream, toggle off   1.9644 ms      out1  1,082 channels
+    face stream, toggle on    0.7872 ms      out1    418 channels
+    the four points, always   0.1012 ms
+
+**Two of the four points are not points Vision publishes**, and that was the finding
+that shaped the whole thing. Every landmark region except the pupils is a RING:
+`leftEye` gives six points tracing the lid and none of them is the eye's centre. The
+pupils are the only single-point regions in the constellation — which is why the eyes
+were free, the mouth had to be a mean, and the nose tip had to be identified.
+
+**The nose tip was supposed to need a camera, and did not.** The plan said "one
+measurement against a real face" to find which index of `nose` or `noseCrest` is the
+tip. Step 16's overlap arithmetic had already answered it without anybody noticing:
+87 slots over 76 distinct points is 11 duplicates, and the pair counts resolve to
+nine points in two regions and exactly one in three. That one is the tip, where
+`medianLine`, `noseCrest` and `nose` meet. So the code intersects those three regions
+on every frame instead of pinning an index — which is better than the measurement
+would have been, because an index measured once is unverifiable afterwards and would
+publish a nostril on a Vision that renumbered a region.
+
+**What surprised us: a synthetic face had no nose tip.** `synth_face.py` draws each
+region independently, so its three nose regions shared no point and `f0_nose_tip_*`
+read zero on every synthetic frame while being correct on a camera — a channel that
+works only where nobody is looking. Fixed by placing one shared `_NOSE_TIP` tuple into
+all three regions, and shared to the BIT rather than to six places: `_oriented`
+transforms each region separately, and two coordinates that agree to 1e-6 before it
+can straddle a rounding boundary after it.
+
+**A third gating table.** `COOK_GATED` is an OR, `COOK_VETOED` is an AND, and both
+mean *more on means more cooking*. Every toggle in this component until now added
+capability; this one removes it, so `COOK_SUPPRESSED` freezes a group when a toggle is
+ON. Two consequences fell straight out: it must be in none of the `Verbosity` presets,
+or `Everything` would switch off the 348 landmarks it just promised, and its label
+says "saves 1.18 ms" rather than a cost, because a cost figure beside a switch that
+gives you the cost back reads as the opposite of what it does.
+
+**A failure report that was a frame boundary, again.** The first chain run said "face:
+16 channels entered the filter and did not leave" — the check compared an `in1` that
+had already seen the new contract against an `out1` that had not. It was gone on the
+next run with nothing changed. Sixth time this class has cost time; the handoff's rule
+about not verifying anything across a frame boundary inside one script keeps earning
+its place.
+
+**And one figure left unexplained rather than tidied.** With the toggle ON the two
+CHEAP coordinate halves cost about 0.09 ms more than with it off, on identical work.
+Fewer operators cooking changes how TouchDesigner attributes time to the ones that
+remain. The total fell by 1.14 ms, which is the number that matters; the 0.09 is in
+`BENCHMARKS.md` as measured, unexplained.
+
+**Still unknown.** Whether `leftPupil` is the SUBJECT's left or the IMAGE's left.
+`f{i}_eye_left` mirrors the region name and says so in the docs;
+`probe_face_regions.py --keypoints` answers it in one run and needs a face.

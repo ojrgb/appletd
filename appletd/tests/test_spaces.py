@@ -23,12 +23,13 @@ from fnmatch import fnmatchcase
 
 import pytest
 
-from appletd.face_types import FACE_REGIONS, face_channel_names
+from appletd.face_types import FACE_KEYPOINTS, FACE_REGIONS, face_channel_names
 from appletd.pose_types import pose_channel_names
 from appletd.spaces import (
     DERIVE_CHOP,
     DERIVED_SOURCES,
     ROLE_ANGLE,
+    ROLE_BOX_KEYPOINT,
     ROLE_BOX_RELATIVE,
     ROLE_EXTENT_X,
     ROLE_EXTENT_Y,
@@ -46,6 +47,7 @@ from appletd.spaces import (
     derived_branches,
     derived_companioned_names,
     derived_roles,
+    keypoint_branches,
     names_by_role,
     passthrough_names,
     scope_pattern,
@@ -460,3 +462,93 @@ def test_the_derived_and_wire_delete_lists_do_not_overlap() -> None:
     channel that belongs to the other."""
     for stream in STREAM_NAMES:
         assert not set(companioned_names(stream)) & set(derived_companioned_names())
+
+
+# ---------------------------------------------------------------------------
+# The four key points
+#
+# Same arithmetic as a landmark, a different COMP, and one thing that has to stay
+# true for either to work: the two sets must not overlap, because the patterns that
+# separate them are what the two toggles are built on.
+# ---------------------------------------------------------------------------
+def test_a_key_point_is_box_relative_and_not_a_landmark() -> None:
+    """It shares the landmarks' SPACE - normalised to the face's box - and not their
+    role, because sharing the role would put 16 cheap channels inside the COMP that
+    holds 348 expensive ones."""
+    roles = channel_roles("face")
+    for point in FACE_KEYPOINTS:
+        assert roles["f0_%s_x" % point] == ROLE_BOX_KEYPOINT
+    assert roles["f0_left_eye_00_x"] == ROLE_BOX_RELATIVE
+    assert roles["f0_bbox_x"] == ROLE_POSITION_X
+
+
+def test_the_key_points_are_smoothed_like_every_other_point() -> None:
+    """A jittering pupil is the same defect as a jittering landmark, and the filter
+    splits on ROLE - a role missing from SMOOTHED_ROLES drops out of the filter
+    group's scope and is passed through raw with nothing saying so."""
+    assert ROLE_BOX_KEYPOINT in SMOOTHED_ROLES
+    smoothed = set(smoothed_names("face"))
+    for point in FACE_KEYPOINTS:
+        assert "f0_%s_y" % point in smoothed
+
+
+def test_hands_and_pose_have_no_key_points() -> None:
+    assert keypoint_branches("hands") == []
+    assert keypoint_branches("pose") == []
+    assert len(keypoint_branches("face")) == 8   # 2 faces x 2 axes x 2 spaces
+
+
+def test_a_key_point_branch_carries_four_channels_and_a_landmark_one_87() -> None:
+    """The ratio is the point of the whole split: 1.21 ms of landmark composition
+    against a fiftieth of it."""
+    for branch in keypoint_branches("face"):
+        assert len(branch.names) == len(FACE_KEYPOINTS)
+    for branch in box_branches("face"):
+        assert len(branch.names) == 87
+
+
+def test_the_two_kinds_of_branch_never_name_the_same_channel() -> None:
+    """They are composed in different COMPs, so a channel in both would be computed
+    twice and merged into a name collision."""
+    landmarks = {name for b in box_branches("face") for name in b.names}
+    points = {name for b in keypoint_branches("face") for name in b.names}
+    assert landmarks & points == set()
+
+
+def test_no_branch_label_is_used_twice() -> None:
+    """Labels become operator names, and the two roles each produce a branch per
+    (face, axis, space) - so without the `kp_` prefix both would ask to be `f0_tx`
+    and TouchDesigner would silently rename one of them."""
+    labels = [b.label for b in box_branches("face") + keypoint_branches("face")]
+    assert len(set(labels)) == len(labels)
+
+
+def test_a_key_point_composes_through_the_same_box_as_a_landmark() -> None:
+    """The arithmetic is evaluated, not eyeballed - the same reason
+    `test_box_expressions_compose_through_the_box_and_then_the_space` exists."""
+    box = {"f0_bbox_x": 0.30, "f0_bbox_y": 0.20, "f0_bbox_w": 0.22, "f0_bbox_h": 0.30}
+
+    class _FakeOp:
+        def __getitem__(self, name: str) -> float:
+            return box[name]
+
+    scope = {"op": lambda _path: _FakeOp()}
+    point = 0.75
+    for branch in keypoint_branches("face"):
+        if not branch.label.startswith("kp_f0"):
+            continue
+        gain_expr, postoff_expr = box_expressions(branch, "2.0")
+        value = point * eval(gain_expr, scope) + eval(postoff_expr, scope)
+        origin, extent = box[branch.origin], box[branch.extent]
+        assert value == pytest.approx(
+            (origin + point * extent + branch.offset) * 2.0)
+
+
+def test_the_key_points_have_screen_space_companions() -> None:
+    """`Screenspaceonly` deletes a raw channel only when a transformed twin carries
+    the same information. A key point that reached that list without a companion
+    would be deleted outright."""
+    companioned = set(companioned_names("face"))
+    for point in FACE_KEYPOINTS:
+        assert "f0_%s_x" % point in companioned
+        assert "f0_%s_y" % point in companioned

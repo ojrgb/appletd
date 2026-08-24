@@ -7,7 +7,8 @@ same frame and shares its `seq` (DESIGN.md 6.4).
 
 WHAT IT PUBLISHES: the observation's own numbers - confidence, capture quality,
 roll, yaw, pitch and the bounding box - and, since the region point counts were
-MEASURED on 2026-08-21, all 76 landmark points across the 12 regions. 371 channels.
+MEASURED on 2026-08-21, all 76 landmark points across the 12 regions, and since
+2026-08-24 the four key points computed from them. 387 channels.
 
 The points spent a day unpublished on purpose, because their split across the
 regions cannot be known before a face has been seen and this repo does not ship
@@ -46,10 +47,15 @@ import Vision
 from appletd.engine import EngineError, ObjCObject
 from appletd.face_types import (
     CONSTELLATION_76,
+    FACE_KEYPOINTS,
+    FACE_REGION_NAMES,
     FACE_REGIONS,
     MAX_FACES,
+    NOSE_TIP_REGIONS,
     Face,
     FaceFrame,
+    face_keypoints,
+    nose_tip_point,
     order_faces,
 )
 from appletd.types import Confidence, NormX, NormY
@@ -237,6 +243,57 @@ def region_point_report(frame: FaceFrame) -> dict[str, object]:
             "distinct_exact": len(set(every)),
             "distinct_rounded": len(set(rounded)),
             "overlaps": overlaps,
+        }
+    return {}
+
+
+def keypoint_report(frame: FaceFrame) -> dict[str, object]:
+    """Where each of the four key points came from, for the FIRST found face. Pure.
+
+    The measurement `tools/probe_face_regions.py --keypoints` prints, and the only
+    thing in this system that can answer two questions a fixture cannot:
+
+      * WHICH INDEX the nose tip occupies in each of its three regions. Nothing
+        depends on the answer - `face_types.nose_tip_point` finds the point by
+        intersection, deliberately - but it is worth having written down once, so
+        the next person can see that the intersection found the point they would
+        have picked by eye.
+      * WHETHER `leftPupil` is Vision's left or the IMAGE's left. `face_types.py`
+        publishes `f{i}_eye_left` as a faithful mirror of the region name and says
+        in as many words that which side of the frame that is has not been
+        measured. This is what measures it, and the answer belongs in
+        docs/ATTRIBUTES.md rather than in a guess.
+
+    Returns {} when no face in the frame has landmarks, the same as
+    `region_point_report`.
+    """
+    for face in frame.faces:
+        if not (face.found and face.landmarks):
+            continue
+        regions = dict(face.landmarks)
+        tip = nose_tip_point(face.landmarks)
+        indices: dict[str, int | None] = {}
+        for name in NOSE_TIP_REGIONS:
+            indices[name] = None
+            if tip is None:
+                continue
+            for index, point in enumerate(regions.get(name, ())):
+                if (round(point[0], 6), round(point[1], 6)) == (round(tip[0], 6),
+                                                                round(tip[1], 6)):
+                    indices[name] = index
+                    break
+        left = regions.get("left_pupil") or ()
+        right = regions.get("right_pupil") or ()
+        return {
+            "points": dict(zip(FACE_KEYPOINTS, face_keypoints(face), strict=True)),
+            "nose_tip": tip,
+            "nose_tip_indices": indices,
+            # None when either pupil is missing: an unanswerable question must not
+            # come back as a confident False.
+            "left_pupil_is_right_of_image_centre": (
+                None if not (left and right) else left[0][0] > right[0][0]),
+            "missing": [name for name in FACE_REGION_NAMES
+                        if not regions.get(name)],
         }
     return {}
 

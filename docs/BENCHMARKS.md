@@ -242,6 +242,50 @@ TouchDesigner at all - every group against every-group-but-one, 500 calls, media
 landmark points converted into two coordinate spaces. Switch off the space you are not
 reading.
 
+### `Face Key Points` — what the swap is worth
+
+Measured 2026-08-24, `tools/td_profile.py` across 89 frames at 60.0 fps, with the
+synthetic face and hands senders running and the face stream unfrozen. The toggle
+swaps the 348 landmark points for four points per face.
+
+| | `Facekeypoints` off | on |
+|---|---|---|
+| `face/coords/lm_world` | 0.7751 ms | **frozen** |
+| `face/coords/lm_pixels` | 0.6523 ms | **frozen** |
+| `face/coords/world` | 0.1306 ms | 0.1813 ms |
+| `face/coords/pixels` | 0.1103 ms | 0.1538 ms |
+| **the face stream** | **1.9644 ms** | **0.7872 ms** |
+| everything cooking | 3.4405 ms | 2.3027 ms |
+| operators cooking | 87 | 65 |
+| channels on `out1` | 1,082 | 418 |
+
+**1.18 ms saved, and that is the number on the panel.** It is a REVERSE gate — the
+only toggle in the component that freezes a group by being switched ON — so its label
+says "saves" rather than a cost, because putting `1.18 ms` beside a switch that gives
+you 1.18 ms back reads as exactly the opposite of what it does.
+
+**What it costs when it is OFF: 0.1012 ms.** The four points are composed beside the
+bounding box under `Coordstx`/`Coordspx` rather than behind `Lmcoordstx`, which is
+what lets the cheap half survive when the expensive one freezes - and it means they
+are computed whether the toggle is on or not. That is 2.9% of the component with
+everything enabled, and it is the price of `f0_eye_left_tx` being there without a
+toggle to find first.
+
+| | ms | channels |
+|---|---|---|
+| the 8 key point branches, world half | 0.0577 | 16 |
+| the 8 key point branches, pixel half | 0.0435 | 16 |
+| the 16 landmark branches, both halves | 1.3763 | 696 |
+
+Per channel the key points are worse - 3.2 µs against 2.0 - because a 4-channel
+operator is mostly fixed overhead. Per FACE they are 43× cheaper, which is the trade
+the toggle exists to offer.
+
+**One figure here is unexplained and left as measured**: the two cheap halves cost
+about 0.09 ms MORE with the toggle on, on identical work. Fewer operators cooking
+changes how TouchDesigner attributes time to the ones that remain; it does not change
+the total, which fell by 1.14 ms.
+
 ### The whole COMP, by configuration
 
 Sampled over 90 render frames from a scheduled callback, medians of cooks where
@@ -268,7 +312,8 @@ always is off.
 
 | | |
 |---|---|
-| all three streams, every space enabled | 1,863 |
+| all three streams, every space enabled | **2,041** (635 hands, 275 pose, 1,131 face) |
+| the same, with `Screenspaceonly` on | 1,493 |
 | shipping configuration, on `out1` | **258** |
 | `housekeeping` (`sc_*`, `seq`, `age_ms`) | 10 |
 | never on the output (per-joint `*_conf`) | 80 |

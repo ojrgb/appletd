@@ -876,7 +876,7 @@ option. The test suite caught it before TouchDesigner did, because a bound socke
 a test refuses the same datagram.
 
 Measured bundle sizes, for the next time a contract grows: hands 4188 bytes (141
-channels), pose 3720 (123), face **12208** (371). At roughly 33 bytes per channel, a
+channels), pose 3720 (123), face **12640** (387). At roughly 33 bytes per channel, a
 default socket tops out near 280 channels.
 
 ---
@@ -1395,6 +1395,67 @@ failing; it is the correction faithfully tracking a fit solved from two points t
 partly a moving torso. The arithmetic is exact, the inputs were wrong, and the readouts
 said so before anybody looked at the picture.
 
+### 2.23 The face's four key points — measured 2026-08-24
+
+348 landmark channels is the right answer for a project that wants a face mesh and
+the wrong one for a project that wants to know where somebody is looking. So four
+points per face are published beside the regions — two pupils, a nose tip and a
+mouth centre — and `Facekeypoints` on the Attributes page swaps one for the other.
+
+**Two of the four are not points Vision publishes**, and that is the finding worth
+recording. Every region except the pupils is a RING: `leftEye` gives six points
+tracing the lid and none of them is the eye's centre. `leftPupil` and `rightPupil`
+are the only SINGLE-POINT regions in the constellation, which is why they cost
+nothing to use and why the mouth centre has to be a mean of `innerLips`.
+
+**The nose tip is identified structurally, not by index.** §2.12's overlap
+arithmetic pins exactly one point in three regions at once — nine points sit in two
+regions and one sits in three, which is the eleven duplicate slots and twelve
+overlapping pairs measured on 2026-08-21 — and that point is the tip, where
+`medianLine` running down the face meets `noseCrest` down the bridge and `nose`
+around the base. `face_types.nose_tip_point` intersects those three regions on every
+frame and publishes zero if the answer is not exactly one point.
+
+**Why not a pinned index**, which was the obvious alternative and the one the plan
+had: an index is one number measured once against one face on one macOS, with
+nothing able to check it afterwards. On a Vision that renumbered a region it would
+publish a nostril and call it a tip — the same shape of silent failure that made the
+point COUNTS worth measuring rather than assuming in the first place. The
+intersection is checked against the data every frame and costs 24 points of set
+arithmetic per face.
+
+**The cost, and where it is paid.** MEASURED across 89 frames with `td_profile.py`:
+
+```
+                          Facekeypoints off      on
+face/coords/lm_world             0.7751 ms    frozen
+face/coords/lm_pixels            0.6523 ms    frozen
+the whole face stream            1.9644 ms    0.7872 ms
+channels on out1                     1,082       418
+```
+
+The four points ride in `coords/world` and `coords/pixels`, beside the bounding box,
+rather than in the landmark halves — which is what lets the expensive halves freeze
+while the points survive, and is why `spaces.py` gives them their own role. They cost
+**0.1012 ms** when the toggle is OFF, which is the price of their being available
+without a toggle to find first.
+
+**A third gating mechanism, and it is the first REVERSE gate here.** `COOK_GATED` is
+an OR and `COOK_VETOED` is an AND, and both read "more on means more cooking" — every
+toggle in this component until now added capability. This one removes it, so
+`COOK_SUPPRESSED` freezes a group when a toggle is ON. It is also why `Facekeypoints`
+is in none of the `Verbosity` presets: `Everything` would otherwise switch off the
+348 landmarks it has just promised.
+
+**No ears.** Asked for, and refused rather than approximated: Vision has twelve
+landmark regions and none of them is an ear.
+
+**One thing still UNMEASURED**: whether `leftPupil` is the SUBJECT's left or the
+IMAGE's left. `f{i}_eye_left` mirrors the region name and says so;
+`tools/probe_face_regions.py --keypoints` is what answers it, and needs a face.
+
+---
+
 ## 3. Traps — all of these cost real time in the spike
 
 **GIL starvation from a polling main thread.** A tight
@@ -1860,9 +1921,10 @@ it asserted that the regions partition the constellation. They do not. Worth
 remembering as a shape of mistake: the guess that got caught was in the check, not
 in the data.
 
-**12208 bytes on the wire, which is over a default UDP send buffer** (§2.13). That
+**12640 bytes on the wire, which is over a default UDP send buffer** (§2.13). That
 makes face the size-constrained stream and `MAX_FACES = 2` the practical ceiling for
-one bundle.
+one bundle. It was 12208 for 371 channels until the four key points were added on
+2026-08-24 — see §2.23.
 
 **Two units traps on the face path**, both silent, both handled in `face.py`:
 `roll`/`yaw`/`pitch` arrive in RADIANS and every angle in this system is degrees

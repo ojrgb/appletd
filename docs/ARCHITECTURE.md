@@ -212,7 +212,7 @@ frozen TOP looks obviously wrong.
 
 ## 5b. Why most of the component is switched off
 
-The component computes about 1,863 channels across 338 operators. Almost nobody wants
+The component computes about 2,041 channels across 338 operators. Almost nobody wants
 all of it. So nearly everything is behind a toggle, and a toggle does not mean "hide
 the output" - it means **`allowCooking = False`**, and the operators do not run.
 

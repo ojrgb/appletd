@@ -176,12 +176,20 @@ ROW_FIRST = -1
 # So a project that wants a face's bounding box in world space but not 348 landmark
 # coordinates can have exactly that, which it could not when one toggle covered
 # both.
+#
+# THE FOURTH COLUMN is which set of BOX-RELATIVE branches the half also takes, and
+# it is what puts the four key points in the cheap half rather than the expensive
+# one. A key point composes through the face's bounding box exactly as a landmark
+# does - identical arithmetic, identical operators - but there are 4 of them per
+# branch against 87, so they ride with the bounding box under `Coordstx` instead of
+# behind `Lmcoordstx`. That is the whole mechanism behind `Face Key Points`: the
+# eyes, nose and mouth stay live when the 348 landmark channels are frozen.
 HALVES = (
-    # name        toggle          the suffixes            box-relative?
-    ("world", "Coordstx", ("_tx", "_ty", "_tw", "_th"), False),
-    ("pixels", "Coordspx", ("_px", "_py", "_pw", "_ph"), False),
-    ("lm_world", "Lmcoordstx", ("_tx", "_ty"), True),
-    ("lm_pixels", "Lmcoordspx", ("_px", "_py"), True),
+    # name        toggle          the suffixes            box branches
+    ("world", "Coordstx", ("_tx", "_ty", "_tw", "_th"), "keypoints"),
+    ("pixels", "Coordspx", ("_px", "_py", "_pw", "_ph"), "keypoints"),
+    ("lm_world", "Lmcoordstx", ("_tx", "_ty"), "landmarks"),
+    ("lm_pixels", "Lmcoordspx", ("_px", "_py"), "landmarks"),
 )
 
 # Which halves take branches whose source is NOT the wire contract. Split out so a
@@ -437,6 +445,7 @@ def main():
         box_branches,
         box_expressions,
         derived_branches,
+        keypoint_branches,
         transform_branches,
     )
     from appletd.streams import STREAM_HANDS, STREAM_NAMES
@@ -462,9 +471,12 @@ def main():
         if stream == STREAM_HANDS:
             for src in DERIVED_SOURCES:
                 pairs.extend((src, b) for b in derived_branches(src))
-        built.append(_build_one(td, child, stream, pairs,
-                                box_branches(stream), box_expressions, failures,
-                                stream_xy(GROUP), _keep_layout(master)))
+        # Keyed by the name `HALVES` uses, so which half takes which set is stated
+        # once, in the table, rather than inferred here.
+        boxes = {"landmarks": box_branches(stream),
+                 "keypoints": keypoint_branches(stream)}
+        built.append(_build_one(td, child, stream, pairs, boxes, box_expressions,
+                                failures, stream_xy(GROUP), _keep_layout(master)))
 
     print()
     for stream, operators, channels, renames in built:
@@ -499,6 +511,9 @@ def _build_one(td, child, stream, pairs, boxes, box_expressions, failures,
 
     `pairs` is [(source name, Branch)] - the source is which of this group's inputs
     the branch reads, because the derived positions do not arrive on the wire.
+    `boxes` is {kind: [BoxBranch]}, keyed by the names in `HALVES`' fourth column:
+    `landmarks` for the 348 that ride behind `Lmcoordstx`, `keypoints` for the 16
+    that ride with the bounding box.
     """
     branches = [b for _src, b in pairs]
     source = child.op(SOURCE) or child.op("in1")
@@ -572,7 +587,7 @@ def _build_one(td, child, stream, pairs, boxes, box_expressions, failures,
         print("   (`%s` has no %s yet - those branches skipped. Re-run this after "
               "td_add_temporal.py.)" % (stream, ", ".join(missing)))
 
-    if not branches and not boxes:
+    if not branches and not any(boxes.values()):
         # A stream with nothing to transform is legitimate - it just gets an empty
         # group rather than a missing one, so a later run has something to fill.
         group_out = kept.get("out1") or group.create(td.outCHOP, "out1")
@@ -589,14 +604,17 @@ def _build_one(td, child, stream, pairs, boxes, box_expressions, failures,
     # only `filter`, the derived halves take only the other two, and a branch whose
     # source is missing is dropped here rather than half-built.
     plan = [(n, t, sfx, box, (SOURCE,)) for n, t, sfx, box in HALVES]
-    plan += [(n, t, sfx, False, tuple(s for s in SOURCES if s != SOURCE))
+    plan += [(n, t, sfx, None, tuple(s for s in SOURCES if s != SOURCE))
              for n, t, sfx in DERIVED_HALVES]
-    for name, toggle, suffixes, box_half, from_sources in plan:
-        mine = ([] if box_half else
+    for name, toggle, suffixes, box_kind, from_sources in plan:
+        # A LANDMARK half takes nothing but its box branches; the world and pixel
+        # halves take their own transform branches AND the key points.
+        mine = ([] if box_kind == "landmarks" else
                 [(src, b) for src, b in pairs
                  if b.suffix in suffixes and src in from_sources
                  and src not in absent])
-        boxes_mine = [b for b in boxes if b.suffix in suffixes] if box_half else []
+        boxes_mine = [b for b in boxes.get(box_kind, ())
+                      if b.suffix in suffixes]
         if not mine and not boxes_mine:
             continue
         half = _build_half(td, group, group_ins, stream, name, toggle, mine,
@@ -623,14 +641,14 @@ def _build_one(td, child, stream, pairs, boxes, box_expressions, failures,
     note = group.create(td.textDAT, "notes")
     note.nodeX, note.nodeY = COL_IN * COL_W, ROW_H
     note.text = NOTES % {
-        "box_note": BOX_NOTE if boxes else "",
+        "box_note": BOX_NOTE if any(boxes.values()) else "",
         "branches": "\n".join(["", "HALVES", *summary])}
 
     # Only the branches that were actually BUILT - a source that is absent
     # contributes nothing, and counting it would turn a partial build into a
     # failure report rather than the message above.
     expected = sum(len(b.names) for src, b in pairs if src not in absent) + sum(
-        len(box.names) for box in boxes)
+        len(box.names) for kind in boxes.values() for box in kind)
     # And only when the stream is actually COOKING. A frozen stream's operators hold
     # nothing to count - `Streampose` off used to report "produced 0 channels,
     # expected 152" on a group that had been built correctly. Say it was not

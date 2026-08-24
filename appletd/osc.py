@@ -121,7 +121,7 @@ def encode_bundle(pairs: Iterable[tuple[str, float]]) -> bytes:
     one frame and half of the next. 137 separate datagrams would also be 137
     syscalls per frame.
     Size: MEASURED per stream - hands 4188 bytes (141 channels), pose 3720 (123),
-          face 12208 (371). The face bundle is the one to watch, and the limit is
+          face 12640 (387). The face bundle is the one to watch, and the limit is
           NOT the 16 KB this note used to guess: see `datagram_socket`.
     """
     parts = [_BUNDLE_PREFIX_PADDED, _TIMETAG_IMMEDIATE]

@@ -23,7 +23,10 @@ was worth the trouble:
     nobody had measured them. **MEASURED 2026-08-21** by
     `tools/probe_face_regions.py` against a real face, and the numbers were not what
     a reasonable guess would have produced: the regions sum to 87 slots over 76
-    distinct points, because they OVERLAP. 371 channels now.
+    distinct points, because they OVERLAP.
+  * `FACE_KEYPOINTS` - four points per face, three of which no region publishes
+    directly. Added 2026-08-24 because 348 landmark channels is the wrong answer for
+    a project that only wants to know where somebody is looking. 387 channels now.
 
 There is no guessed count anywhere in this file, and the reason to hold that line
 was borne out: a guessed count does not fail loudly - it lays a nose's points into
@@ -44,6 +47,7 @@ Ref: DESIGN.md 6.4 (the stream contract), 2.12 (the API surface, measured).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -248,15 +252,155 @@ FACE_SCALARS: Final[tuple[str, ...]] = (
 _FRAME_SCALARS: Final = ("face_n", "face_seq", "face_age_ms")
 
 
+# ---------------------------------------------------------------------------
+# The four key points
+#
+# 348 landmark channels is the right answer for a project that wants a face MESH
+# and the wrong one for a project that wants to know where somebody is looking. So
+# four points per face are published beside the regions, and `Facekeypoints` on the
+# Attributes page is what swaps one for the other.
+#
+# WHY THEY ARE COMPUTED HERE rather than selected in TouchDesigner: two of the four
+# are not points Vision publishes. Every region except the pupils is a RING -
+# `left_eye_00`..`_05` trace around the eye and none of them is its centre - so a
+# mouth centre has to be averaged, and the nose tip has to be identified. Doing that
+# in the sidecar costs a few microseconds on the capture thread; doing it in
+# TouchDesigner would be eight Math CHOPs on the main thread, per frame, for ever.
+#
+# LEFT AND RIGHT ARE VISION'S, not the image's. `eye_left` is `leftPupil`, whatever
+# side of the frame that turns out to be on. UNMEASURED - the answer needs a face in
+# front of the camera, `tools/probe_face_regions.py --keypoints` prints it, and
+# guessing it here would put a confident wrong word in docs/ATTRIBUTES.md.
+# ---------------------------------------------------------------------------
+FACE_KEYPOINTS: Final[tuple[str, ...]] = (
+    # Free: `leftPupil` and `rightPupil` are the only SINGLE-POINT regions Vision
+    # gives, so each already IS the centre of its eye. No averaging, no guessing.
+    "eye_left",
+    "eye_right",
+    # Identified structurally - see `nose_tip_point` below.
+    "nose_tip",
+    # The mean of `inner_lips`. The inner ring rather than the outer: it is six
+    # points against fourteen, it closes when the mouth closes, and its centre is
+    # the aperture rather than the middle of the lip flesh.
+    "mouth",
+)
+
+# The three regions that all carry the nose tip, and the whole of how it is found.
+#
+# MEASURED 2026-08-21 (DESIGN.md 2.12): the 12 regions cover 76 distinct points in
+# 87 slots, and the arithmetic of the overlaps pins down exactly one point that
+# belongs to THREE regions - nine points sit in two, one sits in three, which is
+# 11 duplicate slots and 12 overlapping pairs. That point is the tip of the nose,
+# where `medianLine` running down the face meets `noseCrest` running down the bridge
+# and `nose` tracing the base.
+#
+# WHY THIS AND NOT A PINNED INDEX. An index would be one number measured once,
+# unverifiable afterwards, and silently wrong on a macOS that renumbers a region -
+# it would publish a nostril and call it a tip. The intersection is checked against
+# the data on every frame instead, and when it is not exactly one point the channel
+# publishes zero rather than a plausible neighbour.
+NOSE_TIP_REGIONS: Final[tuple[str, ...]] = ("nose", "nose_crest", "median_line")
+
+# Where two regions are taken to carry the SAME point. Vision computes a shared
+# point once and hands it to both regions, so the values have matched to every bit
+# in what has been seen - but `region_point_report` has always compared them rounded
+# as well as exactly, and this uses the rounded form for the same reason: an
+# almost-duplicate should still be recognised as the tip, not silently dropped.
+_SHARED_POINT_DP: Final = 6
+
+# What a key point reads when it cannot be computed - no landmarks at all, an empty
+# slot, or a nose tip that is not in exactly three regions. The BOX ORIGIN, and
+# deliberately the same value an empty face slot carries, so `f{i}_found` stays the
+# one thing to gate on rather than a second convention per channel.
+_ABSENT_POINT: Final[tuple[float, float]] = (0.0, 0.0)
+
+
+def nose_tip_point(
+        landmarks: Sequence[tuple[str, tuple[tuple[float, float], ...]]],
+) -> tuple[float, float] | None:
+    """The one point `nose`, `nose_crest` and `median_line` all carry, or None. Pure.
+
+    Contract: box-normalised, origin bottom left, like every landmark here.
+              None when the three regions do not share exactly one point - which is
+              a missing region, an empty face, or a Vision that has changed its
+              constellation. The caller publishes zero and says so; nothing here
+              falls back to an index, because a fallback would be the guess this
+              function exists to avoid.
+    Why:      see `NOSE_TIP_REGIONS`. 24 points intersected, per face per frame -
+              cheap enough that caching it would buy a stale index rather than time.
+    """
+    regions = dict(landmarks)
+    shared: set[tuple[float, float]] | None = None
+    for name in NOSE_TIP_REGIONS:
+        points = regions.get(name)
+        if not points:
+            return None
+        rounded = {(round(x, _SHARED_POINT_DP), round(y, _SHARED_POINT_DP))
+                   for x, y in points}
+        shared = rounded if shared is None else (shared & rounded)
+        if not shared:
+            return None
+    if shared is None or len(shared) != 1:
+        # Two candidates is as wrong as none: it means the assumption this is built
+        # on - one triple-shared point - no longer holds on this machine.
+        return None
+    key = next(iter(shared))
+    # The rounding is how the point is IDENTIFIED, not what gets published: return
+    # the coordinate Vision actually reported, so this channel carries the same
+    # precision as the 348 beside it.
+    for x, y in regions[NOSE_TIP_REGIONS[0]]:
+        if (round(x, _SHARED_POINT_DP), round(y, _SHARED_POINT_DP)) == key:
+            return (x, y)
+    return None
+
+
+def region_center(
+        landmarks: Sequence[tuple[str, tuple[tuple[float, float], ...]]],
+        region: str,
+) -> tuple[float, float] | None:
+    """The mean of one region's points, or None if it has none. Pure.
+
+    Why a mean and not a bounding-box centre: the ring is sampled roughly evenly, so
+    the mean is the centroid; a box centre would be pulled by whichever extreme the
+    expression moved most, and an opening mouth moves exactly one side.
+    """
+    points = dict(landmarks).get(region)
+    if not points:
+        return None
+    return (math.fsum(x for x, _y in points) / len(points),
+            math.fsum(y for _x, y in points) / len(points))
+
+
+def face_keypoints(face: Face) -> tuple[tuple[float, float], ...]:
+    """The four key points of one face, in `FACE_KEYPOINTS` order. Pure.
+
+    Contract: exactly len(FACE_KEYPOINTS) pairs, box-normalised, origin bottom left.
+              A point that cannot be computed is (0, 0) - never omitted, because a
+              short list would shift every later channel onto the wrong data, which
+              is the failure the whole fixed-list discipline here exists to prevent.
+    """
+    if not (face.found and face.landmarks):
+        return tuple(_ABSENT_POINT for _ in FACE_KEYPOINTS)
+    regions = dict(face.landmarks)
+    left = regions.get("left_pupil") or ()
+    right = regions.get("right_pupil") or ()
+    return (
+        left[0] if left else _ABSENT_POINT,
+        right[0] if right else _ABSENT_POINT,
+        nose_tip_point(face.landmarks) or _ABSENT_POINT,
+        region_center(face.landmarks, "inner_lips") or _ABSENT_POINT,
+    )
+
+
 def face_channel_names() -> tuple[str, ...]:
     """The complete, fixed face channel list, in publication order.
 
-    Contract: 3 + MAX_FACES * (len(FACE_SCALARS) + REGION_SLOT_TOTAL * 2), which is
-              **371**. It was 23 until the point counts were measured, and that
-              growth was a one-time event before anything consumed the stream -
-              `Streamface` ships off and the COMP was new. The list is fixed now,
-              like every other one here (DESIGN.md 6.2).
-    Size: 12208 bytes on the wire, MEASURED - which is 75% of a 16 KB datagram and
+    Contract: 3 + MAX_FACES * (len(FACE_SCALARS) + len(FACE_KEYPOINTS) * 2
+              + REGION_SLOT_TOTAL * 2), which is **387**. It was 23 until the point
+              counts were measured and 371 until the key points were added; both
+              growths happened before anything consumed the stream, and the list is
+              fixed now, like every other one here (DESIGN.md 6.2).
+    Size: 12640 bytes on the wire, MEASURED - which is 77% of a 16 KB datagram and
               MORE than a default UDP send buffer allows. `osc.datagram_socket()` is
               what makes it sendable, and MAX_FACES = 2 is the practical ceiling for
               one bundle.
@@ -267,6 +411,11 @@ def face_channel_names() -> tuple[str, ...]:
             names.append("f%d_%s" % (face_i, scalar))
         if not LANDMARKS_PUBLISHED:
             continue
+        # BEFORE the regions, so the four points a project usually wants come
+        # first in every channel list, every printed report and every Select.
+        for point in FACE_KEYPOINTS:
+            for axis in ("x", "y"):
+                names.append("f%d_%s_%s" % (face_i, point, axis))
         for region in FACE_REGIONS:
             # `point_count is not None` is guaranteed by LANDMARKS_PUBLISHED; the
             # assertion is in _self_check rather than repeated here.
@@ -301,6 +450,9 @@ def face_channel_values(frame: FaceFrame, age_ms: float,
         values.append(float(face.bbox_h))
         if not LANDMARKS_PUBLISHED:
             continue
+        for point_x, point_y in face_keypoints(face):
+            values.append(float(point_x))
+            values.append(float(point_y))
         points = dict(face.landmarks)
         for region in FACE_REGIONS:
             found = points.get(region.name, ())
@@ -347,6 +499,15 @@ def _self_check() -> None:
                 "re-run tools/probe_face_regions.py."
                 % (total, REGION_SLOT_TOTAL, CONSTELLATION_DISTINCT_POINTS,
                    REGION_SLOT_TOTAL - CONSTELLATION_DISTINCT_POINTS))
+    if len(set(FACE_KEYPOINTS)) != len(FACE_KEYPOINTS):
+        raise RuntimeError("duplicate name in FACE_KEYPOINTS")
+    if not set(NOSE_TIP_REGIONS) <= set(FACE_REGION_NAMES):
+        # A region renamed in FACE_REGIONS and not here would make `nose_tip_point`
+        # return None on every frame, and the channel would read zero for ever with
+        # nothing saying why.
+        raise RuntimeError("NOSE_TIP_REGIONS names a region FACE_REGIONS does not: "
+                           "%s" % ", ".join(sorted(set(NOSE_TIP_REGIONS)
+                                                   - set(FACE_REGION_NAMES))))
     names = face_channel_names()
     if len(set(names)) != len(names):
         raise RuntimeError("duplicate face channel name")
