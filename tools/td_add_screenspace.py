@@ -217,6 +217,83 @@ def _place(node, xy, keep, existed):
     return node
 
 
+# Candidates, cheapest first. Every one is verified before use; none is trusted.
+# `*_x *_y *_w *_h` is the whole companioned set BY CONSTRUCTION - a channel has a
+# `_tx`/`_px` twin exactly when it is a normalised position or extent - so where it
+# verifies it is not a guess, it is the contract restated compactly.
+_AXES = ("x", "y", "w", "h")
+# Plain suffixes: exact for pose and face, which have no hand-local descriptors.
+_SIMPLE = " ".join("*_%s" % a for a in _AXES)
+# TRIED FOR HANDS AND REJECTED BY THE VERIFIER, kept because the reason is worth
+# having: it selects 108 channels where 100 are wanted. The eight extras are
+# `h?_point_x/y` - unit vectors, which spaces.py records as NOT transformable and
+# therefore uncompanioned - and `h?_bbox_w/h`, which hands does not give a `_tw`/`_th`
+# twin. Deleting either would lose information that has no other copy.
+#
+# So hands keeps its literal list, and this is what that costs: 0.52 ms against face's
+# 0.13. The alternative was a pattern that looked right and quietly ate eight channels.
+# For HANDS, where `h{i}_d_<joint>_x` must survive. `[a-ce-z]` is every letter except
+# `d`, so `h?_[a-ce-z]*_x` takes `h0_palm_x` and `h0_bbox_x` and leaves the descriptor
+# channels alone - which is the one distinction a wildcard could not make before, and
+# the reason DESIGN.md 2.11 says a wildcard cannot partition these.
+#
+# `hands_*` and `index_*` are listed separately because `h?_` needs exactly one
+# character between `h` and `_`, and `hands_center_x` has four.
+_HANDS = " ".join(
+    ["h?_[a-ce-z]*_%s" % a for a in _AXES]
+    + ["hands_*_%s" % a for a in ("x", "y")]
+    + ["index_*_%s" % a for a in ("x", "y")])
+SCOPE_CANDIDATES = (_SIMPLE, _HANDS, "*_x *_y")
+
+
+def _scope_for(child, stream, doomed, optional):
+    """The Delete CHOP's scope: a verified pattern, or the literal names.
+
+    THE UNIVERSE IS WIDENED ON PURPOSE. Verifying against only the channels that
+    happen to be live today would accept `*_x` for hands while `Descriptor` is off,
+    and then over-delete the 84 hand-local `h?_d_<joint>_x` channels the moment
+    somebody turns it on - a pattern that is correct until a toggle moves is worse
+    than a literal list, because it is correct when you test it.
+
+    So the descriptor names are added to the universe whether or not they exist yet.
+    A pattern that would swallow them fails here and the literal list is used, which
+    is what hands gets and why face and pose do not.
+    """
+    from appletd.spaces import compact_pattern
+    from appletd.streams import STREAM_HANDS
+    from appletd.types import JOINT_NAMES
+
+    # ORDER MATTERS, and this is the subtle part of `compact_pattern`'s contract: it
+    # compares the expansion to the target as LISTS, not sets. Handing it a set makes
+    # the expansion order arbitrary, so no candidate ever matches and every stream
+    # silently falls back to its literal list - which looks exactly like "no pattern
+    # fits" and is not.
+    #
+    # So the universe is the merge's own channel ORDER, and the target is that same
+    # order filtered down. Both then agree by construction.
+    wanted_set = set(doomed) | set(optional)
+    merge = child.op("merge_out")
+    universe = [chan.name for chan in merge.chans()] if merge is not None else []
+    seen = set(universe)
+    universe += [name for name in list(doomed) + list(optional) if name not in seen]
+    # The channels that MIGHT appear, for THIS stream only. Hand-local descriptors are
+    # what make a wildcard unsafe, and they are absent from the universe whenever
+    # `Descriptor` is off - which is the default, and therefore the dangerous case.
+    #
+    # Scoped to hands, which cost a rebuild to learn: adding them for every stream put
+    # `h0_d_wrist_x` in FACE's universe, `*_x` matched it, and the pattern was rejected
+    # for a stream that has no descriptors and never will.
+    if stream == STREAM_HANDS:
+        for hand in range(2):
+            for joint in JOINT_NAMES:
+                for axis in ("x", "y"):
+                    name = "h%d_d_%s_%s" % (hand, joint, axis)
+                    if name not in seen:
+                        universe.append(name)
+    target = [name for name in universe if name in wanted_set]
+    return compact_pattern(target, universe, SCOPE_CANDIDATES)
+
+
 def _build_one(td, child, stream, doomed, optional, engaged, failures, node_xy,
                note_xy, keep):
     """Put the Delete CHOP between `merge_out` and `out1`. Returns a report row."""
@@ -240,7 +317,21 @@ def _build_one(td, child, stream, doomed, optional, engaged, failures, node_xy,
     # its default.
     node.par.select = "byname"
     node.par.discard = "scoped"
-    node.par.delscope = " ".join(list(doomed) + list(optional))
+    # A VERIFIED PATTERN where one exists, the literal list where none does.
+    #
+    # MEASURED 2026-08-24 in a fresh project: this operator was the single most
+    # expensive thing in the component. `face/screen_only` carried 356 literal names
+    # over 1,083 input channels and cost **2.1595 ms a frame** - more than everything
+    # else put together, and it was paying that with the sidecar switched OFF.
+    #
+    # A Delete CHOP's cost grows with list length x input channels (BENCHMARKS.md).
+    # That is the same finding that turned `trim_empty` from a Delete into a Select in
+    # step 14, and it was never carried across to here.
+    #
+    # `compact_pattern` EXPANDS each candidate against the universe and accepts it
+    # only on an exact match, so a pattern is never used on the strength of looking
+    # right - DESIGN.md 2.11 records two silent failures from exactly that.
+    node.par.delscope = _scope_for(child, stream, doomed, optional)
     node.bypass = not engaged
 
     # out1 reads the Delete CHOP now, not the Merge. Stated here rather than left

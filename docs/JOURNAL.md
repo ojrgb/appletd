@@ -4238,3 +4238,60 @@ The sed touched embedded modules too, so `Sourceversion` moved and the panel sai
 `Update needed - installed 24fc09dfa95a, this file wants 88237a5bf626` without being
 asked. Second time today it has reported a real divergence during ordinary work rather
 than in a test.
+
+---
+
+## 2026-08-24 — the component cost 5.8 ms doing nothing, and two fixes took it to zero
+
+Reported from a fresh project: the COMP logs cook time with `Active` off, more with
+`Level of Detail = Everything`, and 5 ms with face on. Profiled rather than guessed.
+
+    INACTIVE, Everything, hands+face
+    230 of 365 operators cooking, 5.8208 ms   <- with the sidecar switched OFF
+
+### One operator was 2.16 ms of it
+
+`face/screen_only` is a **Delete CHOP carrying 356 literal channel names** over 1,083
+input channels. A Delete's cost grows with list length x input channels, which is the
+measurement that turned `trim_empty` into a Select back in step 14 - and it was never
+carried across to here.
+
+`spaces.compact_pattern` already existed for exactly this: it EXPANDS each candidate
+against the universe and accepts it only on an exact match, so a pattern is never used
+on the strength of looking right. Wiring it in:
+
+    face   356 literal names -> `*_x *_y *_w *_h`    2.1595 ms -> 0.1282   17x
+    pose    76 literal names -> `*_x *_y *_w *_h`
+    hands  100 literal names -> unchanged, and correctly so
+
+**The verifier refused the hands pattern and was right.** `h?_[a-ce-z]*_x` - every
+letter but `d`, to spare the hand-local descriptors - selects 108 where 100 are wanted.
+The eight extras are `h?_point_x/y`, unit vectors that `spaces.py` records as not
+transformable and therefore uncompanioned, and `h?_bbox_w/h`, which hands gives no
+`_tw`/`_th` twin. Deleting either loses information that has no other copy. So hands
+keeps its literal list at 0.52 ms, and the alternative was a pattern that looked right
+and quietly ate eight channels.
+
+Two of my own mistakes on the way, both caught by the verifier refusing to cooperate:
+I widened the universe with HAND descriptor names for every stream, which made face's
+pattern fail for containing a channel face will never have; and I passed the universe
+as a **set**, when `compact_pattern` compares expansion to target as ORDERED LISTS - so
+no candidate could ever match and every stream fell back to literals, which looks
+exactly like "no pattern fits" and is not.
+
+### And nothing should have been cooking at all
+
+`Active` gated nothing. An OSC In CHOP cooks whether or not a datagram arrives, so the
+entire chain ran at 60 fps deriving attributes from channels that had not changed since
+anything last sent anything.
+
+`Active` is now a cook veto in `_apply_gating` - and **only** a cook veto. It does not
+touch the trim list, which is the subtlety: the trim is generated from `wanted`, so
+folding it in there would drop every channel from the output the moment somebody
+switched capture off, and a channel that vanishes breaks every reference with no error
+(DESIGN.md 6.2). Frozen groups hold their channels, which is what makes it safe.
+
+    INACTIVE, after: 0 of 365 cooking, 0.0000 ms, out1 still 1082 channels
+
+Verified both ways: switching `Active` back on unfreezes everything, `out1` is
+unchanged at 1,082, and no operator is in error.

@@ -486,7 +486,25 @@ def _apply_gating(comp):
         if any(hasattr(comp.par, v) and not bool(getattr(comp.par, v).eval())
                for v in vetoes):
             wanted[group_name] = False
-    for group_name, enabled in wanted.items():
+    # ACTIVE IS A COOK VETO, AND NOTHING ELSE.
+    #
+    # MEASURED 2026-08-24 in a fresh project: with the sidecar switched OFF, 230 of
+    # 365 operators still cooked every frame and the component cost 5.8 ms. Nothing
+    # was gated on `Active`, and an OSC In CHOP cooks whether or not a datagram
+    # arrives - so the whole chain ran at 60 fps deriving attributes from channels
+    # that had not changed since anything last sent anything.
+    #
+    # It affects `allowCooking` and NOT the trim list, which is the whole subtlety.
+    # The trim is generated from `wanted`, so folding this in there would drop every
+    # channel from the output the moment somebody switched capture off - and a channel
+    # that VANISHES breaks every reference to it with no error anywhere (DESIGN.md
+    # 6.2). Frozen groups hold their channels, which is what makes this safe.
+    cooking = dict(wanted)
+    live = getattr(comp.par, "Active", None)
+    if live is not None and not bool(live.eval()):
+        cooking = dict.fromkeys(wanted, False)
+
+    for group_name, enabled in cooking.items():
         group = comp.op(group_name)
         if group is None:
             continue
@@ -555,7 +573,25 @@ def _apply_gating(comp, verbose=False):
         if blocked:
             wanted[group_name] = False
 
-    for group_name, enabled in sorted(wanted.items()):
+    # ACTIVE IS A COOK VETO, AND NOTHING ELSE.
+    #
+    # MEASURED 2026-08-24 in a fresh project: with the sidecar switched OFF, 230 of
+    # 365 operators still cooked every frame and the component cost 5.8 ms. Nothing
+    # was gated on `Active`, and an OSC In CHOP cooks whether or not a datagram
+    # arrives - so the whole chain ran at 60 fps deriving attributes from channels
+    # that had not changed since anything last sent anything.
+    #
+    # It affects `allowCooking` and NOT the trim list, which is the whole subtlety.
+    # The trim is generated from `wanted`, so folding this in there would drop every
+    # channel from the output the moment somebody switched capture off - and a channel
+    # that VANISHES breaks every reference to it with no error anywhere (DESIGN.md
+    # 6.2). Frozen groups hold their channels, which is what makes this safe.
+    cooking = dict(wanted)
+    live = getattr(comp.par, "Active", None)
+    if live is not None and not bool(live.eval()):
+        cooking = dict.fromkeys(wanted, False)
+
+    for group_name, enabled in sorted(cooking.items()):
         group = comp.op(group_name)
         if group is None:
             report.append("%s: MISSING" % group_name)
@@ -840,6 +876,10 @@ def main():
         # the trim is a Select with a KEEP list, so nothing rewriting the list means
         # a toggle that appears to do nothing at all.
         | {FINGERTIPS_TOGGLE, HANDBOX_TOGGLE}
+        # `Active` vetoes cooking for every group, so flipping it has to re-run the
+        # gating - otherwise switching capture off leaves the whole chain cooking
+        # until something else happens to touch a toggle.
+        | {"Active"}
         # And EVERY attribute toggle, not just the ones that gate cooking. The trim
         # is a Select with a keep list, so it fails CLOSED: a channel the list does
         # not name is gone. `Descriptor`, `Depth` and `Tilt` gate no group's cooking,
