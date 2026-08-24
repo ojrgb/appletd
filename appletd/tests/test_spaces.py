@@ -37,6 +37,7 @@ from appletd.spaces import (
     ROLE_POSITION_Y,
     ROLE_SCALAR,
     SMOOTHED_ROLES,
+    STREAM_MERGED,
     TEMPORAL,
     TRANSFORMED_ROLES,
     box_branches,
@@ -552,3 +553,104 @@ def test_the_key_points_have_screen_space_companions() -> None:
     for point in FACE_KEYPOINTS:
         assert "f0_%s_x" % point in companioned
         assert "f0_%s_y" % point in companioned
+
+
+# ---------------------------------------------------------------------------
+# STREAM_MERGED — the union one master-level `coords` reads
+#
+# The thing worth checking is not that the union is a union. It is that the merged
+# view keeps each stream's OWN answers, and that the patterns handed out for it
+# select exactly what they claim in a universe three times the size, where every
+# per-stream pattern stops working.
+# ---------------------------------------------------------------------------
+def test_the_merged_view_is_the_union_of_the_three() -> None:
+    merged = channel_roles(STREAM_MERGED)
+    for stream in ("hands", "pose", "face"):
+        for name, role in channel_roles(stream).items():
+            assert merged[name] == role, name
+
+
+def test_the_merged_view_carries_the_derived_channels_too() -> None:
+    """They are published INSIDE TouchDesigner and merged into the hands stream, so
+    one master-level coords sees them as plain positions and rates - which is why the
+    old per-stream `dv_*` halves stop being necessary."""
+    merged = channel_roles(STREAM_MERGED)
+    for source in DERIVED_SOURCES:
+        for name, role in derived_roles(source).items():
+            assert merged[name] == role, name
+    assert merged["h0_palm_x"] == ROLE_POSITION_X
+    assert merged["h0_vel_x"] == ROLE_EXTENT_X
+
+
+def test_a_suffix_can_mean_different_things_in_different_streams() -> None:
+    """Which is why the merged map is built by asking each stream about its own
+    names. A merged `_role_of` would have to pick one rule and be wrong for one
+    stream - and a `_w` transformed as an extent when it is really a scalar is a
+    plausible wrong number, not an error."""
+    merged = channel_roles(STREAM_MERGED)
+    assert merged["sc_src_w"] == ROLE_SCALAR
+    assert merged["f0_bbox_w"] == ROLE_EXTENT_X
+
+
+def test_no_channel_name_appears_in_two_streams() -> None:
+    """`merge_streams` renames a collision rather than failing, so two streams
+    sharing a name would produce `h0_wrist_x1` and nothing would say so."""
+    seen: dict[str, str] = {}
+    for stream in ("hands", "pose", "face"):
+        for name in channel_roles(stream):
+            assert name not in seen, "%s is in both %s and %s" % (
+                name, seen[name], stream)
+            seen[name] = stream
+
+
+def test_the_merged_patterns_select_exactly_what_they_claim() -> None:
+    """The per-stream candidates all FAIL here - `*_x` sweeps the face's 348
+    box-relative points, the four key points, and hands' unit vectors and 84
+    descriptors - so this is checking the merged candidates, not the fallback."""
+    universe = list(channel_roles(STREAM_MERGED))
+    for branch in transform_branches(STREAM_MERGED):
+        tokens = branch.pattern.split()
+        got = [n for n in universe
+               if any(fnmatchcase(n, token) for token in tokens)]
+        assert got == branch.names, branch.suffix
+
+
+def test_the_merged_position_pattern_is_a_pattern_and_not_a_literal_list() -> None:
+    """The whole point of the candidates: 88 literal names on a Select is what the
+    fallback would cost, per branch, eight times over."""
+    for branch in transform_branches(STREAM_MERGED):
+        if branch.suffix in ("_tx", "_ty"):
+            assert len(branch.pattern.split()) == 12, branch.pattern
+            assert "*" in branch.pattern
+
+
+def test_the_only_character_class_any_pattern_uses_is_0_to_9() -> None:
+    """`[0-9]` is VERIFIED against TouchDesigner's own matcher (DESIGN.md 2.11).
+    A three-range class is not - TD selected NOTHING with `[a-ce-oq-z]` while
+    `fnmatchcase` expanded it correctly (2.24) - so anything else here would be a
+    pattern that passes this suite and fails in the network."""
+    import re
+    for branch in (transform_branches(STREAM_MERGED)
+                   + box_branches(STREAM_MERGED)
+                   + keypoint_branches(STREAM_MERGED)):
+        for found in re.findall(r"\[[^\]]*\]", branch.pattern):
+            assert found == "[0-9]", (branch.label, branch.pattern)
+
+
+def test_the_face_landmarks_stay_out_of_the_merged_position_branches() -> None:
+    """They are normalised to the face's BOX, so transforming one with the image
+    rules puts every feature in the same corner of the frame. This is the mistake the
+    merged universe makes easy to commit."""
+    positions = {n for b in transform_branches(STREAM_MERGED) for n in b.names}
+    landmarks = {n for b in box_branches(STREAM_MERGED) for n in b.names}
+    points = {n for b in keypoint_branches(STREAM_MERGED) for n in b.names}
+    assert positions & landmarks == set()
+    assert positions & points == set()
+    assert "f0_left_eye_00_x" not in positions
+    assert "f0_bbox_x" in positions
+
+
+def test_an_unknown_stream_still_raises_and_names_the_merged_view() -> None:
+    with pytest.raises(ValueError) as caught:
+        channel_roles("hand")
+    assert STREAM_MERGED in str(caught.value)

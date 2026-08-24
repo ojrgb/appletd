@@ -144,6 +144,20 @@ def _role_of(stream: str, name: str) -> str:
     return ROLE_SCALAR
 
 
+# The name for "all three streams merged", which is what ONE coordinate group at the
+# master reads. Not in STREAM_NAMES: nothing sends it over a port, nothing has an
+# `sc_*` channel for it, and it is not a request - it is a VIEW of the other three.
+#
+# WHY IT IS A STREAM NAME AT ALL rather than a separate set of functions: every
+# pattern in this module is verified by expanding it against `channel_roles(stream)`,
+# and every branch builder reads that one map. Giving the merged view a name means
+# `transform_branches`, `box_branches`, `keypoint_branches`, `companioned_names` and
+# `scope_pattern` all work on it unchanged, and the patterns they hand out are
+# verified against the universe they will actually be applied to. The alternative was
+# a parallel set of merged_* functions, which is a second copy of the arithmetic.
+STREAM_MERGED: Final = "merged"
+
+
 def channel_roles(stream: str) -> dict[str, str]:
     """Every channel a stream carries, mapped to its role.
 
@@ -153,10 +167,44 @@ def channel_roles(stream: str) -> dict[str, str]:
               output (DESIGN.md 2.11). Raises on an unknown stream rather than
               returning an empty map, which would silently build a network that
               transforms nothing.
+    STREAM_MERGED: the union of all three, in the order `merge_streams` produces -
+              each stream in STREAM_NAMES order, and within hands the wire contract
+              followed by what `derive_chop` and `temporal` publish, because that is
+              the order that stream's own Merge CHOP is wired in. THE ORDER IS THE
+              CONTRACT here: `compact_pattern` compares a pattern's expansion to the
+              wanted list as ORDERED LISTS, so a universe in the wrong order makes
+              every candidate fail and every branch fall back to a literal list -
+              which looks exactly like "no pattern fits" and is not (DESIGN.md 2.11).
+    Why the ROLES cannot be recomputed from the merged names alone: `_role_of` takes
+              the stream because the rules differ by stream. `sc_src_w` is a SCALAR on
+              hands - the hands rule classifies by `_x`/`_y` alone and everything else
+              is a scalar - while `f0_bbox_w` is an EXTENT on face. Same suffix,
+              different answer, so the merged map is built by asking each stream about
+              its OWN names and never by asking a merged `_role_of`.
+    NOT COMPLETE, and the builder has to know it: `derived_roles` classifies 24 of
+              the 171 channels `derive_chop` publishes, so the rest - the 84
+              hand-local descriptors, the derived bounding boxes - are absent from
+              this map. Any pattern verified only against it must be re-verified
+              against the LIVE channel list before use, exactly as
+              tools/td_add_screenspace.py's `_scope_for` does and for the same
+              reason: a pattern that is correct until a toggle moves is worse than a
+              literal list, because it is correct when you test it.
     """
+    if stream == STREAM_MERGED:
+        merged: dict[str, str] = {}
+        for one in STREAM_NAMES:
+            merged.update(channel_roles(one))
+            if one == STREAM_HANDS:
+                # `derive_chop` and `temporal` publish INSIDE TouchDesigner and are
+                # merged into the hands stream after its wire channels. They are the
+                # reason the old per-stream `coords` had `dv_*` halves; merged, they
+                # are simply more positions and rates.
+                for source in DERIVED_SOURCES:
+                    merged.update(derived_roles(source))
+        return merged
     if stream not in STREAM_NAMES:
-        raise ValueError("unknown stream %r; known: %s"
-                         % (stream, ", ".join(STREAM_NAMES)))
+        raise ValueError("unknown stream %r; known: %s, %s"
+                         % (stream, ", ".join(STREAM_NAMES), STREAM_MERGED))
     if stream == STREAM_HANDS:
         names = list(channel_names()) + list(status_channel_names())
     elif stream == STREAM_POSE:
@@ -328,6 +376,45 @@ class BoxBranch(NamedTuple):
     offset: float
 
 
+# The extra candidates STREAM_MERGED needs, one per role.
+#
+# WHY THE PER-STREAM PATTERNS CANNOT SERVE. `*_x` is exact for hands on its own
+# because every hands position ends `_x` and nothing else does; merged, it also
+# sweeps pose's joints (fine), the face's 348 box-relative landmark points (not
+# fine), the four key points (not fine) and hands' `point`/`dir` unit vectors and 84
+# hand-local descriptors (not fine). So the merged pattern is one term per LEADING
+# LETTER of a channel that IS a position, which is the same recipe
+# tools/td_add_screenspace.py arrived at for its Delete scope:
+#
+#   w wrist   t thumb_*   i index_*   m middle_*   r ring_*   l little_*
+#   pa palm   pi pinch    ... and NOT `point`, NOT `dir`, NOT `d_*`, NOT `vel`
+#
+# `vel` is deliberately absent: it is a RATE, so it takes the extent rule (scaled,
+# never offset) and belongs to the extent branch instead. `f?_bbox_x` is the face's
+# only image-space position - its landmark points are box-relative and composed
+# elsewhere - and `p?_*_x` needs no refinement because the pose contract has no
+# derived layer to collide with.
+#
+# ONLY `?` AND `*`. A character class was tried in td_add_screenspace.py and
+# TouchDesigner's matcher selected nothing with it (DESIGN.md 2.24), and these
+# patterns end up on the same kind of operator.
+#
+# All four are VERIFIED by `compact_pattern` against the merged universe before use,
+# and `_self_check` re-verifies at import - so a contract change that breaks one
+# falls back to the literal list rather than selecting the wrong channels.
+_POSITION_HEADS: Final[tuple[str, ...]] = ("w", "t", "i", "m", "r", "l", "pa", "pi")
+_MERGED_CANDIDATES: Final[dict[str, tuple[str, ...]]] = {
+    ROLE_POSITION_X: (" ".join(
+        ["h?_%s*_x" % head for head in _POSITION_HEADS]
+        + ["hands_*_x", "index_*_x", "p?_*_x", "f?_bbox_x"]),),
+    ROLE_POSITION_Y: (" ".join(
+        ["h?_%s*_y" % head for head in _POSITION_HEADS]
+        + ["hands_*_y", "index_*_y", "p?_*_y", "f?_bbox_y"]),),
+    ROLE_EXTENT_X: ("h?_vel_x f?_bbox_w",),
+    ROLE_EXTENT_Y: ("h?_vel_y f?_bbox_h",),
+}
+
+
 def transform_branches(stream: str) -> list[Branch]:
     """Every coordinate branch for the channels that are already in IMAGE space.
 
@@ -349,9 +436,12 @@ def transform_branches(stream: str) -> list[Branch]:
         source, world, pixels = _SUFFIXES[role]
         # Candidates from most to least specific. `*_x` covers hands and pose,
         # where every position is a joint; `*_bbox_x` is the face, where `*_x`
-        # would also sweep in 176 landmark points.
+        # would also sweep in 176 landmark points. `_MERGED_CANDIDATES` is for
+        # STREAM_MERGED, where neither works because all three contracts share one
+        # universe - see its comment.
         pattern = compact_pattern(
-            names, universe, ["*" + source, "*_bbox" + source])
+            names, universe,
+            ["*" + source, "*_bbox" + source, *_MERGED_CANDIDATES[role]])
         offset = -0.5 if role in (ROLE_POSITION_X, ROLE_POSITION_Y) else 0.0
         branches.append(
             Branch(world.lstrip("_"), source, world, names, pattern, offset))
@@ -628,7 +718,7 @@ def _self_check() -> None:
     """Every stream classifies, every stream partitions, and every pattern this
     module hands out selects exactly what it claims. Cheap, and all three are
     properties the two TouchDesigner builders depend on."""
-    for stream in STREAM_NAMES:
+    for stream in (*STREAM_NAMES, STREAM_MERGED):
         roles = channel_roles(stream)
         if not roles:
             raise RuntimeError("%s classified no channels at all" % stream)
