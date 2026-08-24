@@ -2113,3 +2113,121 @@ Both are now in DESIGN.md 2.25, and both are silent:
    `Handbox` off, `Facekeypoints` and `Onefaceonly` on, none of them written by any
    code in the builder. Mechanism NOT established. `_page` now snapshots every value
    before a retirement and restores anything that moved, printing what it did.
+
+---
+
+## Step 25 — one `coords` at the master, and the box expression that makes it safe — IN PROGRESS 2026-08-24
+
+Asked for: *"the coords transformation happens in both hands, pose, and face. Shouldn't
+it just be one COMP post trim_empty?"* — with the goal stated as **not milliseconds**.
+It is 122 operators today (42 hands, 16 pose, 64 face) in ten freezable half-COMPs,
+building three near-identical sets of branches from one set of rules.
+
+The filter stays where it is, assessed and declined: `derive_chop` reads `filter`,
+`temporal` reads `derive_chop`, `latches` reads both, and `coords` reads all three — so
+moving the filter downstream moves the whole attribute layer with it, and a Filter CHOP
+over 655 channels costs what three over 145/123/387 cost. The saving is the two extra
+In/Out pairs, about 0.005 ms, against losing the per-stream freeze that is worth
+1.4525 ms for face when nobody is in frame.
+
+### 25.1 The chain
+
+```
+per stream   in1 -> filter -> {derive_chop -> temporal -> latches} -> merge_out -> out1
+master       merge_streams -> early_trim -> coords -> screen_only -> trim_empty -> out1
+                            \____________________________/
+                                     in2 taps merge_streams
+```
+
+Four operators at the master where there were two, and each has exactly one owner:
+
+| operator | owner | what it does |
+|---|---|---|
+| `early_trim` | `td_add_groups.py` | the CHANNEL-REMOVING toggles only — `Fingertipsonly`, `Handbox`, `Onefaceonly`, `Facekeypoints`. A Delete CHOP carrying patterns, so it is cheap, and it runs BEFORE the composition |
+| `coords` | `td_add_coords.py` | four halves — `world`, `pixels`, `lm_world`, `lm_pixels` — reading `STREAM_MERGED` |
+| `screen_only` | `td_add_screenspace.py` | one Delete instead of three |
+| `trim_empty` | `td_add_groups.py` | unchanged job: the channels of groups that are not computing, which now includes a frozen coords half |
+
+`early_trim` is what makes every channel-removing toggle a cost saving for free: the
+channels it drops are never composed. That is what BUILD_PLAN 23.5 left undone, and it
+falls out of the restructure rather than needing a fork per stream.
+
+### 25.2 The box expression, on paper
+
+**The problem.** Every landmark branch's Math CHOP carries its face's box as
+EXPRESSIONS — `op('in1')['f0_bbox_w']` on `gain`, `op('in1')['f0_bbox_x']` on
+`postoff`. Post-trim, that channel can be gone: `Onefaceonly` deletes every `f1_*`.
+Indexing a CHOP for a missing channel returns **`None`**, not zero (DESIGN.md 2.11), so
+`None * gain` raises and the operator errors — or worse, a future guard turns it into a
+plausible zero.
+
+**The answer: two inputs.** `coords/in1` is the trimmed merge and decides WHICH
+channels are composed. `coords/in2` taps `merge_streams` directly and is read only by
+the box expressions. So:
+
+```
+in1   Select ->  the points to compose        (may be empty; that is the point)
+in2   op('in2')['f0_bbox_x']                  always present
+```
+
+**Why `in2` cannot be starved.** `merge_streams` merges the three stream `out1`s, and
+each stream's channel list is FIXED by the contract (DESIGN.md 6.2) — a frozen stream
+still publishes its channels holding their last value. Nothing between the sidecar and
+`merge_streams` can remove a channel; `Screenspaceonly` used to, and moves after
+`coords` in this design precisely so that it cannot.
+
+**What happens when a face is trimmed away.** `Onefaceonly` on: `early_trim` drops
+`f1_*`, so the `f1` landmark branch's Select selects nothing and its Math cooks on zero
+channels. The gain expression still evaluates — harmlessly, against `in2` — and the
+branch contributes nothing at no cost. The toggle becomes a **0.56 ms** saving
+(`box_f1_*` measured at 0.1918 + 0.1234 + 0.1245 + 0.1244) where today it saves only
+the trim's own list length.
+
+**Why not the alternatives.** Guarding the expression (`or 0`) makes a legitimately
+zero box and a missing one the same value, which is the class of silent wrong number
+this project keeps deleting. Exempting the box channels from every trim is one future
+toggle away from being wrong.
+
+**The unchanged half.** `spaces.box_expressions()` already takes the accessor template
+as an argument, so the builder passes `"op('in2')['%s']"` and the arithmetic — the part
+that has been wrong twice, both times invisibly — is not touched.
+
+### 25.3 Frozen halves would leave stale channels, and that is why `trim_empty` stays last
+
+`Coordstx` off freezes `coords/world`, and a frozen COMP HOLDS its channels rather than
+dropping them — which is the whole reason `trim_empty` exists (DESIGN.md 2.15: "`Coordspx`
+off used to leave 100 `_px`/`_py` channels on the output carrying a plausible wrong
+number"). So the trim has to be downstream of `coords`, not upstream, and `early_trim`
+is a second, cheaper operator rather than a move of the existing one.
+
+### 25.4 The pure half — DONE, commit `29f2938`
+
+`spaces.STREAM_MERGED`. A stream NAME rather than a parallel set of `merged_*`
+functions, so every existing function works on it and every pattern is verified against
+the universe it will be applied to. Roles come from asking each stream about its own
+names — `sc_src_w` is a scalar on hands, `f0_bbox_w` an extent on face.
+
+Four new candidates, one per role, because every per-stream pattern fails in a universe
+three times the size: `*_x` sweeps the 348 box-relative points, the four key points, the
+`point`/`dir` unit vectors and the 84 hand-local descriptors. One term per leading letter
+of a channel that IS a position — 12 terms for x, 12 for y, 2 per extent — verified
+exactly, `?` and `*` only.
+
+### 25.5 What remains
+
+The builders. `td_add_coords.py` becomes master-level (four halves, ~70 operators
+against 122, and the `dv_*` halves disappear because derived positions and rates are
+just more positions and rates in the merged universe); `td_add_screenspace.py` moves to
+the master; `td_build_vision.py` wires the four-operator master chain;
+`td_add_groups.py` gains `early_trim` and its COOK_GATED paths lose their stream
+prefixes; `td_layout.py` needs master positions.
+
+**Migrate additively.** Build the master chain feeding a scratch Null first, compare its
+channels and VALUES against the per-stream output that is still live, and rewire `out1`
+only when they agree. The user's own network reads `out1`, and a half-finished chain
+leaves the COMP without its sidecar control DATs with no symptom but a dead Active
+toggle.
+
+**One contract change to announce**: output channel ORDER. Composed channels land in one
+block after the raw ones instead of interleaved per stream. Name-based `Select`s survive;
+anything reading by index does not.
