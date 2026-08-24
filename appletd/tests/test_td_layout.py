@@ -16,9 +16,11 @@ from appletd.td_layout import (
     COL_W,
     COMP_H,
     COMP_W,
+    MASTER_CHAIN,
     MASTER_NODES,
     ROW_H,
     STREAM_NODES,
+    chain_pairs,
     master_xy,
     overlaps,
     placement,
@@ -43,7 +45,7 @@ def test_the_grid_leaves_a_gap_beside_the_widest_node() -> None:
 def test_the_data_path_is_one_row_and_reads_left_to_right() -> None:
     """Row 0 is the data path, and the order of the row IS the order of the chain -
     which is the whole reason a reader can follow it."""
-    path = ["in1", "filter", "coords", "merge_out", "screen_only", "out1"]
+    path = ["in1", "filter", "merge_out", "out1"]
     xs = [stream_xy(name)[0] for name in path]
     assert xs == sorted(xs), list(zip(path, xs, strict=True))
     assert all(stream_xy(name)[1] == 0 for name in path)
@@ -82,16 +84,20 @@ def test_every_operator_a_builder_places_has_an_entry() -> None:
     """The names the seven builders ask for, listed here so adding an operator to a
     builder without giving it a home fails in the test suite rather than by landing
     on top of something."""
-    for name in ("in1", "filter", "coords", "merge_out", "screen_only", "out1",
+    for name in ("in1", "filter", "merge_out", "out1",
                  "derive_chop", "derive_callbacks", "temporal", "latches",
-                 "notes", "screen_only_notes"):
+                 "notes"):
         assert name in STREAM_NODES, name
+    # And the two that LEFT the streams on 2026-08-24 must not still have a stream
+    # position, or a stale entry would place a node nothing builds (BUILD_PLAN 25).
+    for gone in ("coords", "screen_only", "screen_only_notes"):
+        assert gone not in STREAM_NODES, gone
     for name in ("status", "sidecar_control", "sidecar_callbacks", "sidecar_exit",
                  "filter_callbacks", "groups_callbacks",
                  "lat_threshold_callbacks", "screenspace_callbacks",
                  "profiler", "notes",
-                 # The single output path, 2026-08-22.
-                 "merge_streams", "trim_empty", "out1"):
+                 # The single output path - six stages as of 2026-08-24.
+                 *MASTER_CHAIN):
         assert name in MASTER_NODES, name
 
 
@@ -99,8 +105,7 @@ def test_the_single_output_path_reads_left_to_right() -> None:
     """merge -> trim -> out, on the hands row, in that order. The three streams sit
     at x = 0, so the path has to start to the RIGHT of them and stay on one row -
     a reader should be able to follow the only output without scrolling."""
-    xs = [master_xy(name)[0]
-          for name in ("merge_streams", "trim_empty", "out1")]
+    xs = [master_xy(name)[0] for name in MASTER_CHAIN]
     assert xs == sorted(xs)
     assert xs[0] > 0  # right of the stream COMPs, which sit at x = 0
     ys = {master_xy(name)[1]
@@ -126,3 +131,53 @@ def test_keeplayout_holds_an_existing_node_and_never_a_new_one() -> None:
     assert placement(xy, keep_layout=False, existed=True) == xy
     assert placement(xy, keep_layout=True, existed=False) == xy
     assert placement(xy, keep_layout=True, existed=True) is None
+
+
+# ---------------------------------------------------------------------------
+# The master chain, built by four different builders
+# ---------------------------------------------------------------------------
+def test_the_chain_skips_what_does_not_exist_yet() -> None:
+    """A partial build has to produce a shorter WORKING chain, not a broken one.
+    Every builder calls `rewire_master_chain` after creating its own stage, and the
+    stages arrive in `tools/td_rebuild.py` order rather than chain order."""
+    assert chain_pairs(["merge_streams", "trim_empty", "out1"]) == [
+        ("merge_streams", "trim_empty"), ("trim_empty", "out1")]
+    assert chain_pairs(["merge_streams", "out1"]) == [("merge_streams", "out1")]
+    assert chain_pairs(["out1"]) == []
+    assert chain_pairs([]) == []
+
+
+def test_the_chain_is_in_chain_order_however_the_names_arrive() -> None:
+    """`present` comes from whatever a builder found in the network, in no
+    particular order. The order of the RESULT is the contract."""
+    assert chain_pairs(reversed(MASTER_CHAIN)) == chain_pairs(MASTER_CHAIN)
+    assert len(chain_pairs(MASTER_CHAIN)) == len(MASTER_CHAIN) - 1
+
+
+def test_trim_empty_is_always_the_last_stage_before_the_output() -> None:
+    """It has to be: a frozen COMP HOLDS its channels rather than dropping them, so
+    a coords half frozen by `Coordstx` leaves stale coordinates on the output unless
+    something downstream removes them. That is what this operator is for
+    (DESIGN.md 2.15), and it stops being true the moment it is not last."""
+    assert MASTER_CHAIN[-2:] == ("trim_empty", "out1")
+    for present in (MASTER_CHAIN, ["merge_streams", "coords", "trim_empty", "out1"],
+                    ["coords", "screen_only", "trim_empty", "out1"]):
+        pairs = chain_pairs(present)
+        assert pairs[-1] == ("trim_empty", "out1"), present
+
+
+def test_screen_only_comes_after_coords_and_before_the_trim() -> None:
+    """After, because it deletes the raw channels coords READS - in front of it there
+    would be nothing left to compose. Before the trim, because the trim's job is
+    frozen groups and this one's is duplicate copies."""
+    order = list(MASTER_CHAIN)
+    assert order.index("coords") < order.index("screen_only")
+    assert order.index("screen_only") < order.index("trim_empty")
+
+
+def test_early_trim_runs_before_the_composition() -> None:
+    """The entire point of a second trim. What it drops is never converted into a
+    coordinate space, which is what makes `Onefaceonly` and `Fingertipsonly` cost
+    savings rather than list-shorteners."""
+    order = list(MASTER_CHAIN)
+    assert order.index("early_trim") < order.index("coords")

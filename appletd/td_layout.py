@@ -33,7 +33,9 @@ Ref: docs/BUILD_PLAN.md step 10, DESIGN.md 6.5 (the COMP structure).
 
 from __future__ import annotations
 
-from typing import Final
+from collections.abc import Iterable
+from itertools import pairwise
+from typing import Any, Final
 
 # MEASURED on a live network: a CHOP/DAT node is 130 x 90, a base COMP 160 x 130.
 NODE_W: Final = 130
@@ -66,10 +68,13 @@ STREAM_NODES: Final[dict[str, tuple[int, int]]] = {
     # the data path, row 0
     "in1": (-4 * COL_W, 0),
     "filter": (-3 * COL_W, 0),
-    "coords": (-1 * COL_W, 0),
     "merge_out": (2 * COL_W, 0),
-    "screen_only": (3 * COL_W, 0),
     "out1": (4 * COL_W, 0),
+    # `coords` and `screen_only` were HERE, one of each per stream, until 2026-08-24.
+    # Both moved to the master: one coordinate group reading all three streams merged
+    # instead of three near-identical ones, and one Delete CHOP instead of three.
+    # BUILD_PLAN step 25. Their names stay out of this table so a stale position
+    # cannot place a node nothing builds.
     # the attribute layer, one row per group, all reading `filter`
     "derive_chop": (-1 * COL_W, -2 * ROW_H),
     "derive_callbacks": (-3 * COL_W, -2 * ROW_H),
@@ -77,7 +82,6 @@ STREAM_NODES: Final[dict[str, tuple[int, int]]] = {
     "latches": (-1 * COL_W, -6 * ROW_H),
     # documentation, above the path and out of it
     "notes": (-4 * COL_W, 2 * ROW_H),
-    "screen_only_notes": (3 * COL_W, 2 * ROW_H),
     # `tools/td_verify_latches.py`'s stored counter baseline. Not part of the
     # network - it holds one run's numbers so the next run can diff them - so it
     # sits well clear of everything, below the attribute layer.
@@ -100,12 +104,19 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     # A SELECT, not a Delete, and the reason is measured: for the same reduction of
     # the same 1,764 channels a Delete CHOP costs 0.6697 ms against the Select's
     # 0.0555 ms, and 3.3618 ms if the list is long. DESIGN.md 2.15.
+    # SIX STAGES as of 2026-08-24, and the order is the whole design - see
+    # MASTER_CHAIN below for what each one is for and why it is where it is.
     "merge_streams": (COL_W, 0),
-    "trim_empty": (2 * COL_W, 0),
-    "out1": (3 * COL_W, 0),
+    "early_trim": (2 * COL_W, 0),
+    "coords": (3 * COL_W, 0),
+    "screen_only": (4 * COL_W, 0),
+    "trim_empty": (5 * COL_W, 0),
+    "out1": (6 * COL_W, 0),
     # The housekeeping channels, one row BELOW the output path - the same convention
     # the streams use, where the data path is a row and anything that only reads it
     # hangs underneath. Nothing downstream reads these; they exist to be looked at.
+    # They read `merge_streams` rather than the trim, deliberately: `sc_*` and `seq`
+    # are diagnostics and should be visible whatever the toggles are doing.
     "housekeeping_sel": (2 * COL_W, -ROW_H),
     "housekeeping": (3 * COL_W, -ROW_H),
     # The segmentation mask, a TOP path and the COMP's only TOP output. Its own row
@@ -145,6 +156,86 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "install_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H - 5 * ROW_H),
     "install_start": (-1 * COL_W, -4 * MASTER_ROW_H - 5 * ROW_H),
 }
+
+
+# ---------------------------------------------------------------------------
+# The master's data path, in order
+#
+# SIX STAGES BUILT BY FOUR DIFFERENT BUILDERS, which is exactly why the order lives
+# here rather than in any of them. Before 2026-08-24 the chain was three nodes and
+# `tools/td_build_vision.py` wired all three; now `coords` comes from
+# `td_add_coords.py`, `screen_only` from `td_add_screenspace.py` and `early_trim`
+# from `td_add_groups.py`, and each of those runs at a different point in the chain
+# (`tools/td_rebuild.py`). A builder that guessed what sat either side of its own
+# operator would be right only for the build order it was written against - the same
+# mistake DESIGN.md 2.11 records as "a builder that repoints its CONSUMERS depends on
+# build order, and lost".
+#
+# So every builder creates its own stage and then calls `rewire_master_chain`, which
+# connects whatever exists in this order and ignores what does not. A partial build
+# produces a shorter but working chain rather than a broken one.
+#
+#   merge_streams   the three streams, side by side
+#   early_trim      the CHANNEL-REMOVING toggles - Fingertipsonly, Handbox,
+#                   Onefaceonly, Facekeypoints. A Delete CHOP carrying PATTERNS, so
+#                   it is cheap, and it runs BEFORE the composition: what it drops is
+#                   never converted into a coordinate space. That is the whole reason
+#                   there are two trims and not one.
+#   coords          world and pixel spaces, one group for all three streams
+#   screen_only     `Screenspaceonly`: the raw normalised channels whose composed
+#                   twin now exists. It has to be AFTER coords - it deletes what
+#                   coords reads - and it is one Delete instead of three.
+#   trim_empty      the channels of every group that is not COOKING, which now
+#                   includes a frozen coords half. It has to be LAST: a frozen COMP
+#                   HOLDS its channels rather than dropping them, and stale
+#                   coordinates on the output is the exact failure this operator was
+#                   built for (DESIGN.md 2.15).
+#   out1            the only CHOP output.
+# ---------------------------------------------------------------------------
+MASTER_CHAIN: Final[tuple[str, ...]] = (
+    "merge_streams", "early_trim", "coords", "screen_only", "trim_empty", "out1",
+)
+
+
+def chain_pairs(present: Iterable[str]) -> list[tuple[str, str]]:
+    """`(upstream, downstream)` for every adjacent pair of stages that EXISTS. Pure.
+
+    Contract: returns pairs in MASTER_CHAIN order, skipping absent stages, so
+              `{merge_streams, trim_empty, out1}` gives the three-node chain this
+              component had before step 25 and a full set gives the six-node one.
+              Names not in MASTER_CHAIN are ignored rather than raising - the master
+              holds plenty of operators that are not on the data path.
+    Why pure: so a test can assert the order without TouchDesigner, which is the
+              only way to check the one property that matters - that `trim_empty` is
+              always last before `out1` however many stages are missing.
+    """
+    # Materialised ONCE. `set(present)` inside the comprehension is re-evaluated per
+    # item, so an ITERATOR argument would be consumed by the first name tested and
+    # every later one would miss - which is a chain that silently drops stages
+    # depending on how the caller happened to build its list.
+    available = set(present)
+    stages = [name for name in MASTER_CHAIN if name in available]
+    return list(pairwise(stages))
+
+
+def rewire_master_chain(master: Any) -> list[tuple[str, str]]:
+    """Connect the master's data path in MASTER_CHAIN order. Returns what it wired.
+
+    Idempotent, and safe to call from every builder that owns a stage: connecting an
+    input that is already connected costs nothing, and a stage that does not exist
+    yet is simply not in the chain.
+
+    Traps: `inputConnectors[0].connect()` and NOT `.inputs`, because `op.inputs` goes
+           stale and has lied about this exact question before (DESIGN.md 2.11).
+    """
+    present = [name for name in MASTER_CHAIN if master.op(name) is not None]
+    wired: list[tuple[str, str]] = []
+    for upstream, downstream in chain_pairs(present):
+        source = master.op(upstream)
+        target = master.op(downstream)
+        target.inputConnectors[0].connect(source)
+        wired.append((upstream, downstream))
+    return wired
 
 
 def stream_xy(name: str) -> tuple[int, int]:
