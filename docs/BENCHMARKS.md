@@ -286,6 +286,49 @@ about 0.09 ms MORE with the toggle on, on identical work. Fewer operators cookin
 changes how TouchDesigner attributes time to the ones that remain; it does not change
 the total, which fell by 1.14 ms.
 
+### Where the time actually went, measured 2026-08-24 — it was the filtering
+
+The question was whether the component computes a great deal and throws it away late.
+It does, and the throwing away was the expensive part. Everything cooking, 89 frames,
+**4.1350 ms total**:
+
+| operator | cost | what it is |
+|---|---|---|
+| `trim_empty` | **0.5075 ms** | a Select keeping 1,110 of 1,581 channels |
+| `hands/screen_only` | **0.4885 ms** | a Delete CHOP with **100 literal names** |
+| `hands/derive_chop` | 0.2182 ms | the whole attribute layer |
+| `face/coords/lm_world/box_f1_ty` | 0.1918 ms | one landmark branch of eight |
+| `face/screen_only` | 0.1319 ms | the same job as hands', as a PATTERN |
+
+Two of the top three remove channels rather than computing them.
+
+**`hands/screen_only`: 0.4885 → 0.2170 ms**, by replacing 100 literal names with 24
+patterns. A Delete CHOP's cost is list length × input channels, and face had already
+had this fix (2.1595 → 0.1319); hands had not, because the obvious pattern swallowed
+`h?_point_x/y`. The list is now one term per leading letter — `h?_w*_x h?_t*_x
+h?_i*_x` … — which excludes `d` (the 84 hand-local descriptors) and `point` without a
+character class.
+
+**A character class was tried first and TouchDesigner's matcher selected NOTHING with
+it.** `h?_[a-ce-oq-z]*_x` — every letter but `d` and `p` — expands correctly under
+`fnmatchcase`, so `compact_pattern` chose it, and the build reported 88 channels that
+should have been deleted and were not. Three ranges in one class is outside what has
+been verified of TD's matcher (`*`, `?`, `[0-9]`). The verifier caught it; nothing
+before the live network did.
+
+**`trim_empty` is the other half, and it scales with the KEEP list**, which is the
+finding that makes an output-only toggle worth having:
+
+| keep list | input | cost |
+|---|---|---|
+| 306 names | 1,863 | 0.0555 ms |
+| 748 names | 1,581 | 0.3169 ms |
+| 1,110 names | 1,581 | 0.5312 ms |
+
+So `One Face Only` — which gates no cooking at all — **saves 0.39 ms** simply by
+making the keep list 362 names shorter. Removing a channel anywhere upstream of the
+trim is paid back at the trim.
+
 ### The whole COMP, by configuration
 
 Sampled over 90 render frames from a scheduled callback, medians of cooks where

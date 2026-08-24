@@ -1969,3 +1969,93 @@ mirrors the region name and `docs/ATTRIBUTES.md` says the side is unmeasured;
 front of the camera. It also prints which index the tip occupies in each of its three
 regions — a confirmation that the intersection lands where a person would point, not
 an input to anything.
+
+---
+
+## Step 23 — the removing toggles, moved and measured — DONE 2026-08-24
+
+Asked for alongside step 22: *"let's make sure that any toggles that REMOVE channels
+do so early in the chain (we should check if we can move any) so those channels are
+excluded from heavy computations. Currently I suspect we're just computing a lot of
+stuff and filtering out later. But maybe I'm wrong."*
+
+### 23.1 The suspicion was right, and the answer was not where anyone was looking
+
+Everything cooking, 89 frames, **4.1350 ms**. The two most expensive operators in the
+component outside the face landmark composition are both FILTERS:
+
+```
+trim_empty          0.5075 ms   a Select keeping 1,110 of 1,581 channels
+hands/screen_only   0.4885 ms   a Delete CHOP with 100 LITERAL names
+```
+
+So the expensive part of "compute a lot and filter later" turned out to be the
+filtering, not the computing. The plan going in was to move `Fingertipsonly` before
+the one-euro filter, which is worth about 0.1 ms of coordinate composition; this is
+worth five times that and needed no rewiring at all.
+
+### 23.2 `hands/screen_only`: 0.4885 → 0.2170 ms
+
+A Delete CHOP's cost is list length × input channels (DESIGN.md 2.15). Face had
+already been converted from a literal list to a pattern — 2.1595 ms to 0.1319 — and
+hands had not, because the obvious pattern swallowed `h?_point_x/y`: unit vectors,
+which `spaces.py` records as uncompanioned, so deleting one loses information that has
+no other copy.
+
+The list that works is one term per LEADING LETTER of a channel that must go:
+
+```
+h?_w*_x  h?_t*_x  h?_i*_x  h?_m*_x  h?_r*_x  h?_l*_x  h?_b*_x  h?_v*_x
+h?_pa*_x h?_pi*_x   ... x2 for _y, plus hands_*_x/y and index_*_x/y
+```
+
+24 terms against 100 names. It excludes `d` (the 84 hand-local descriptors) and
+`point` — `pa` and `pi` put `palm` and `pinch` back — and uses nothing but `?` and
+`*`.
+
+**A character class was tried first and TouchDesigner selected nothing with it.**
+`h?_[a-ce-oq-z]*_x` is every letter but `d` and `p`, `fnmatchcase` expands it
+correctly, `compact_pattern` therefore chose it, and the build reported 88 channels
+that should have been deleted and were not. DESIGN.md 2.11 records `*`, `?` and
+`[0-9]` as verified against TD's matcher; that is now the limit rather than a
+starting point.
+
+### 23.3 `trim_empty` scales with the KEEP list, which changes what "output only" means
+
+```
+  306 names of 1,863   0.0555 ms
+  748 names of 1,581   0.3169 ms
+1,110 names of 1,581   0.5312 ms
+```
+
+An output-only toggle was described in step 10 as removing "second copies from the
+list you read" and gating nothing. That is still true of the cooking and no longer
+true of the cost: **`One Face Only` saves 0.39 ms while freezing not one operator**,
+purely by making the keep list shorter. Anything removed anywhere upstream of the trim
+is paid back at the trim.
+
+### 23.4 `One Face Only`
+
+Asked for 2026-08-24. Drops every `f1_*` channel, leaving the LEFTMOST face - `f0` is
+a spatial slot, not an arrival order, so two people crossing over exchange slots and a
+project reading only `f0` sees the swap. `out1` goes 1,082 → 720 channels.
+
+**It cannot gate cooking**, and the reason is worth having: the second face's
+coordinate branches ARE separate operators — `box_f1_tx`, `lm_f1_ty` — but they live
+in the same COMP as the first face's, and `allowCooking` freezes a COMP. Splitting
+the halves per face would add four COMP boundaries at about 0.11 ms each, which is
+most of what it would save. The sidecar computes both faces regardless: the channel
+list is FIXED (DESIGN.md 6.2), so a stream that published one face while one person
+was in shot would break every reference the moment a second walked in.
+
+### 23.5 What was NOT done, and what it is worth
+
+`Fingertipsonly` and `Handbox` still trim at the master. Moving them into the hands
+stream needs a FORK — `derive()` reads all 21 joints for its curls and spreads, so
+only the `coords` branch can be trimmed — and it is worth roughly 0.1 ms of
+coordinate composition plus whatever the shorter keep list gives back at the trim.
+Smaller than either fix above, and it changes the stream's wiring rather than one
+parameter. Left for a session that wants it.
+
+`Screenspaceonly` cannot move at all: it removes the raw normalised channels that are
+`coords`' own input.

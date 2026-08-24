@@ -517,6 +517,7 @@ belong to - a page you have to scroll is a page nobody tunes.
 | `Descriptor` | toggle | off | 84-channel pose signature |
 | `Hand Box and Size` | toggle | on | off drops `h?_bbox_*` and `h?_size` from the output |
 | `Face Key Points` | toggle | off | on swaps the 664 face landmark channels for 32: two pupils, a nose tip and a mouth centre per face. Freezes `face/coords/lm_world` and `lm_pixels`, and **saves 1.18 ms** |
+| `One Face Only` | toggle | off | on drops every `f1_*` channel, leaving the LEFTMOST face. Output only — it cannot gate cooking — but **saves 0.39 ms** at the trim, because a shorter keep list is a cheaper Select |
 
 A disabled `derive` group's channels are excluded from the output. A disabled
 NATIVE group has `allowCooking` off, so it costs nothing and its channels are left
@@ -550,22 +551,30 @@ the advice has not changed, only where you read the channel. Reference it as
 `op('/project1/appletd/housekeeping')['h0_conf_median']`, or switch
 `Delete Empty Channels` off to get everything back on `out1`.
 
-#### Three toggles that shorten the list
+#### Four toggles that shorten the list
 
 | toggle | default | does |
 |---|---|---|
 | `Finger Tips Only` | **off** | drops the 15 non-tip joints, leaving `wrist` and the five `*_tip`s — six points per hand instead of 21 |
 | `Hand Box and Size` | **on** | off drops `h?_bbox_*` and `h?_size` |
 | `Face Key Points` | **off** | on swaps 664 face landmark channels for 32 |
+| `One Face Only` | **off** | on drops every `f1_*` channel, leaving the leftmost face |
 
-All three defaults leave the output exactly as it was before they existed. `Finger
+All four defaults leave the output exactly as it was before they existed. `Finger
 Tips Only` keeps the **wrist**: it is not an mcp, pip or dip, it is the hand's
 anchor, and `hands_angle` is measured from it.
 
-**The first two change only the output, and that is forced rather than lazy** — the
-fifteen non-tip joints feed every curl, spread and angle `derive()` computes, and the
-bounding boxes feed `hands_overlap`. The work happens either way; they remove second
-copies from the list you read.
+**Three of the four change only the output, and that is forced rather than lazy** —
+the fifteen non-tip joints feed every curl, spread and angle `derive()` computes, the
+bounding boxes feed `hands_overlap`, and the second face's coordinate branches are
+separate operators inside the same COMP as the first face's, where `allowCooking`
+cannot reach them.
+
+**But "output only" is not the same as "free", and that was measured on 2026-08-24.**
+`trim_empty` is a Select and its cost scales with the KEEP list: naming 1,110
+channels costs 0.5312 ms, naming 748 costs 0.3169. So `One Face Only` saves 0.39 ms
+without gating a single cook. Anything removed anywhere upstream of the trim is paid
+back there.
 
 **`Face Key Points` is the one that also saves time**, because the four points it
 leaves are composed somewhere else. MEASURED 2026-08-24: the face stream costs
@@ -592,6 +601,7 @@ Three kinds of toggle, and the label says which:
 | `Presence` (→ `temporal`), `Gestures` (→ `latches`), `Coordstx` `Coordspx` (→ `coords/world`, `coords/pixels` in all three streams), `Lmcoordstx` `Lmcoordspx` (→ the face's landmark halves) | the group COMP stops cooking entirely, via `allowCooking`. Its channels stay, holding their last value — which is why `trim_empty` removes them from the output |
 | `Temporal` `Latches` | a VETO: off freezes the group whatever the toggles above say. See below |
 | `Finger Tips Only` `Hand Box and Size` | the OUTPUT only. Neither gates cooking and neither can: the 15 non-tip joints feed every curl and spread `derive()` computes, and the bounding boxes feed `hands_overlap` |
+| `One Face Only` | the OUTPUT only, and it cannot gate: `box_f1_tx` and `box_f0_tx` are separate operators in the same COMP, and `allowCooking` freezes a COMP. Splitting the halves per face would cost four more COMP boundaries at ~0.11 ms, which is most of what it would save |
 | `Face Key Points` | a REVERSE veto: switching it ON freezes `face/coords/lm_world` and `lm_pixels`. The only toggle here that removes capability rather than adding it, which is why it is in none of the `Level of Detail` presets — `Everything` would otherwise switch off the 348 landmarks it has just promised |
 
 **`Temporal` and `Latches` are master switches, and they needed a second

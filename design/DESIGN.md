@@ -1456,6 +1456,45 @@ IMAGE's left. `f{i}_eye_left` mirrors the region name and says so;
 
 ---
 
+### 2.24 The filtering was the expensive part — measured 2026-08-24
+
+The suspicion was that the component computes a great deal and throws it away late.
+It does, and throwing it away cost more than most of the computing. Everything
+cooking, 89 frames, 4.1350 ms total: `trim_empty` **0.5075 ms**, `hands/screen_only`
+**0.4885 ms**, `derive_chop` 0.2182 ms. Two of the top three remove channels.
+
+**`hands/screen_only` fell to 0.2170 ms** when its 100 literal names became 24
+patterns — a Delete CHOP's cost is list length × input channels (§2.15), and face had
+already had this fix while hands had not.
+
+**TOUCHDESIGNER'S MATCHER REJECTS A THREE-RANGE CHARACTER CLASS**, and this belongs
+with the other native behaviours in §2.11. `h?_[a-ce-oq-z]*_x` — every letter but `d`
+and `p` — expands correctly under `fnmatchcase`, so `compact_pattern` accepted it and
+the builder applied it, and TD selected **nothing** with it: 88 channels that should
+have been deleted were not. What §2.11 records as verified is `*`, `?` and `[0-9]`,
+and that is now the limit rather than a starting point. The pattern that shipped uses
+only `?` and `*`.
+
+Worth recognising as a SHAPE: the offline expansion agreed with itself all the way to
+the live network, exactly as the interpreter probe did in the install work. A check
+that never leaves the machine it is checking cannot fail.
+
+**`trim_empty`'s cost scales with the KEEP list**, not just with the input:
+
+```
+  306 names of 1,863   0.0555 ms
+  748 names of 1,581   0.3169 ms
+1,110 names of 1,581   0.5312 ms
+```
+
+Which is why an OUTPUT-ONLY toggle is not free money in the other direction: `One
+Face Only` gates no cooking whatsoever and still saves **0.39 ms**, because it makes
+the keep list 362 names shorter. Anything removed anywhere upstream of the trim is
+paid back at the trim — a better argument for moving trims earlier than the coordinate
+saving that was expected to be the reason.
+
+---
+
 ## 3. Traps — all of these cost real time in the spike
 
 **GIL starvation from a polling main thread.** A tight

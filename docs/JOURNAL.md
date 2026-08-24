@@ -4402,3 +4402,54 @@ remain. The total fell by 1.14 ms, which is the number that matters; the 0.09 is
 **Still unknown.** Whether `leftPupil` is the SUBJECT's left or the IMAGE's left.
 `f{i}_eye_left` mirrors the region name and says so in the docs;
 `probe_face_regions.py --keypoints` answers it in one run and needs a face.
+
+---
+
+## Milestone — the expensive part was the filtering, not the computing
+2026-08-24
+
+**Asked**: whether the toggles that remove channels could remove them earlier, so the
+channels are excluded from the heavy computations. **Answer: the suspicion was right
+and the money was somewhere else.** With everything cooking the component costs
+4.1350 ms, and the two most expensive operators outside the face landmark composition
+are both FILTERS:
+
+    trim_empty          0.5075 ms    a Select keeping 1,110 of 1,581 channels
+    hands/screen_only   0.4885 ms    a Delete CHOP with 100 LITERAL names
+
+**Built.** `hands/screen_only` from 100 literal names to 24 patterns: **0.4885 →
+0.2170 ms**. `One Face Only`, which drops every `f1_*` channel: **0.39 ms**, and it
+gates no cooking at all.
+
+**What surprised us: an output-only toggle is not free money in the other
+direction.** `trim_empty` is a Select and its cost scales with the KEEP list — 306
+names cost 0.0555 ms, 748 cost 0.3169, 1,110 cost 0.5312. So removing a channel
+anywhere upstream is paid back at the trim, whether or not anything stops cooking.
+That is a better argument for moving trims earlier than the coordinate saving we
+expected to be the reason, and it was invisible until the whole COMP was profiled
+with everything on rather than in the shipping configuration.
+
+**TouchDesigner's matcher rejects a three-range character class.**
+`h?_[a-ce-oq-z]*_x` — every letter but `d` and `p` — expands correctly under
+`fnmatchcase`, so `compact_pattern` accepted it, the builder applied it, and TD
+selected NOTHING with it: 88 channels that should have been deleted were not. The
+verifier caught it in the build report. DESIGN.md 2.11 records `*`, `?` and `[0-9]`
+as verified against TD's matcher, and that is now the limit rather than a starting
+point; the pattern that shipped uses only `?` and `*`.
+
+The shape is the one this project keeps meeting: the offline expansion agreed with
+itself all the way to the live network. A check that never leaves the machine it is
+checking cannot fail.
+
+**And a reminder that nothing can be verified inside one script.** Three separate
+attempts to probe TD's matcher — set a pattern, force a cook, read `numChans` — all
+returned 0 channels for every candidate including a control that could not fail. A
+freshly created operator does not report its channels in the frame it was made in.
+The answer came from the builder's own report, one frame later, which is the
+instrument that already existed.
+
+**Not done.** `Fingertipsonly` and `Handbox` still trim at the master. Moving them
+into the hands stream needs a fork, because `derive()` reads all 21 joints, and it is
+worth about 0.1 ms plus whatever the shorter keep list returns — smaller than either
+fix above and a wiring change rather than a parameter. `Screenspaceonly` cannot move:
+it removes `coords`' own input.

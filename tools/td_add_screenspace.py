@@ -224,26 +224,56 @@ def _place(node, xy, keep, existed):
 _AXES = ("x", "y", "w", "h")
 # Plain suffixes: exact for pose and face, which have no hand-local descriptors.
 _SIMPLE = " ".join("*_%s" % a for a in _AXES)
-# TRIED FOR HANDS AND REJECTED BY THE VERIFIER, kept because the reason is worth
-# having: it selects 108 channels where 100 are wanted. The eight extras are
-# `h?_point_x/y` - unit vectors, which spaces.py records as NOT transformable and
-# therefore uncompanioned - and `h?_bbox_w/h`, which hands does not give a `_tw`/`_th`
-# twin. Deleting either would lose information that has no other copy.
+# TRIED FOR HANDS AND REJECTED BY THE VERIFIER, kept because the reason is what the
+# working pattern below is built from: it selects 104 channels where 100 are wanted.
+# The extras are `h?_point_x/y` - unit vectors, which spaces.py records as NOT
+# transformable and therefore uncompanioned. Deleting one would lose information that
+# has no other copy.
 #
-# So hands keeps its literal list, and this is what that costs: 0.52 ms against face's
-# 0.13. The alternative was a pattern that looked right and quietly ate eight channels.
-# For HANDS, where `h{i}_d_<joint>_x` must survive. `[a-ce-z]` is every letter except
-# `d`, so `h?_[a-ce-z]*_x` takes `h0_palm_x` and `h0_bbox_x` and leaves the descriptor
-# channels alone - which is the one distinction a wildcard could not make before, and
-# the reason DESIGN.md 2.11 says a wildcard cannot partition these.
+# `[a-ce-z]` is every letter except `d`, so `h?_[a-ce-z]*_x` takes `h0_palm_x` and
+# `h0_bbox_x` and leaves the 84 hand-local `h?_d_<joint>_x` descriptor channels alone -
+# which is the one distinction a wildcard could not make before, and the reason
+# DESIGN.md 2.11 says a wildcard cannot partition these.
 #
 # `hands_*` and `index_*` are listed separately because `h?_` needs exactly one
 # character between `h` and `_`, and `hands_center_x` has four.
-_HANDS = " ".join(
+_HANDS_LOOSE = " ".join(
     ["h?_[a-ce-z]*_%s" % a for a in _AXES]
     + ["hands_*_%s" % a for a in ("x", "y")]
     + ["index_*_%s" % a for a in ("x", "y")])
-SCOPE_CANDIDATES = (_SIMPLE, _HANDS, "*_x *_y")
+
+# AND THE ONE THAT FITS, which uses NOTHING but `?` and `*`.
+#
+# MEASURED 2026-08-24: the literal list this replaced cost **0.4885 ms** per cook -
+# the most expensive single operator in the component outside the face landmarks, and
+# every microsecond of it spent deciding which channels to throw away. A Delete CHOP's
+# cost is list length x input channels, so 24 terms against 100 names is the saving.
+#
+# The list is one term per LEADING LETTER of a channel that must go, which is a long
+# way of saying "everything except `d` and `point`":
+#
+#     w  wrist          t  thumb_*      i  index_*     m  middle_*
+#     r  ring_*         l  little_*     b  bbox        v  vel
+#     pa palm           pi pinch                   ... and NOT `point`, NOT `d_*`
+#
+# NO `_w`/`_h` TERMS. On hands a `_w` is a SCALAR - `spaces._role_of` classifies by
+# suffix and only `_x`/`_y` are positions there - so `h?_bbox_w` has no `_tw` twin and
+# must survive. Face is the stream where an extent is an extent.
+#
+# WHY NOT A CHARACTER CLASS, which is shorter and was tried first:
+# `h?_[a-ce-oq-z]*_x` is every letter but `d` and `p`, `fnmatchcase` accepts it,
+# `compact_pattern` therefore chose it - and TOUCHDESIGNER'S MATCHER SELECTED NOTHING
+# WITH IT. The build reported 88 channels that should have been deleted and were not.
+# So a three-range class is not portable to TD's matcher, DESIGN.md 2.11's note that
+# it "agrees with fnmatchcase on `*`, `?` and `[0-9]`" is the limit of what has been
+# verified, and this stays inside it. The verifier is what caught it; the offline
+# expansion agreed with itself all the way to the network.
+_HEADS = ("w", "t", "i", "m", "r", "l", "b", "v", "pa", "pi")
+_HANDS = " ".join(
+    ["h?_%s*_%s" % (head, axis) for axis in ("x", "y") for head in _HEADS]
+    + ["hands_*_%s" % a for a in ("x", "y")]
+    + ["index_*_%s" % a for a in ("x", "y")])
+SCOPE_CANDIDATES = (_SIMPLE, _HANDS, _HANDS_LOOSE, "*_x *_y")
 
 
 def _scope_for(child, stream, doomed, optional):

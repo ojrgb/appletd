@@ -344,6 +344,25 @@ KEYPOINT_CHANNELS = tuple("f?_%s_*" % point for point in FACE_KEYPOINT_NAMES)
 # the bounding box, the head angles and the key points, none of which carries one.
 FACE_LANDMARK_CHANNELS = ("f?_*_[0-9][0-9]_*",)
 
+# One face instead of two, asked for 2026-08-24. `f0` is the LEFTMOST face by
+# bounding-box centre (docs/ATTRIBUTES.md), so this is "the face on the left" and not
+# "the face Vision happened to report first" - which matters, because two people
+# crossing over exchange slots and a project reading only `f0` will see the swap.
+#
+# `f[1-9]_*` and not `f1_*`: MAX_FACES is 2 today and the pattern should not have to
+# be edited if it ever is not. `_check_face_slots()` holds it against the contract.
+#
+# OUTPUT ONLY, and unlike `Facekeypoints` this one cannot gate cost. The second
+# face's coordinate branches are separate OPERATORS - `box_f1_tx`, `lm_f1_ty` - but
+# they live in the same COMP as `f0`'s, and `allowCooking` freezes a COMP rather than
+# an operator. Splitting the halves per face would cost four more COMP boundaries at
+# about 0.11 ms each, which is most of what it would save. The sidecar computes both
+# faces regardless: the channel list is FIXED (DESIGN.md 6.2), so a stream that
+# published one face when one person was in shot would break every reference the
+# moment a second walked in.
+ONEFACE_TOGGLE = "Onefaceonly"
+SECOND_FACE_CHANNELS = ("f[1-9]_*",)
+
 
 def _trim_keep(comp, wanted):
     """The channels to KEEP on the single output, in merge order. Returns a list.
@@ -407,6 +426,9 @@ def _trim_keep(comp, wanted):
     if points is not None:
         optional += list(FACE_LANDMARK_CHANNELS if points.eval()
                          else KEYPOINT_CHANNELS)
+    one_face = getattr(comp.par, ONEFACE_TOGGLE, None)
+    if one_face is not None and one_face.eval():
+        optional += list(SECOND_FACE_CHANNELS)
     if optional:
         drop.update(name for name in names
                     if any(fnmatchcase(name, pattern) for pattern in optional))
@@ -451,6 +473,26 @@ def _check_joint_split():
             "NON_TIP_JOINTS has drifted from types.JOINT_NAMES.\n"
             "  literal:  %s\n  contract: %s"
             % (" ".join(NON_TIP_JOINTS), " ".join(expected)))
+
+
+def _check_face_slots():
+    """`SECOND_FACE_CHANNELS` must cover every face slot except `f0`.
+
+    A literal inside the TRIM SCOPE markers, like the two above, and the same silent
+    failure if it drifts: a third face slot would simply stay on the output while the
+    toggle claimed to have removed it.
+    """
+    from fnmatch import fnmatchcase
+
+    from appletd.face_types import MAX_FACES
+    for slot in range(MAX_FACES):
+        name = "f%d_bbox_x" % slot
+        matched = any(fnmatchcase(name, pattern)
+                      for pattern in SECOND_FACE_CHANNELS)
+        if matched != (slot > 0):
+            raise RuntimeError(
+                "SECOND_FACE_CHANNELS %s %r, and MAX_FACES is %d"
+                % ("matches" if matched else "does not match", name, MAX_FACES))
 
 
 def _check_keypoint_names():
@@ -934,6 +976,14 @@ def _page(comp, name="Attributes"):
     # entry in GROUPS is a capability, so `Verbosity = Everything` turns them all on;
     # this one REMOVES channels, so "Everything" would switch it on and freeze the
     # 348 landmarks a preset called Everything just promised.
+    # One face rather than two. Output only - see SECOND_FACE_CHANNELS for why it
+    # cannot gate cooking, which is the one thing worth knowing before switching it on
+    # expecting a saving.
+    if ONEFACE_TOGGLE not in existing:
+        one = page.appendToggle(ONEFACE_TOGGLE, label="One Face Only")[0]
+        one.default = False
+        one.val = False
+
     keypoint_label = _costed(KEYPOINTS_TOGGLE, "Face Key Points")
     if KEYPOINTS_TOGGLE not in existing:
         points = page.appendToggle(KEYPOINTS_TOGGLE, label=keypoint_label)[0]
@@ -992,6 +1042,7 @@ def main():
     # building a network around a trim list that is already wrong.
     _check_joint_split()
     _check_keypoint_names()
+    _check_face_slots()
 
     master = op(MASTER_PATH)
     comp = op(COMP_PATH)
@@ -1031,7 +1082,8 @@ def main():
     # The three toggles that are NOT in GROUPS: each removes channels rather than
     # adding a capability, which is why none of them is in a Verbosity preset. They
     # would be invisible in the report above, and `Facekeypoints` gates real cost.
-    for extra in (FINGERTIPS_TOGGLE, HANDBOX_TOGGLE, KEYPOINTS_TOGGLE):
+    for extra in (FINGERTIPS_TOGGLE, HANDBOX_TOGGLE, KEYPOINTS_TOGGLE,
+                  ONEFACE_TOGGLE):
         par = getattr(master.par, extra, None)
         if par is None:
             continue
@@ -1073,7 +1125,7 @@ def main():
         # `Facekeypoints` rewrites the trim list AND freezes two coords halves, so
         # it has to reach `_apply_gating` like any other gating toggle. It is not in
         # GROUPS, so the last term of this union does not cover it.
-        | {KEYPOINTS_TOGGLE}
+        | {KEYPOINTS_TOGGLE, ONEFACE_TOGGLE}
         | {name for names in COOK_SUPPRESSED.values() for name in names}
         # `Active` vetoes cooking for every group, so flipping it has to re-run the
         # gating - otherwise switching capture off leaves the whole chain cooking
