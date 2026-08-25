@@ -76,25 +76,16 @@ import sys
 # is what makes a shipped .tox work at all. Before 2026-08-23 this was a baked
 # absolute path and nothing else, so a .tox carried one person's home directory and
 # failed at its first cook everywhere else.
-BUILT_AT = %(repo)r
 _COMP_PATH = %(comp_for_root)r
-
+%(resolver)s
 
 def _package_root():
     """The directory containing `appletd`, or raise saying what to do about it."""
-    tried = [BUILT_AT]
     comp = op(_COMP_PATH)
-    if comp is not None:
-        par = getattr(comp.par, "Installroot", None)
-        if par is not None:
-            tried.append(str(par.eval()))
-    for root in tried:
-        if root and os.path.isdir(os.path.join(root, "appletd")):
-            return root
-    raise RuntimeError(
-        "cannot find the `appletd` package. Looked in %%s. Press Install on the "
-        "Vision page, or point `Installroot` at a checkout." %% ", ".join(
-            repr(t) for t in tried if t))
+    root = _find_package_root(comp)
+    if root:
+        return root
+    raise RuntimeError(_package_root_error(comp))
 
 
 REPO_ROOT = _package_root()
@@ -358,7 +349,7 @@ def main():
     # One layout table for every builder - two of them once placed their group on the
     # same coordinate, and nothing could notice.
     from appletd.derive import Params
-    from appletd.td_layout import stream_xy
+    from appletd.td_layout import PACKAGE_ROOT_SOURCE, stream_xy
 
     comp = op(COMP_PATH)
     master = op(MASTER_PATH)
@@ -378,7 +369,7 @@ def main():
     existing = comp.op("derive_callbacks")
     callbacks = existing or comp.create(td.textDAT, "derive_callbacks")
     _place(callbacks, stream_xy("derive_callbacks"), keep, existing is not None)
-    callbacks.text = CALLBACK_SOURCE % {"repo": REPO_ROOT,
+    callbacks.text = CALLBACK_SOURCE % {"resolver": PACKAGE_ROOT_SOURCE,
                                     "comp_for_root": MASTER_PATH}
 
     existing_chop = comp.op("derive_chop")

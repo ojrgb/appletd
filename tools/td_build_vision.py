@@ -89,26 +89,15 @@ import time
 # absolute paths from the machine that ran the builder, so a .tox carried one person's
 # home directory and the sidecar could not start anywhere else.
 #
-# BUILT_AT is the checkout this file was generated from and wins WHEN IT EXISTS - on the
-# machine that built it the repo is the source of truth, and preferring an installed
-# copy would mean silently running stale code. Elsewhere it does not exist, so
-# `Installroot` is used.
-BUILT_AT = %(repo)r
-SIDECAR_PYTHON_DEFAULT = %(python)r
-
+# NOTHING MACHINE-SPECIFIC IS BAKED IN as of 2026-08-24. `BUILT_AT` - the checkout the
+# builder ran from - and `SIDECAR_PYTHON_DEFAULT` - the venv on that machine - are both
+# gone. See appletd/td_layout.PACKAGE_ROOT_SOURCE for the resolver and the two failures
+# that removed them.
+%(resolver)s
 
 def package_root(comp=None):
-    """The directory containing `appletd`, or "" if neither candidate has it."""
-    comp = comp or op(%(comp)r)
-    tried = [BUILT_AT]
-    if comp is not None:
-        par = getattr(comp.par, "Installroot", None)
-        if par is not None:
-            tried.append(str(par.eval()))
-    for root in tried:
-        if root and os.path.isdir(os.path.join(root, "appletd")):
-            return root
-    return ""
+    """The directory containing `appletd`, or "" if no candidate has it."""
+    return _find_package_root(comp or op(%(comp)r))
 
 
 def sidecar_python(comp=None):
@@ -127,7 +116,18 @@ def sidecar_python(comp=None):
         own = os.path.join(root, "python", "bin", "python3") if root else ""
         if own and os.path.exists(own):
             return own
-    return SIDECAR_PYTHON_DEFAULT
+    # THE INSTALL'S OWN INTERPRETER, even when the package is not where this thinks it
+    # is - `Installroot` may be blank and the install may still be in the default
+    # place. Checked separately so a half-finished install still names the right
+    # interpreter rather than falling through to whatever `python3` happens to be.
+    own = os.path.join(os.path.expanduser(INSTALL_ROOT_DEFAULT),
+                       "python", "bin", "python3")
+    if os.path.exists(own):
+        return own
+    # AND THEN `python3` ON PATH, which is a guess and says so by being one. It used to
+    # be the venv path from the machine that ran the builder, which is worse than a
+    # guess: it is a confident answer that is right on exactly one computer.
+    return "python3"
 
 
 # Where the sidecar's stdout and stderr go. Everything it prints about itself - which
@@ -893,7 +893,13 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # docs/BUILD_PLAN.md step 21 is where this stops being a convention: TouchDesigner
 # ships its own Python 3.11 with pip, so an Install button can put pyobjc beside it
 # and this becomes a computed answer too.
-SIDECAR_PYTHON = os.path.expanduser("~/.venvs/appletd/bin/python")
+# RETIRED 2026-08-24. This was `os.path.expanduser("~/.venvs/appletd/bin/python")`,
+# baked into the generated DAT as `SIDECAR_PYTHON_DEFAULT` and used as the last resort
+# - so a shipped .tox tried to launch the sidecar from a venv in somebody else's home.
+# `sidecar_python()` now ends at the install's own interpreter and then plain
+# `python3`, which is a guess that reads as one. Set `Sidecarpython` on the Advanced
+# page to be explicit; the venv is still the documented development convention and is
+# what that parameter is for.
 
 # Which camera, as a substring of the device name. Matches
 # `appletd.engine.DEFAULT_CAMERA_NAME`, and the substring form is deliberate:
@@ -1048,7 +1054,13 @@ def main():
         STATUS_PREFIX,
         port_for,
     )
-    from appletd.td_layout import COL_W, master_xy, rewire_master_chain, stream_row
+    from appletd.td_layout import (
+        COL_W,
+        PACKAGE_ROOT_SOURCE,
+        master_xy,
+        rewire_master_chain,
+        stream_row,
+    )
 
     parent = op(PARENT_PATH)
     if parent is None:
@@ -1760,7 +1772,7 @@ def main():
     control = comp.create(td.textDAT, "sidecar_control")
     control.nodeX, control.nodeY = master_xy("sidecar_control")
     control.text = SIDECAR_CONTROL_SOURCE % {
-        "python": SIDECAR_PYTHON, "repo": REPO_ROOT, "port": OSC_PORT,
+        "resolver": PACKAGE_ROOT_SOURCE, "port": OSC_PORT,
         "comp": comp.path, "request_toggles": REQUEST_TOGGLES}
 
     callbacks = comp.create(td.parameterexecuteDAT, "sidecar_callbacks")

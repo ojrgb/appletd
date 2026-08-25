@@ -366,3 +366,70 @@ def _self_check() -> None:
 
 
 _self_check()
+
+
+# ---------------------------------------------------------------------------
+# The resolver every generated DAT embeds
+# ---------------------------------------------------------------------------
+# WRITTEN ONCE HERE and pasted verbatim into the generated DATs, because it was
+# four copies of the same twenty lines and they drifted the moment one of them was
+# fixed.
+#
+# NOTHING MACHINE-SPECIFIC IS BAKED INTO IT, and that is the whole point. Until
+# 2026-08-24 each copy carried
+#
+#     BUILT_AT = "/Users/<whoever>/Documents/GitHub/appletd"
+#
+# - the checkout the BUILDER ran from - and preferred it over everything else. Two
+# consequences, both found by opening the component on somebody else's Mac, which is
+# the only place either could be found:
+#
+#   * a shipped `.tox` named a stranger's home directory in its own error messages;
+#   * and it could not find a SUCCESSFUL install, because a blank `Installroot` was
+#     appended as "" and never expanded to where Install actually writes.
+#
+# THE ORDER, and why each entry earns its place:
+#
+#   1. `Installroot`, when set. An explicit answer wins; it is also the documented
+#      way to point the component at a checkout.
+#   2. `$APPLETD_REPO`, for a developer who wants the .toe to read a working tree
+#      rather than an install - the case BUILT_AT existed to serve. Opt-in, and
+#      carried by the environment rather than by the file, so it cannot ship.
+#   3. `~/Library/Application Support/appletd`, where Install puts it. Expanded at
+#      CALL time, so it is the home of whoever opened the file.
+PACKAGE_ROOT_SOURCE = '''
+# Where the `appletd` package is, resolved on the machine that OPENS this file.
+# Generated from tools/td_paths.py - see there for why nothing is baked in.
+INSTALL_ROOT_DEFAULT = "~/Library/Application Support/appletd"
+DEV_ROOT_ENV = "APPLETD_REPO"
+
+
+def _package_root_candidates(comp):
+    """Every directory that might contain `appletd`, best answer first."""
+    tried = []
+    if comp is not None:
+        par = getattr(comp.par, "Installroot", None)
+        if par is not None and str(par.eval()).strip():
+            tried.append(os.path.expanduser(str(par.eval()).strip()))
+    checkout = os.environ.get(DEV_ROOT_ENV, "").strip()
+    if checkout:
+        tried.append(os.path.expanduser(checkout))
+    tried.append(os.path.expanduser(INSTALL_ROOT_DEFAULT))
+    return tried
+
+
+def _find_package_root(comp):
+    """The first candidate that actually holds `appletd`, or "" if none does."""
+    for root in _package_root_candidates(comp):
+        if root and os.path.isdir(os.path.join(root, "appletd")):
+            return root
+    return ""
+
+
+def _package_root_error(comp):
+    """What to tell somebody when it is not there. Names only THEIR paths."""
+    return ("cannot find the `appletd` package. Looked in %s. Press Install on the "
+            "Vision page, or point `Installroot` at a checkout."
+            % ", ".join(repr(t) for t in _package_root_candidates(comp) if t))
+'''
+
