@@ -33,3 +33,15 @@ installed by pip, not vendored here.
 
 Part of macOS, used through their public APIs. Not redistributed. Subject to your
 macOS licence agreement.
+
+## Not affiliated with Apple or Derivative
+
+This is an independent project. It is not affiliated with, endorsed by, sponsored by
+or otherwise connected to Apple Inc. or Derivative Inc.
+
+`appletd` is a contraction of "Apple" and "TouchDesigner", chosen because it says what
+the thing does. Read cold it could be taken for something Apple publishes, which is why
+this section exists rather than being left to be obvious. Apple, Vision, Core ML,
+macOS and the Neural Engine are trademarks of Apple Inc.; TouchDesigner and Derivative
+are trademarks of Derivative Inc. They are used here to say which software this works
+with, and for no other reason. All marks belong to their owners.

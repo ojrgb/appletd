@@ -387,9 +387,51 @@ mistaken for first.
 
 ---
 
+## What it does with camera data
+
+Stated plainly because this reads faces and hands from a live camera, and anyone
+deploying it — at an event, in a client space, on somebody else's machine — should be
+able to answer that question without reading the source.
+
+**Everything runs on this machine.** All inference is local: Apple's Vision framework
+and one Core ML model, on the Neural Engine. Nothing is sent anywhere. There is no
+telemetry, no analytics and no account.
+
+**What leaves the sidecar process, and where it goes:**
+
+| | |
+|---|---|
+| landmark coordinates and derived attributes | OSC over UDP to **`127.0.0.1`** — loopback, not the network |
+| the segmentation mask and the depth map | `/tmp/appletd_mask.buf`, `/tmp/appletd_depth.buf` — shared-memory buffers holding a **derived silhouette and depth map**, not camera frames. Configurable on the Advanced page |
+| a launch log | `/tmp/appletd_sidecar.log` — text, truncated per launch |
+
+**No camera frame is ever written to disk** by the component. `tools/record_fixture.py`
+is the one exception and it is a developer tool you run on purpose, to record a
+benchmark clip; committed fixtures are hands-only by rule (`docs/STANDARDS.md`).
+
+**Camera permission belongs to TouchDesigner**, not to this component. The sidecar is a
+separate process, but macOS attributes the request to the host application — so the
+grant, and revoking it, is TouchDesigner's entry in System Settings.
+
+**Face landmarks are personal data in most places that have a view on it**, whether or
+not a frame is stored. What you do with the numbers is yours to answer for; this
+section is only about what the software itself does.
+
+## Not for safety-critical use
+
+Research and creative work. It is not designed, tested or suitable for medical,
+diagnostic, automotive, security, access-control or any other use where a wrong answer
+causes harm. See the warranty and liability disclaimer in [LICENSE](LICENSE).
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
+
+**Independent project.** Not affiliated with, endorsed by or connected to Apple Inc.
+or Derivative Inc. Apple, Vision, Core ML and macOS are trademarks of Apple Inc.;
+TouchDesigner is a trademark of Derivative Inc. `appletd` is a contraction of the two
+names and says what the thing does — it is not an Apple product.
+[NOTICE.md](NOTICE.md) has the full statement.
 
 **Depth Anything V2 is not ours and is not in this repository** —
 `./tools/fetch_models.sh` fetches it at run time from Apple's Hugging Face account.
