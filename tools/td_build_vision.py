@@ -100,6 +100,37 @@ def package_root(comp=None):
     return _find_package_root(comp or op(%(comp)r))
 
 
+def sidecar_environment(comp=None):
+    """The environment a launched sidecar needs. Returns a dict for `env=`.
+
+    WHY THIS EXISTS, and it was invisible on the machine that wrote it. The Install
+    button puts the dependencies in `<Installroot>/site-packages` with
+    `pip install --target`, deliberately - an install never writes into anybody's
+    real site-packages, and appletd/install.py says so. Nothing on this side put that
+    directory on the child's path, so a launched sidecar could not import numpy:
+
+        File ".../appletd/pins.py", line 58, in <module>
+            import numpy
+        ModuleNotFoundError
+
+    It never showed up here because the development interpreter is a VENV with pyobjc
+    and numpy installed into it directly, so no PYTHONPATH was needed. Reported
+    2026-08-24 from a machine that had used the Install button - the first one ever to
+    run the shipped path end to end.
+
+    PREPENDED to an existing PYTHONPATH rather than replacing it: somebody may have
+    their own reason for one, and clobbering it is not this function's business.
+    """
+    root = package_root(comp)
+    environment = dict(os.environ)
+    site = os.path.join(root, "site-packages") if root else ""
+    if site and os.path.isdir(site):
+        existing = environment.get("PYTHONPATH", "")
+        environment["PYTHONPATH"] = (site + os.pathsep + existing if existing
+                                     else site)
+    return environment
+
+
 def sidecar_python(comp=None):
     """Which interpreter to launch. `Sidecarpython` wins, then the install's own,
     then the documented convention.
@@ -112,6 +143,12 @@ def sidecar_python(comp=None):
         par = getattr(comp.par, "Sidecarpython", None)
         if par is not None and str(par.eval()).strip():
             return os.path.expanduser(str(par.eval()).strip())
+        # A development machine's own interpreter, from the ENVIRONMENT rather than
+        # from a parameter - a parameter is saved into the .tox, which is exactly how
+        # one person's venv came to ship inside it.
+        dev = os.environ.get(DEV_PYTHON_ENV, "").strip()
+        if dev:
+            return os.path.expanduser(dev)
         root = package_root(comp)
         own = os.path.join(root, "python", "bin", "python3") if root else ""
         if own and os.path.exists(own):
@@ -309,7 +346,7 @@ def start():
               %% (SIDECAR_LOG, problem))
         log = subprocess.DEVNULL
     process = subprocess.Popen(
-        argv, cwd=package_root(comp) or None,
+        argv, cwd=package_root(comp) or None, env=sidecar_environment(comp),
         # Line-buffered on the child's side already (`flush=True` at every print in
         # sidecar.py), so the log is readable while it runs rather than only after.
         stdout=log, stderr=subprocess.STDOUT)
@@ -513,8 +550,8 @@ def list_cameras(comp=None):
     try:
         found = subprocess.run(
             [sidecar_python(comp), "-m", "appletd.sidecar", "--list-cameras"],
-            cwd=package_root(comp) or None, capture_output=True, text=True,
-            timeout=20)
+            cwd=package_root(comp) or None, env=sidecar_environment(comp),
+            capture_output=True, text=True, timeout=20)
     except Exception as exc:
         # DELIBERATELY BROAD and deliberately reported: every failure here is "the
         # interpreter would not run", and none of them is retryable from a button.

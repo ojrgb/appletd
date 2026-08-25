@@ -402,6 +402,12 @@ PACKAGE_ROOT_SOURCE = '''
 # Generated from tools/td_paths.py - see there for why nothing is baked in.
 INSTALL_ROOT_DEFAULT = "~/Library/Application Support/appletd"
 DEV_ROOT_ENV = "APPLETD_REPO"
+# The development interpreter, for a machine that has a venv rather than an install.
+# An ENVIRONMENT VARIABLE and not a parameter, because a parameter is SAVED INTO THE
+# .tox - which is how `~/.venvs/appletd/bin/python` came to be baked into a file
+# handed to somebody else. `Sidecarpython` on the Advanced page is still there for a
+# deliberate, per-project answer; this one is for "my machine, always".
+DEV_PYTHON_ENV = "APPLETD_PYTHON"
 
 
 def _package_root_candidates(comp):
