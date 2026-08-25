@@ -239,19 +239,45 @@ def _is_sidecar(pid):
                               capture_output=True, text=True, timeout=5)
     except Exception:
         return False
-    line = proc.stdout.strip()
+    return _is_sidecar_line(proc.stdout.strip())
+
+
+def _is_sidecar_line(line):
+    """Is this `ps -o command=` output a sidecar? Pure, so it can be tested.
+
+    ARGV[0] IS NOT RECOVERABLE FROM THIS STRING and the old version assumed it was.
+    `ps` hands back one space-joined line, so `line.split()[0]` is only the
+    interpreter when the interpreter's path has no space in it. The default install
+    root is
+
+        ~/Library/Application Support/appletd/python/bin/python3
+
+    whose first token is `/Users/<name>/Library/Application` - basename `Application`,
+    no "python" in it - so the check rejected a perfectly healthy sidecar. MEASURED on
+    a second Mac 2026-08-24: the panel read "Stopped" while the process ran, and Stop
+    and Restart both signalled nothing, so Restart piled up orphans. Invisible on the
+    machine that wrote it, where the interpreter is a venv at a path with no spaces.
+
+    This is the SECOND time this function has been wrong about the interpreter: it
+    used `comm=` until macOS truncated a venv path to 16 characters. Both fixes were
+    aimed at reading argv[0]; the answer is not to need it.
+
+    WHAT STILL PROTECTS THE SIGNAL, because the point of this function is that
+    `pgrep -f` matches too much and we are about to send SIGTERM:
+
+      * `-m` and the module name must be ADJACENT TOKENS. A shell running
+        `pgrep -f appletd.sidecar` has no `-m` before it; a `tail` on the log has
+        neither; and a python running `-c "x='-m appletd.sidecar'"` tokenises to
+        `x='-m` and `appletd.sidecar'`, which is not a match either.
+      * and "python" must appear SOMEWHERE before the `-m`, which is true of every
+        interpreter path whatever spaces it contains, and false of a shell.
+    """
     if not line:
         return False                      # already gone
     tokens = line.split()
-    if not tokens or "python" not in os.path.basename(tokens[0]):
-        return False
-    # `-m` and the module name must be ADJACENT ARGUMENTS, not a substring of
-    # the command line. A python running `-c "x='-m appletd.sidecar'"`
-    # contains the text but is not a sidecar, and signalling it would be exactly
-    # the class of mistake that killed a shell a moment ago.
     for index, token in enumerate(tokens[:-1]):
         if token == "-m" and tokens[index + 1] == MATCH:
-            return True
+            return "python" in " ".join(tokens[:index]).lower()
     return False
 
 
