@@ -558,6 +558,22 @@ def write_stamp(root: str, version: str, python: str) -> str:
     return path
 
 
+def model_present(root: str) -> bool:
+    """Is the depth model really there, weights and all?
+
+    NOT `isdir(models)`, which was the old test: an interrupted download leaves the
+    directory and a truncated `weight.bin`, and Core ML then fails to load a model
+    that looks installed. `MODEL_WEIGHT_MIN_BYTES` exists for exactly this and the
+    installer's own shell already checks it - this is the same question asked from
+    Python so the panel can answer it too.
+    """
+    weight = os.path.join(root, MODELS_DIRNAME, MODEL_PACKAGE, MODEL_FILES[-1])
+    try:
+        return os.path.getsize(weight) >= MODEL_WEIGHT_MIN_BYTES
+    except OSError:
+        return False
+
+
 def probe(root: str = DEFAULT_INSTALL_ROOT, wanted_version: str = "") -> InstallState:
     """What is installed at `root`, without running anything.
 
@@ -567,7 +583,14 @@ def probe(root: str = DEFAULT_INSTALL_ROOT, wanted_version: str = "") -> Install
 
     The states, and each is a fact rather than a guess:
         missing        no stamp, so nothing has ever been installed here
-        incomplete     a stamp, but a module, the packages or the model is absent
+        incomplete     a stamp, but a module, the packages or the model is absent.
+                       THE MODEL COUNTS as of 2026-08-24 - it was computed here and
+                       then left out of this decision, so an install with no model
+                       read "installed", which disables the Install button. Turning
+                       `Depth Map` on later left no way to fetch it but Force Install,
+                       and nothing said the model was what was wrong. Reported from a
+                       second Mac where enabling depth killed the sidecar and took
+                       segmentation down with it - one process, both streams.
         stale          everything is there and the stamp names another version
         installed      everything is there and the version matches
     """
@@ -576,7 +599,7 @@ def probe(root: str = DEFAULT_INSTALL_ROOT, wanted_version: str = "") -> Install
     present = sum(1 for module in RUNTIME_MODULES
                   if os.path.exists(os.path.join(package_dir, module + ".py")))
     packages = os.path.isdir(os.path.join(root, SITE_PACKAGES))
-    model = os.path.isdir(os.path.join(root, MODELS_DIRNAME))
+    model = model_present(root)
     version = None
     if stamp is not None:
         raw = stamp.get("version")
@@ -584,7 +607,7 @@ def probe(root: str = DEFAULT_INSTALL_ROOT, wanted_version: str = "") -> Install
 
     if stamp is None:
         state = "missing"
-    elif present < len(RUNTIME_MODULES) or not packages:
+    elif present < len(RUNTIME_MODULES) or not packages or not model:
         state = "incomplete"
     elif wanted_version and version != wanted_version:
         state = "stale"

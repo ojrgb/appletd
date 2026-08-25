@@ -176,6 +176,8 @@ def state(comp=None):
                               found.modules_wanted))
         if not found.packages:
             missing.append("Python packages")
+        if not found.model:
+            missing.append("the depth model")
         text = "Install needed - missing %%s" %% ", ".join(missing)
     elif found.state == "stale":
         text = ("Update needed - installed %%s, this file wants %%s"
@@ -265,7 +267,16 @@ def install(force=False):
         root=root, version=version,
         requirements=module.REQUIREMENTS,
         python=python,
-        want_model=bool(comp.par.Streamdepth.eval()))
+        # ALWAYS. This was `bool(comp.par.Streamdepth.eval())` until 2026-08-24, so
+        # the 47 MB model was fetched only if `Depth Map` happened to be ON at the
+        # instant Install was pressed - a permanent consequence decided by a
+        # momentary state. Turning depth on afterwards then asked the sidecar to load
+        # a model that was not there, which killed the process and took SEGMENTATION
+        # down with it, because it is one process serving both streams.
+        #
+        # 47 MB on every install is the price, and it is the right one: the failure it
+        # replaces is silent, remote, and indistinguishable from a broken component.
+        want_model=True)
     script_path = os.path.join(root, "install.sh")
     with open(script_path, "w", encoding="utf-8") as handle:
         handle.write(script)

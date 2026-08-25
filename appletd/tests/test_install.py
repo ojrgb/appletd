@@ -220,7 +220,13 @@ def _install_into(root: Path, *, version: str = "1", skip: str = "",
     if packages:
         (root / install.SITE_PACKAGES).mkdir(exist_ok=True)
     if model:
-        (root / install.MODELS_DIRNAME).mkdir(exist_ok=True)
+        # The WEIGHT FILE, at a plausible size - `probe` checks that now rather than
+        # `isdir(models)`, because an interrupted download leaves the directory and a
+        # truncated weight, and Core ML then fails to load a model that looks present.
+        weight = (root / install.MODELS_DIRNAME / install.MODEL_PACKAGE
+                  / install.MODEL_FILES[-1])
+        weight.parent.mkdir(parents=True, exist_ok=True)
+        weight.write_bytes(b"\0" * (install.MODEL_WEIGHT_MIN_BYTES + 1))
     install.write_stamp(str(root), version, "/some/python")
 
 
@@ -272,15 +278,37 @@ def test_no_wanted_version_does_not_invent_staleness(tmp_path: Path) -> None:
     assert install.probe(str(tmp_path)).state == "installed"
 
 
-def test_the_model_is_reported_but_does_not_decide_completeness(
-        tmp_path: Path) -> None:
-    """Depth is optional. An install with no model is complete for the four Vision
-    streams, and saying otherwise would push everybody through a 47 MB download for
-    a feature they may not want."""
+def test_an_install_with_no_model_is_incomplete(tmp_path: Path) -> None:
+    """REVERSED 2026-08-24, and the reasoning that made it "installed" is worth
+    keeping because it was not silly: depth is optional, and pushing everybody
+    through a 47 MB download for a feature they may not want is rude.
+
+    What it did in practice was worse. The Install button is DISABLED when the state
+    reads "installed", so an install with no model had no way to get one - and
+    nothing in the panel said the model was what was missing. Turning `Depth Map` on
+    afterwards asked the sidecar to load a model that was not there, which killed the
+    process and took SEGMENTATION down with it, because one process serves both.
+    Reported from a second Mac, where it looked like three unrelated faults.
+
+    So the model is downloaded on every install now and counted here. The 47 MB is
+    the price of a failure that was silent, remote, and indistinguishable from a
+    broken component."""
     _install_into(tmp_path, version="abc", model=False)
     state = install.probe(str(tmp_path), wanted_version="abc")
     assert state.model is False
-    assert state.state == "installed"
+    assert state.state == "incomplete"
+
+
+def test_a_truncated_model_download_does_not_count(tmp_path: Path) -> None:
+    """The directory and the file both exist and Core ML would still refuse it. This
+    is why `probe` weighs the weights rather than calling `isdir`."""
+    _install_into(tmp_path, version="abc", model=False)
+    weight = (tmp_path / install.MODELS_DIRNAME / install.MODEL_PACKAGE
+              / install.MODEL_FILES[-1])
+    weight.parent.mkdir(parents=True, exist_ok=True)
+    weight.write_bytes(b"\0" * 1024)
+    assert install.model_present(str(tmp_path)) is False
+    assert install.probe(str(tmp_path), wanted_version="abc").state == "incomplete"
 
 
 # ---------------------------------------------------------------------------

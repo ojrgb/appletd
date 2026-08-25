@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import pathlib
 import re
+from collections.abc import Callable
+from typing import cast
 
 import pytest
 
@@ -30,7 +32,7 @@ BUILDER = (pathlib.Path(__file__).resolve().parents[2]
            / "tools" / "td_build_vision.py")
 
 
-def _shipped_predicate():
+def _shipped_predicate() -> Callable[[str], bool]:
     """`_is_sidecar_line` as it is actually generated, with `MATCH` in scope.
 
     Extracted from the builder's source rather than imported: the function only ever
@@ -46,7 +48,9 @@ def _shipped_predicate():
     source = source.replace("%%", "%")
     scope: dict[str, object] = {"MATCH": "appletd.sidecar"}
     exec(compile(source, "td_build_vision.py:_is_sidecar_line", "exec"), scope)
-    return scope["_is_sidecar_line"]
+    predicate = scope["_is_sidecar_line"]
+    assert callable(predicate)
+    return cast("Callable[[str], bool]", predicate)
 
 
 IS_SIDECAR = _shipped_predicate()
@@ -57,7 +61,8 @@ INSTALLED = "/Users/zezelai/Library/Application Support/appletd/python/bin/pytho
 
 @pytest.mark.parametrize("interpreter", [VENV, INSTALLED, "python3",
                                          "/usr/local/bin/python3.11"])
-def test_a_sidecar_is_recognised_whatever_its_interpreter_path(interpreter) -> None:
+def test_a_sidecar_is_recognised_whatever_its_interpreter_path(
+        interpreter: str) -> None:
     """Including one with a SPACE in it, which is the default install root and the
     case that read as Stopped on every machine but the author's."""
     assert IS_SIDECAR("%s -m appletd.sidecar --streams face" % interpreter)
