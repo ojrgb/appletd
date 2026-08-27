@@ -1,14 +1,11 @@
 # appletd
 
 **Apple's on-device neural networks in TouchDesigner. Hands, body, face, person
-segmentation and metric depth — as CHOP channels and TOPs, with no Python running
-in your cook.**
+segmentation and depth — as CHOP channels and TOPs, with no Python running in your
+cook.**
 
-TouchDesigner is a leading platform for quick and reliable interactive visual
-effects. Running on-device neural networks in a way that does **not** block
-TouchDesigner's main thread opens up a lot of it — and that "not blocking" is the
-whole engineering problem, because doing the obvious thing is 28× slower. See
-[Why it is built this way](#why-it-is-built-this-way).
+The whole engineering problem is not blocking TouchDesigner's main thread: doing the
+obvious thing is 28× slower. [Why it is built this way](#why-it-is-built-this-way).
 
 Maintained with ❤️ by **Omer Jacoby** —
 [x](https://x.com/jacodesby) ·
@@ -19,177 +16,84 @@ Maintained with ❤️ by **Omer Jacoby** —
 
 *Click for the full clip in real colour.*
 
-<!-- The depth clip, when it exists: the person mask and the depth map side by side,
-     somebody walking toward the camera. Same pattern - poster jpg, link to the blob.
-     docs/media/README.md has the recipe. -->
-
 ---
 
 ## Install
 
 Download [**`appletd.tox`**](https://github.com/ojrgb/appletd/raw/main/appletd.tox),
-drop it into your TouchDesigner project, and press **Install** on its Vision page.
-Wait for `Installstate` to read `Installed`, then switch `Active` on.
+drop it into your project, press **Install** on its Vision page, wait for
+`Installstate` to read `Installed`, switch `Active` on.
 
-**No terminal, and no Python of your own.** Apple Silicon Mac, TouchDesigner, that is
-it. The button does everything, once per machine:
+No terminal and no Python of your own. The button does everything, once per machine:
+finds or downloads a relocatable CPython (26 MB), installs pinned pyobjc and numpy
+(~35 MB), writes the package out of the `.tox` (402 KB) and fetches the depth model
+(47 MB).
 
-| what it does | size | when |
-|---|---|---|
-| finds a working Python, or downloads a relocatable CPython | 26 MB | only if you have none |
-| installs the pinned pyobjc and numpy into the install folder | ~35 MB | always |
-| writes the 20 package modules out of the `.tox` | 402 KB | always |
-| fetches the depth model | 47 MB | only if `Streamdepth` is on |
+It never writes into your Python, your TouchDesigner or `/usr/local`. Everything lands
+in one folder — `Installroot` on the Advanced page, `~/Library/Application
+Support/appletd` by default. Delete it and press Install again.
 
-It never writes into your Python, your TouchDesigner, or `/usr/local`. Everything
-lands in one folder you can see and change — `Installroot` on the Advanced page,
-`~/Library/Application Support/appletd` by default. Delete that folder and press
-Install again; nothing else on the machine is touched.
-
-`Installstate` says what happened: `Installing - <step>` while it runs,
-`Install failed - <which step>` if a download or a proxy blocks it, `Update needed`
-if the `.tox` is newer than the install, `Installed` when it is done.
-
-### If you would rather point it at your own interpreter
-
-Any Python 3.11+ that is not hardened will do — a venv, Homebrew, pyenv:
+Prefer your own interpreter? Any Python 3.11+ that is not hardened will do; point
+`Sidecarpython` at it and nothing is downloaded.
 
 ```bash
 python3.11 -m venv ~/.venvs/appletd
 ~/.venvs/appletd/bin/pip install -r requirements.txt
 ```
 
-Then set `Sidecarpython` on the Advanced page to that interpreter and press Install.
-It verifies your choice by running `import objc` in it, skips the 26 MB download
-entirely, and installs nothing you already have. Leaving `Sidecarpython` blank means
-"work it out", and the probe already looks in `~/.venvs/appletd` before it downloads
-anything.
-
-### Working on appletd itself
-
-```bash
-git clone https://github.com/ojrgb/appletd
-cd appletd
-
-python3.11 -m venv ~/.venvs/appletd
-~/.venvs/appletd/bin/pip install -r requirements-dev.txt
-
-~/.venvs/appletd/bin/python -m pytest -q          # 588 tests, ~20 s, no camera, no TD
-./tools/fetch_models.sh                            # 47 MB, only if you want depth
-~/.venvs/appletd/bin/python tools/depth_probe.py   # depth end to end, still no TD
-```
-
-A checkout takes precedence over an installed copy, deliberately: the callback DATs
-prefer the repo they were built from, so editing `appletd/` changes what the component
-runs without reinstalling anything. `Sourceversion` and `Installstate` are what tell
-you when the two have drifted.
-
-> **Do not reach for TouchDesigner's own bundled Python.** It is the obvious thing to
-> try and it cannot work — [Compatibility](#the-one-platform-detail-that-will-bite-you)
-> has the reason and the measurement.
+> **Do not reach for TouchDesigner's bundled Python.** It is the obvious thing to try
+> and macOS refuses to load pyobjc into it — `TouchDesigner.app` carries
+> `disable-library-validation` and the interpreter inside the bundle does not, so as a
+> subprocess it is an ordinary hardened binary. Nothing to be done from this side.
 
 > **The `.tox` install path has been exercised on more than one Mac.** Building from a
-> fresh clone has only been done on one, so that is the route to treat as less
-> travelled.
+> fresh clone has only been done on one, so treat that route as less travelled.
 
 ---
 
 ## Compatibility
 
-**Apple Silicon Macs only.** Intel is out of scope, and not for lack of interest —
-there is no Neural Engine, so every figure in [BENCHMARKS](docs/BENCHMARKS.md) is
-meaningless there and depth in particular would be several times slower. The installer
-refuses rather than giving you something that will disappoint.
+**Apple Silicon only.** Intel has no Neural Engine, so every figure below is
+meaningless there; the installer refuses rather than disappointing you.
 
-| | tested | expected to work |
+| | tested | expected |
 |---|---|---|
-| chip | M4 Pro | any M-series — all have a Neural Engine, and all will be **slower than the numbers here** |
-| macOS | 26.5 | 12+ for person segmentation, 11+ for hands, body and face |
+| chip | M4 Pro | any M-series, slower than these numbers |
+| macOS | 26.5 | 12+ for segmentation, 11+ for hands, body, face |
 | TouchDesigner | 099 (2023.11xxx) | anything shipping Python 3.11+ |
-| Python (sidecar) | 3.11.9 and 3.11.16 | any 3.11+ that is not hardened — see below |
-
-**Everything in the "tested" column is one machine.** Nobody has yet run this on a
-second Mac, which is the largest untested claim in the repository.
-
-### The one platform detail that will bite you
-
-**TouchDesigner's own bundled Python cannot run the sidecar.** It is the obvious thing
-to reach for — it is right there, it is 3.11, it has pip — and macOS refuses to load
-pyobjc into it:
-
-```
-ImportError: dlopen(objc/_objc.cpython-311-darwin.so): code signature not valid
-  for use in process: ... have different Team IDs
-```
-
-`TouchDesigner.app` carries `com.apple.security.cs.disable-library-validation`, which
-is why pyobjc works *inside* TD. The interpreter inside the bundle does not carry it,
-so run as a subprocess it is an ordinary hardened binary and library validation stops
-it. Nothing to be done from this side.
-
-So the sidecar needs its own interpreter. Any Python 3.11+ that is ad-hoc or
-unsigned will do — a `venv`, Homebrew, pyenv — and if you have none the Install
-button downloads a relocatable CPython (26 MB) from
-[`astral-sh/python-build-standalone`](https://github.com/astral-sh/python-build-standalone),
-which is what `uv` uses. That is a third-party binary download, pinned to one release
-and checked against a recorded hash; it is called out here rather than buried because
-it is a trust decision and yours to make. Point `Sidecarpython` at your own
-interpreter and nothing is downloaded.
+| sidecar Python | 3.11.9, 3.11.16 | any 3.11+ that is not hardened |
 
 ---
 
 ## Usage
 
-Installed already? Switch `Active` on. The COMP launches the sidecar process itself
-and the status goes green — there is nothing else to start.
-
-Working projects to open instead of building your own: [`examples/`](examples/).
+Switch `Active` on — the COMP launches the sidecar itself. Working projects to open
+instead of building your own: [`examples/`](examples/).
 
 | parameter | does |
 |---|---|
-| `Install` | writes the package out, installs Python packages, fetches the model. Greys itself out when there is nothing to do |
-| `Installstate` | read-only. `Not installed`, `Installing - <step>`, `Update needed`, `Install failed - <why>`, or `Installed` |
 | `Active` | starts and stops the sidecar |
-| `Camera` | dropdown, refreshable — picks the device |
-| `Restart` | pulse; needed after changing anything the sidecar reads at launch |
+| `Camera` | refreshable dropdown |
+| `Restart` | needed after changing anything read at launch |
 | `Streamhands` `Streampose` `Streamface` | one Vision request each |
 | `Streamsegment` + `Segquality` | person mask: `fast`, `balanced`, `accurate` |
 | `Streamdepth` + `Depthpins` | depth, and the pins that make it metric |
 | `Coordstx` `Coordspx` | world-space and pixel-space channel sets |
-| `Deleteempty` | trims channels nothing is computing off the output |
+| `Facekeypoints` `Onefaceonly` `Fingertipsonly` | shorten the channel list |
 
-Three outputs, because a COMP can carry connectors of different families but
-`out1` cannot be both a CHOP and a TOP:
+Three outputs, because `out1` cannot be both a CHOP and a TOP:
 
-    out1        CHOP   every channel — 258 in the shipping configuration
+    out1        CHOP   every channel
     outmask     TOP    the person segmentation mask
     outdepth    TOP    the depth map, raw or in metres
 
-### Running it headless
-
-The sidecar is a normal CLI and does not need TouchDesigner at all:
+The sidecar is also a normal CLI, with no TouchDesigner involved:
 
 ```bash
-~/.venvs/appletd/bin/python -m appletd.sidecar --list-cameras
-~/.venvs/appletd/bin/python -m appletd.sidecar --streams hands,depth
-~/.venvs/appletd/bin/python -m appletd.sidecar --fps 60 --port 10000
+python -m appletd.sidecar --list-cameras
+python -m appletd.sidecar --streams hands,depth
+python tools/send_synthetic.py clap --period 4    # no camera needed
 ```
-
-Channels go out over OSC on UDP loopback — hands on the base port, pose on +1,
-face on +2 — and land in TouchDesigner through a stock **OSC In CHOP**. No Script
-CHOP, no callbacks DAT, no Python in your cook.
-
-### Driving it with no camera
-
-```bash
-~/.venvs/appletd/bin/python tools/send_synthetic.py clap --period 4
-```
-
-Synthetic hands over the same encoder and the same port, so TouchDesigner cannot
-tell the difference. Useful for building against, and for testing anything with
-memory. It refuses to run while the sidecar is up, because both write to the same
-port and TD would interleave them into one hand alternating between the two —
-which does not look like a fault, it looks like a result.
 
 ---
 
@@ -204,25 +108,20 @@ hands_distance      hands_center_x      hands_angle
 
     hands    21 joints × 2, plus pinches, curls, spreads and two-hand geometry
     pose     19 body joints
-    face     76 landmarks across 12 regions, plus a bounding box
+    face     76 landmarks across 12 regions, plus four key points and a box
     mask     person segmentation, three qualities
     depth    Depth Anything V2 Small via Core ML, in metres if you pin it
 
-An absent hand reports **zeros with all of its channels still present**. A CHOP
-whose channels appear and disappear breaks every downstream reference the moment
-they vanish, and that is a worse failure than a zero because it is silent.
+An absent hand reports **zeros with all channels still present** — a CHOP whose
+channels vanish breaks every downstream reference silently.
 
-Three coordinate spaces, all computed by stock operators:
+| suffix | space |
+|---|---|
+| `_x` `_y` | normalised, as Vision gives it |
+| `_tx` `_ty` | TouchDesigner world — `(x − 0.5) × Orthowidth`, y by the **render's** aspect |
+| `_px` `_py` | pixels — `x × Resw` |
 
-| suffix | space | |
-|---|---|---|
-| `_x` `_y` | normalised, as Vision gives it | |
-| `_tx` `_ty` | TouchDesigner world | `(x − 0.5) × Orthowidth`, y by the **render's** aspect |
-| `_px` `_py` | pixels | `x × Resw` |
-
-Two-hand attributes like `hands_center` zero out when either hand is missing, so
-gate on `hands_count == 2` before using them — after the world transform, a zero
-becomes the left edge of frame rather than an obvious absence.
+Full channel reference: [`docs/ATTRIBUTES.md`](docs/ATTRIBUTES.md).
 
 ---
 
@@ -230,221 +129,113 @@ becomes the left edge of frame rather than an obvious absence.
 
 Vision is fast. Running it inside TouchDesigner's Python is not:
 
-| where the work runs | Vision call | + landmark conversion | throughput |
+| where the work runs | Vision call | + conversion | throughput |
 |---|---|---|---|
 | a separate process | 4.38 ms | — | **30 fps** |
 | TD's main thread | 2.09 ms | 5.65 ms | cook-rate bound |
 | a TD background thread | **58.90 ms** | **190.83 ms** | **5.2 fps** |
 
-A Python background thread in TD's process is starved **28×**, purely from
-reacquiring the GIL after every pyobjc call. Not the camera, not the GPU, not the
-cook — each of those was ruled out with its own measurement. Everything else
-follows from that table.
+A Python background thread in TD's process is starved **28×**, purely from reacquiring
+the GIL after every pyobjc call. Everything else follows from that.
 
-The short version of the rest:
+- **A sidecar process**, not a plugin or a thread. If it dies, TD keeps rendering and a
+  light goes red.
+- **Landmarks over OSC, images over shared memory.** OSC is right for a few hundred
+  floats and wrong for a 406 KB depth map. Images go through a file-backed `mmap` with
+  a seqlock — 0.02 ms a read, zero torn frames in 56,591.
+- **Metric depth by pinning**, not a metric model: you name points you have measured
+  and it solves `1/Z = alpha·d + beta`.
+- **Most of it is switched off.** A toggle means `allowCooking = False`, so the
+  operators do not run.
 
-- **A sidecar process, not a plugin or a thread.** If it dies, TD keeps rendering
-  and a light goes red. Two independent mechanisms stop it outliving TD and
-  holding your camera, because a `Popen` child on macOS survives its parent.
-- **Landmarks over OSC, images over shared memory.** OSC is right for a few
-  hundred floats and wrong for a 406 KB depth map. Images go through a file-backed
-  `mmap` with a seqlock: 0.0204 ms per read, and zero torn frames in 56,591.
-- **Not TouchDesigner's own shared memory.** It is closed to a foreign writer —
-  `UT_SharedMem`'s lock name is 36 characters and macOS's `shm_open` limit is 31.
-- **fp16 end to end.** The depth model emits ~7,300 distinct values per frame; an
-  8-bit transport would give 256.
-- **Metric depth by pinning, not by a metric model.** You name points you have
-  measured and it solves `1/Z = alpha·d + beta`. A metric model is confidently
-  wrong in a room it was not trained for and nothing in the output says so.
-- **Most of it is switched off.** A toggle here means `allowCooking = False` — the
-  operators do not run. Everything on is 1.74 ms and 207 cooking operators; hands
-  only with the attribute layer down is **0.60 ms and 29 of 287**. `allowCooking`
-  raises on anything that is not a COMP, which is why the network is grouped into
-  COMPs at all: the grouping *is* the gating mechanism.
-- **Not C++**, and two of the three original arguments for it were settled the
-  other way by measurement. **Not WebSocket**, because TCP head-of-line blocking is
-  the wrong trade for data that is worthless when late, and TD's WebSocket DAT puts
-  Python back in your cook.
-
-Full argument, including the things that were ruled out and the two decisions that
-reversed: [**`docs/ARCHITECTURE.md`**](docs/ARCHITECTURE.md).
+Full argument, including what was ruled out: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
 ## Benchmarks
 
-M4 Pro, 12-core, 48 GB, macOS 26.5. Every inference figure depends on the Neural
-Engine — an M1, or a Core ML fallback to CPU, will not reproduce these.
+M4 Pro, macOS 26.5. Every figure depends on the Neural Engine.
 
 | request | per frame | output |
 |---|---|---|
 | hands | **3.41 ms** | 21 joints × 2 |
-| segmentation `fast` | 2.21 ms | 256 × 192, hard alpha |
-| segmentation `balanced` | 8.54 ms | 512 × 384, feathered |
+| segmentation `fast` | 2.21 ms | 256 × 192 |
 | segmentation `accurate` | 30.73 ms | 2016 × 1512 |
-| depth, Depth Anything V2 Small | **23.00 ms** | 518 × 392 fp16 |
+| depth | **23.00 ms** | 518 × 392 fp16 |
 
-A 30 fps frame is 33.3 ms. Depth alone is 69% of it; depth plus `accurate`
-segmentation is 162% and cannot work. Requests run cheapest-first on one queue, so
-what gets dropped is dropped from the end.
+A 30 fps frame is 33.3 ms, so depth alone is 69% of it and depth plus `accurate`
+segmentation cannot work. The COMP itself is 1.74 ms with everything on, 0.60 ms for
+hands alone.
 
-The COMP itself:
-
-| configuration | cook | operators cooking |
-|---|---|---|
-| three streams, everything on | 1.74 ms | 207 / 287 |
-| hands only, attribute layer off | **0.60 ms** | **29 / 287** |
-
-Method, caveats and every other figure: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
-Comparisons against MediaPipe and the alternative transports are **projections,
-not measurements**, and are labelled as such in
-[`docs/ARCHITECTURE.md` §7](docs/ARCHITECTURE.md).
+Method and every other figure: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). MediaPipe
+and transport comparisons are **projections, not measurements**, and are labelled so.
 
 ---
 
-## The build pipeline
+## Repo
 
-The TouchDesigner network is not hand-built. Eighteen scripts generate it, which is
-the only reason a change across 287 operators is reviewable.
+| | |
+|---|---|
+| `appletd/` | the package — pure core, engine, sidecar. 634 tests |
+| `tools/td_*.py` | builders that generate the TouchDesigner network |
+| `docs/` | [ATTRIBUTES](docs/ATTRIBUTES.md) · [ARCHITECTURE](docs/ARCHITECTURE.md) · [BENCHMARKS](docs/BENCHMARKS.md) · [BUILD_PLAN](docs/BUILD_PLAN.md) · [JOURNAL](docs/JOURNAL.md) |
 
-```
-tools/td_build_vision.py      the master COMP, parameters, the sidecar launcher
-tools/td_add_filter.py        one-euro smoothing per stream
-tools/td_add_derive.py        the attribute layer (a Script CHOP)
-tools/td_add_temporal.py      velocity, presence, debounce
-tools/td_add_latches.py       Schmitt triggers with real hysteresis
-tools/td_add_coords.py        world and pixel space, from stock operators
-tools/td_add_segmentation.py  Script TOP → Fit → outmask
-tools/td_add_depth.py         Script TOP → Fit → outdepth, with the pin overlay
-tools/td_add_groups.py        gating, and the trim in front of the output
-```
-
-They run in dependency order; `tools/td_rebuild.py` runs only the ones a change
-actually needs. Every builder **verifies what it built and prints what it found**,
-which has caught more bugs than the test suite — including a COMP output silently
-falling from 495 channels to 57 while the builder reported success.
-
-## Testing
-
-**539 tests, 17 seconds, no camera and no TouchDesigner.**
-
-```bash
-~/.venvs/appletd/bin/python -m pytest -q
-```
-
-The split that makes that possible is deliberate: modules that touch Apple
-frameworks are kept apart from modules that do arithmetic, and the arithmetic is
-where the tests live. `pins.py` imports numpy and nothing else, so it can be tested
-against a synthetic frame whose true answer is known — it recovers both parameters
-to 1e-6. `maskbuf.py` is stdlib only, so the tearing test can fork a real second
-process instead of sharing an address space and proving nothing. `spaces.py` runs a
-self-check **at import**, so a pattern that has drifted from the channel contract
-fails immediately rather than against a live network an hour later.
-
----
-
-## Repo layout
-
-```
-appletd/          the package — 27 modules, ~9,900 lines
-  sidecar.py          the process: camera → Vision → OSC + shared memory
-  engine.py           one serial queue, requests cheapest-first
-  derive.py           the attribute layer — curls, pinches, spreads
-  spaces.py           the coordinate contract, with an import-time self-check
-  maskbuf.py          the seqlock transport
-  pins.py             the affine depth solve
-  tests/              28 files, 539 tests
-tools/                18 builders and probes, ~13,800 lines
-docs/ARCHITECTURE.md  why it is built this way, at length
-docs/BENCHMARKS.md    every figure, and how it was taken
-docs/BUILD_PLAN.md    the implementation recipe, step by step
-docs/JOURNAL.md       dated entries: what broke, what it cost, what fixed it
-docs/STANDARDS.md     the honesty rules the rest of the docs are held to
-design/DESIGN.md      the design plan, with the raw measurements
-```
-
-Roughly as much prose as code, on purpose. The journal is the part worth copying:
-every entry names the defect, the measurement that found it, and the thing it was
-mistaken for first.
+The network is generated, never hand-edited: every builder verifies what it built and
+prints what it found. `pytest`, `ruff` and `mypy --strict` on the core.
 
 ---
 
 ## Known limitations
 
-- **macOS on Apple Silicon only** — a decision, not a hedge. See [Compatibility](#compatibility).
-- **No z per joint.** Vision's hand request is 2D plus confidence. Depth fills that
-  at frame level, not per joint, and only if you pin it.
-- **No tracking IDs.** Vision returns hands in arbitrary order; slots are assigned
-  by chirality then wrist proximity, which is not a tracker.
+- **macOS on Apple Silicon only** — a decision, not a hedge.
+- **No z per joint.** Vision's hand request is 2D plus confidence.
+- **No tracking IDs.** Slots are assigned by chirality then wrist proximity, which is
+  not a tracker.
 - **Depth and `accurate` segmentation cannot both hold 30 fps.**
-- **Depth's metric numbers are checked against a real room** (2026-08-23) and the
-  solve is tested against synthetic frames whose true relationship is known. No
-  tape-measured figures are recorded in `docs/BENCHMARKS.md` yet, so treat the
-  accuracy as "it reads sensibly in a room somebody measured", not as a specification.
-- **No live-camera timings are quoted anywhere**, deliberately: they track what is in
-  shot, and the same configuration measured an 8× spread. Every stream including depth
-  has been run off a live camera; what is not quoted is a *timing* from one.
+- **No live-camera timings are quoted anywhere**, deliberately — they track what is in
+  shot, and the same configuration measured an 8× spread.
 
 ---
 
 ## What it does with camera data
 
-Stated plainly because this reads faces and hands from a live camera, and anyone
-deploying it — at an event, in a client space, on somebody else's machine — should be
-able to answer that question without reading the source.
-
-**Everything runs on this machine.** All inference is local: Apple's Vision framework
-and one Core ML model, on the Neural Engine. Nothing is sent anywhere. There is no
-telemetry, no analytics and no account.
-
-**What leaves the sidecar process, and where it goes:**
+Everything runs on this machine. All inference is local, on the Neural Engine. There is
+no telemetry, no analytics and no account, and nothing is sent anywhere.
 
 | | |
 |---|---|
-| landmark coordinates and derived attributes | OSC over UDP to **`127.0.0.1`** — loopback, not the network |
-| the segmentation mask and the depth map | `/tmp/appletd_mask.buf`, `/tmp/appletd_depth.buf` — shared-memory buffers holding a **derived silhouette and depth map**, not camera frames. Configurable on the Advanced page |
-| a launch log | `/tmp/appletd_sidecar.log` — text, truncated per launch |
+| landmarks and derived attributes | OSC over UDP to **`127.0.0.1`** — loopback |
+| mask and depth map | `/tmp/appletd_*.buf` — a derived silhouette and depth map, not frames |
+| a launch log | `/tmp/appletd_sidecar.log` |
 
-**No camera frame is ever written to disk** by the component. `tools/record_fixture.py`
-is the one exception and it is a developer tool you run on purpose, to record a
-benchmark clip; committed fixtures are hands-only by rule (`docs/STANDARDS.md`).
+**No camera frame is ever written to disk.** `tools/record_fixture.py` is the one
+exception and you run it deliberately.
 
-**Camera permission belongs to TouchDesigner**, not to this component. The sidecar is a
-separate process, but macOS attributes the request to the host application — so the
-grant, and revoking it, is TouchDesigner's entry in System Settings.
+**Camera permission belongs to TouchDesigner**, not to this component — macOS
+attributes the request to the host application.
 
-**Face landmarks are personal data in most places that have a view on it**, whether or
-not a frame is stored. What you do with the numbers is yours to answer for; this
-section is only about what the software itself does.
+Face landmarks are personal data in most places that have a view on it, whether or not
+a frame is stored. What you do with the numbers is yours to answer for.
+
+---
 
 ## Not for safety-critical use
 
-Research and creative work. It is not designed, tested or suitable for medical,
-diagnostic, automotive, security, access-control or any other use where a wrong answer
-causes harm. See the warranty and liability disclaimer in [LICENSE](LICENSE).
+Research and creative work. Not designed, tested or suitable for medical, automotive,
+security, access-control or any other use where a wrong answer causes harm. See the
+disclaimer in [LICENSE](LICENSE).
+
+---
 
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
 
-**Independent project.** Not affiliated with, endorsed by or connected to Apple Inc.
-or Derivative Inc. Apple, Vision, Core ML and macOS are trademarks of Apple Inc.;
-TouchDesigner is a trademark of Derivative Inc. `appletd` is a contraction of the two
-names and says what the thing does — it is not an Apple product.
-[NOTICE.md](NOTICE.md) has the full statement.
+**Independent project.** Not affiliated with, endorsed by or connected to Apple Inc. or
+Derivative Inc. Apple, Vision, Core ML and macOS are trademarks of Apple Inc.;
+TouchDesigner is a trademark of Derivative Inc. [NOTICE.md](NOTICE.md) has the full
+statement.
 
-**Depth Anything V2 is not ours and is not in this repository** —
-`./tools/fetch_models.sh` fetches it at run time from Apple's Hugging Face account.
-The Small model that ships here is **Apache-2.0**, both in Apple's conversion and
-upstream, so the depth stream is usable commercially. Its Base and Large siblings are
-**CC-BY-NC-4.0**, so swapping one in for accuracy changes your terms.
-[NOTICE.md](NOTICE.md) has the detail. The other four streams use Apple's Vision
-framework and need no model file at all.
-
----
-
-> Delete a figure when it stops being true rather than leaving two. A benchmarks
-> file with a superseded number in it is the same defect as a stale comment (1.5),
-> and it is harder to spot because both numbers look measured.
->
-> — [`docs/STANDARDS.md`](docs/STANDARDS.md), §3
+**Depth Anything V2 is not in this repository** — it is fetched at run time. The Small
+model is **Apache-2.0**; its Base and Large siblings are **CC-BY-NC-4.0**, so swapping
+one in changes your terms. [NOTICE.md](NOTICE.md) has the detail.
