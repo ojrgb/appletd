@@ -88,17 +88,9 @@ you when the two have drifted.
 > try and it cannot work — [Compatibility](#the-one-platform-detail-that-will-bite-you)
 > has the reason and the measurement.
 
-> **Exercised on a second Mac on 2026-08-24, and it found eight bugs.** All eight were
-> invisible on the machine that wrote the code: an install path and a home directory
-> baked into the `.tox` in six places, a camera list that had never worked anywhere, a
-> probe that only ran when a *project* opened rather than when the component was
-> dropped in, a sidecar launched without the install's `site-packages`, a status check
-> defeated by the space in "Application Support", and a depth model downloaded only if
-> one toggle happened to be on at the moment you pressed Install.
->
-> **What that run covered was the shipped path** — the `.tox`, the Install button, a
-> downloaded Python. **A fresh `git clone` and a builder run on another machine is
-> still unchecked**, and is now the largest untested thing in here.
+> **The `.tox` install path has been exercised on more than one Mac.** Building from a
+> fresh clone has only been done on one, so that is the route to treat as less
+> travelled.
 
 ---
 
