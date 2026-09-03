@@ -63,6 +63,11 @@ LAYERS = (
     # LAST, so the About page is the last tab. It touches no operator any other
     # builder owns - one page and two DATs.
     ("about", "td_add_about.py"),
+    # AFTER EVERYTHING, because it moves what everything else appended. Nine builders
+    # each create parameters on a page of their own choosing; this puts them where
+    # appletd/td_pages.py says they go, adds the section dividers and drops the pages
+    # nothing is left on. It owns no parameters, so it has nothing to be before.
+    ("pages", "td_add_pages.py"),
 )
 
 # What each layer drags along, and why. Anything listed here is added to the run

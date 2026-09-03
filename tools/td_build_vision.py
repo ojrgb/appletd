@@ -1021,18 +1021,6 @@ MOVED_PARS = ("Slotassign", "Streamhands", "Streampose", "Streamface",
               "Handbox")
 RETIRED_PAGES = ("Sidecar",)
 
-# The order the Vision page reads in: is it running, what is it looking at, what is
-# it computing, what geometry, what comes out, and one build-time preference. Set
-# with `Page.sort`, which reorders without destroying - and destroying a page
-# destroys its parameters and every tuned value with them.
-VISION_PAGE_ORDER = (
-    "Active", "Restartcapture", "Capturestate", "Camera", "Listcameras",
-    "Streamhands", "Streampose", "Streamface", "Streamsegment", "Segquality",
-    "Streamdepth", "Slotassign",
-    "Resw", "Resh", "Renderw", "Renderh", "Orthowidth",
-    "Screenspaceonly", "Deleteempty", "Fingertipsonly",
-)
-
 # The three live defaults. A custom parameter's expression resolves relative to the
 # COMP's PARENT, so `render1` and `cam1` are named directly - they are siblings of
 # the vision COMP at /project1.
@@ -1242,7 +1230,7 @@ def main():
     retired_pars = _retire(comp, RETIRED_PARS + MOVED_PARS, RETIRED_PAGES)
 
     # -- the shared parameters --------------------------------------------
-    page = _page(comp, "Vision")
+    page = _page(comp, "General")
 
     # Is the capture process running. ONE toggle, replacing a Start pulse and a Stop
     # pulse, because a pulse pair cannot show state and this is state.
@@ -1463,7 +1451,9 @@ def main():
     # looking at, what is it computing, what geometry, what comes out. `sort` rather
     # than destroy-and-rebuild, because destroying a page destroys its parameters
     # and every tuned value with them.
-    page.sort(*VISION_PAGE_ORDER)
+    # ORDER IS NOT SET HERE. tools/td_add_pages.py owns it for every page, from
+    # one table - two sorters disagreeing is a page whose shape depends on which
+    # builder ran last.
 
     # -- Advanced: the internals, including two that moved off Sidecar ------
     # SHARED PAGE, and this is the one place in the repo where two builders write to
@@ -1539,7 +1529,9 @@ def main():
     par_depthbuf.default = DEFAULT_DEPTH_PATH
     par_pid.readOnly = True
 
-    filter_page = _page(comp, "Filter")
+    # The smoothing controls sit with the other General-page controls: three
+    # parameters never justified a page of their own (appletd/td_pages.py).
+    filter_page = _page(comp, "General")
     # The filter's own parameters live here, not in a stream, because ONE filter
     # setting applies to all three - which is the whole reason this COMP exists.
     # `td_add_filter.py` builds a group per stream and every one of them reads these.

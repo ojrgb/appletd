@@ -61,7 +61,7 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MASTER_PATH = "/project1/appletd"
 
-PAGE = "Segmentation"
+PAGE = "Segmentation Mask"
 
 # Parameters this builder used to own and no longer does, with why. Destroyed on the
 # next run, because a parameter outlives the code that created it - see the retire

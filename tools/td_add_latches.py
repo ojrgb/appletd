@@ -268,7 +268,7 @@ number still engaged, for every row.
 Built by tools/td_add_latches.py. Edits here are overwritten on the next run."""
 
 
-def _threshold_page(comp, page_name="Tuning"):
+def _threshold_page(comp, page_name="Hands"):
     """The Tuning page, created once and never overwriting a tuned value.
 
     Traps: `appendCustomPage` with an existing name creates a SECOND page of that

@@ -234,11 +234,11 @@ def _tuning_page(master, Params):
     """
     page = None
     for existing in master.customPages:
-        if existing.name == "Tuning":
+        if existing.name == "Hands":
             page = existing
             break
     if page is None:
-        page = master.appendCustomPage("Tuning")
+        page = master.appendCustomPage("Hands")
 
     known = {spec.name.capitalize() for spec in fields(Params)}
     was = {par.name: par.eval() for par in master.customPars if par.name in known}

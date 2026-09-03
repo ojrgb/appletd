@@ -400,36 +400,35 @@ def main():
     keep = bool(comp.par.Keeplayout.eval())
     existing = {par.name: par for par in comp.customPars}
 
-    vision = advanced = None
+    general = advanced = None
     for page in comp.customPages:
-        if page.name == "Vision":
-            vision = page
+        if page.name == "General":
+            general = page
         elif page.name == "Advanced":
             advanced = page
-    if vision is None or advanced is None:
-        print("FAIL no Vision/Advanced page - run tools/td_build_vision.py first")
+    if general is None or advanced is None:
+        print("FAIL no General/Advanced page - run tools/td_build_vision.py first")
         return
 
     # Append only what is absent. `appendPulse` on an existing parameter resets it,
     # and a reset fires a deferred callback that outlives a restore - which is how
-    # `Verbosity` ended up on "Minimal" with every derive group off (DESIGN.md 2.11).
+    # every derive group ended up switched off (DESIGN.md 2.11).
     if "Install" not in existing:
-        vision.appendPulse("Install", label="Install")
+        general.appendPulse("Install", label="Install")
     if "Installstate" not in existing:
-        par = vision.appendStr("Installstate", label="Install Status")[0]
+        par = general.appendStr("Installstate", label="Install Status")[0]
         par.readOnly = True
     else:
         existing["Installstate"].readOnly = True
     if "Forceinstall" not in existing:
         advanced.appendPulse(
             "Forceinstall", label="Force Install  (ignores the probe)")
-    print("1. Install and Installstate on Vision, Forceinstall on Advanced")
+    print("1. Install and Installstate on General, Forceinstall on Advanced")
 
-    # The Vision page order: the install comes FIRST, because nothing else on the page
-    # can work until it is done.
-    order = ["Install", "Installstate"] + [
-        p.name for p in vision.pars if p.name not in ("Install", "Installstate")]
-    vision.sort(*order)
+    # ORDER IS NOT SET HERE. tools/td_add_pages.py owns every page's order from one
+    # table. This used to sort the page itself, and after the pages layer renamed
+    # `Vision` to `General` that sort raised - it was naming parameters that had moved
+    # to another page, which is exactly the disagreement one table prevents.
 
     for name, source, subs in (
             (CONTROL, CONTROL_SOURCE, {"comp": MASTER_PATH, "log": LOG_PATH,

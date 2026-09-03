@@ -291,13 +291,15 @@ Also on `housekeeping` rather than the main output: the 80 per-joint `*_conf`,
 
 ---
 
-## Toggles
+## Hands page
+
+The stream toggle, what it computes, what reaches the output, and its tuning. Every
+stream has a page of its own; `General` holds what applies to all of them.
 
 ### What is computed
 
 | toggle | default | effect |
 |---|---|---|
-| `Level of Detail` (`Verbosity`) | Minimal | preset: sets the toggles below in one click |
 | `Screen Space Coords` (`Coordstx`) | on | `_tx`/`_ty`, every stream. **1.08 ms** |
 | `Pixel Coords` (`Coordspx`) | off | `_px`/`_py`, every stream. **0.90 ms** |
 | `Core` | off | palm, size, bounding box |
@@ -311,9 +313,6 @@ Also on `housekeeping` rather than the main output: the 80 per-joint `*_conf`,
 | `Tilt` | off | `h{i}_tilt` and `h{i}_tilt_axis` |
 | `Temporal` | off | master switch: off freezes everything with memory |
 | `Latches` | off | master switch: off freezes the gesture latches |
-
-Presets: **Minimal** = `Coordstx` + `Twohands`; **Interaction** = everything except
-`Coordspx`, `Descriptor`, `Depth`, `Tilt`; **Everything** = all of it.
 
 ### What reaches the output
 
@@ -332,7 +331,10 @@ and `h{i}_dir_x/y`, and the hand-local descriptor channels.
 
 ---
 
-## Tuning
+### Tuning
+
+Under `Detection`, `Contact thresholds`, `Pose and motion` and `Depth and tilt` on the
+same page.
 
 | parameter | default | what it does |
 |---|---|---|
@@ -364,47 +366,11 @@ re-arm rule and the gesture will chatter.
 threshold here is a guess from synthetic geometry, which validates arithmetic and says
 nothing about how a hand sits.
 
-## Filter
+## General page
 
-| parameter | default | what it does |
-|---|---|---|
-| `Smoothing` | on | the one-euro position filter. Off is a bit-exact passthrough |
-| `Mincutoff` | 1.5 Hz | how heavily a SLOW-moving hand is smoothed |
-| `Beta` | 2.0 | how far a FAST-moving hand is allowed through |
+### Capture, coordinate spaces and output
 
-All 84 landmark positions pass through the filter before anything reads them, so every
-distance, angle, curl, velocity and bounding box inherits the smoothing from one place.
-Confidences, `found`, `seq` and `age_ms` pass through untouched.
-
-The cutoff rises with speed, so a resting hand is stilled and a fast one is not lagged.
-**Do not copy the published `beta` of 0.007** — that is for pixel coordinates, and these
-channels are normalised 0..1, about a thousand times smaller.
-
-## Advanced
-
-| parameter | default | what it does |
-|---|---|---|
-| `Activateframes` | 3 | consecutive good frames before `active` turns on |
-| `Deactivateframes` | 6 | consecutive bad frames before it turns off |
-| `Velocityfilter` | 0.15 s | window a velocity is averaged over |
-| `Speedfloor` | 0.05 /s | below this, `dir` holds and `h{i}_moving` reads 0 |
-| `Oscport` | 10000 | BASE port; the streams take base + 0/1/2 |
-| `Printstatus` | pulse | is a capture process running, and its pid |
-| `Capturepid` | read-only | what was last started. Not proof it is still alive |
-| `Maskbuffer`, `Depthbuffer` | `/tmp/appletd_*.buf` | shared files; must match on both sides |
-| `Installroot` | — | where the sidecar's Python and packages go |
-| `Sidecarpython` | — | interpreter override; empty means the installed one |
-| `Pythonurl` | python-build-standalone | the interpreter the installer fetches |
-| `Sourceversion` | read-only | the build this component was made from |
-| `Forceinstall` | pulse | reinstall regardless of the stamp |
-| `Keeplayout` | off | builders leave existing nodes where you put them |
-
-Changing `Oscport` takes effect on this side immediately and on the sidecar only after a
-restart. `sc_uptime_s` freezing is the symptom of that gap.
-
----
-
-## Vision
+On `General`, above the smoothing controls.
 
 | parameter | default | what it does |
 |---|---|---|
@@ -446,7 +412,47 @@ own reads `Running` until something asks. `sc_uptime_s` freezing is what catches
 
 ---
 
-## About
+### Smoothing
+
+| parameter | default | what it does |
+|---|---|---|
+| `Smoothing` | on | the one-euro position filter. Off is a bit-exact passthrough |
+| `Mincutoff` | 1.5 Hz | how heavily a SLOW-moving hand is smoothed |
+| `Beta` | 2.0 | how far a FAST-moving hand is allowed through |
+
+All 84 landmark positions pass through the filter before anything reads them, so every
+distance, angle, curl, velocity and bounding box inherits the smoothing from one place.
+Confidences, `found`, `seq` and `age_ms` pass through untouched.
+
+The cutoff rises with speed, so a resting hand is stilled and a fast one is not lagged.
+**Do not copy the published `beta` of 0.007** — that is for pixel coordinates, and these
+channels are normalised 0..1, about a thousand times smaller.
+
+## Advanced page
+
+| parameter | default | what it does |
+|---|---|---|
+| `Activateframes` | 3 | consecutive good frames before `active` turns on |
+| `Deactivateframes` | 6 | consecutive bad frames before it turns off |
+| `Velocityfilter` | 0.15 s | window a velocity is averaged over |
+| `Speedfloor` | 0.05 /s | below this, `dir` holds and `h{i}_moving` reads 0 |
+| `Oscport` | 10000 | BASE port; the streams take base + 0/1/2 |
+| `Printstatus` | pulse | is a capture process running, and its pid |
+| `Capturepid` | read-only | what was last started. Not proof it is still alive |
+| `Maskbuffer`, `Depthbuffer` | `/tmp/appletd_*.buf` | shared files; must match on both sides |
+| `Installroot` | — | where the sidecar's Python and packages go |
+| `Sidecarpython` | — | interpreter override; empty means the installed one |
+| `Pythonurl` | python-build-standalone | the interpreter the installer fetches |
+| `Sourceversion` | read-only | the build this component was made from |
+| `Forceinstall` | pulse | reinstall regardless of the stamp |
+| `Keeplayout` | off | builders leave existing nodes where you put them |
+
+Changing `Oscport` takes effect on this side immediately and on the sidecar only after a
+restart. `sc_uptime_s` freezing is the symptom of that gap.
+
+---
+
+## About page
 
 | parameter | default | what it does |
 |---|---|---|
@@ -465,7 +471,7 @@ An update restores every parameter by name and lands with `Active` off.
 
 ---
 
-## Segmentation
+## Segmentation Mask page
 
 `outmask` is a TOP, not channels.
 
@@ -474,7 +480,7 @@ An update restores every parameter by name and lands with `Active` off.
 | `Maskfit` | on | undo the anisotropic stretch, so the mask lines up with the camera frame |
 | `Masksourcew`, `Masksourceh` | 1280x720 | read-only, from the buffer header |
 
-`Segquality` is on the Vision page and is a launch flag:
+`Segquality` sits with the stream toggle and is a launch flag:
 
 | level | per frame | mask | edge |
 |---|---|---|---|
@@ -494,7 +500,7 @@ climbing. A `seg_mask` that is 16x16 has never read the buffer.
 
 ---
 
-## Depth
+## Depth page
 
 `outdepth` is a TOP. `docs/DEPTH.md` is the full guide.
 
