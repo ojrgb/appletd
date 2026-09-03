@@ -4596,3 +4596,15 @@ page carries the disclaimer as three Header lines with a button to the full lice
 
 DESIGN.md 2.27 and 2.28. Still not exercised: a real download from GitHub followed by a
 swap, which needs a published `.tox` newer than the one in the component.
+
+**Same day, the network test.** Run from a branch rather than `main`, so a failure could
+not damage what everybody else downloads - identical 302-and-ETag mechanics either way,
+and it exercises the fork case `Update From` exists for. `check()` reported 336 KB with
+an ETag matching `curl` byte for byte. After `Update`: id 44812 -> 45435, the marker DAT
+that existed only in the OLD component gone, 309 descendants rather than 619, `Beta`
+restored to a value set after the export, `Renderw` still an EXPRESSION, eight pages
+under the original name and path, and a second check saying **"Up to date"** - the one
+path a `file://` URL cannot test, because a file has no ETag.
+
+Both directions falsifiable this time: something that had to appear and something that
+had to disappear. The old code would have failed it twice.

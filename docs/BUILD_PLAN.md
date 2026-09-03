@@ -2338,7 +2338,21 @@ not contain. That was called proof the restore worked. It was proof that **nothi
 been replaced**: the parameter kept its value because the parameter was never touched.
 Every assertion in it passed more easily when the swap did nothing.
 
-VERIFIED, 2026-09-03, by a test that can fail. A marker DAT is put into the saved copy
+VERIFIED OVER THE NETWORK, 2026-09-03, from
+`github.com/ojrgb/appletd/raw/disclaimer-and-branch-rule/appletd.tox` - a branch and not
+`main`, so a failure could not damage what everybody else downloads, and the same 302
+and ETag mechanics either way. `check()` reported "Update available (336 KB)" with an
+ETag matching `curl` exactly; after `Update` the COMP's id went 44812 -> 45435, a DAT
+that existed only in the OLD component was gone, the descendant count was 309 and not
+619, `Beta` read the 3.375 set after the export, `Renderw` was still an EXPRESSION, all
+eight pages were there under the original name and path, `Updateetag` matched the
+server, and a second check said **"Up to date"** - the one path a `file://` URL can
+never exercise, because a file has no ETag.
+
+Both directions are falsifiable: something that had to appear, and something that had to
+disappear. Doing nothing fails this test twice.
+
+FIRST VERIFIED LOCALLY, 2026-09-03, by a test that can fail. A marker DAT is put into the saved copy
 and deleted from the live component, so it can only come back through a real swap.
 After it: the marker is present, the COMP's `.id` changed from 9343 to **44812** - a
 different operator - the descendant count is 310 rather than 619, `Beta` reads the
