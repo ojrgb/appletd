@@ -57,3 +57,19 @@ def test_the_depth_pins_are_all_there() -> None:
     for row in range(1, 9):
         for axis in ("x", "y", "m"):
             assert "Depthpin%d%s" % (row, axis) in depth
+
+
+def test_every_generated_header_carries_the_prefix_the_cleanup_keys_on() -> None:
+    """`tools/td_add_pages.py` destroys orphaned dividers by the `Hdr` prefix, which
+    is how a section that MOVES pages does not leave a parameter the table has never
+    heard of. If `header_name` ever stopped producing that prefix, the cleanup would
+    silently match nothing and the build would fail on the next section move."""
+    for _page, name, _label, _above in td_pages.sections():
+        assert name.startswith("Hdr"), name
+
+
+def test_a_moved_section_leaves_no_name_the_table_still_claims() -> None:
+    """The specific failure: Output moved General -> Advanced, and the old
+    `Hdrgeneraloutput` was left behind as an unknown parameter."""
+    assert td_pages.header_name("General", "Output") != td_pages.header_name(
+        "Advanced", "Output")

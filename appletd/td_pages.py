@@ -52,7 +52,6 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
         ("Capture", ("Active", "Restartcapture", "Capturestate",
                      "Camera", "Listcameras")),
         ("Coordinate spaces", ("Coordstx", "Coordspx")),
-        ("Output", ("Screenspaceonly", "Deleteempty", "Slotassign")),
         ("Smoothing", ("Smoothing", "Mincutoff", "Beta")),
         ("Install", ("Install", "Installstate")),
     ),
@@ -94,6 +93,7 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
                               "Depthfitresidual", "Depthfitchecked")),
     ),
     "Advanced": (
+        ("Output", ("Screenspaceonly", "Deleteempty", "Slotassign")),
         ("Geometry", ("Resw", "Resh", "Renderw", "Renderh", "Orthowidth")),
         ("Master switches", ("Temporal", "Latches")),
         ("Network", ("Oscport", "Maskbuffer", "Depthbuffer")),

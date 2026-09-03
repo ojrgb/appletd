@@ -38,6 +38,10 @@ TEMPLATES: tuple[tuple[str, str, dict[str, Any]], ...] = (
       "min_bytes": 50_000, "licence": "/blob/main/LICENSE"}),
     ("td_add_about.py", "CALLBACK_SOURCE",
      {"control": "/project1/appletd/about_control"}),
+    # Added 2026-09-03 with the auto-start DAT, whose body itself formats a string -
+    # so `%%r` in the middle layer is one level of escaping that has now been got
+    # wrong seven times in this repository.
+    ("td_build_vision.py", "SIDECAR_START_SOURCE", {"comp": "/project1/appletd"}),
 )
 
 

@@ -387,7 +387,6 @@ On `General`, above the smoothing controls.
 | `Streamsegment` | off | person segmentation, into `outmask` |
 | `Segquality` | fast | the mask's quality, size and cost |
 | `Streamdepth` | off | depth, into `outdepth`. **23 ms a frame** |
-| `Slotassign` | on | h0 is the right hand, h1 the left |
 | `Resw`, `Resh` | 1280x720 | SOURCE resolution. Drives `_px`/`_py` |
 | `Renderw`, `Renderh` | from `render1` | RENDER resolution. Drives `_ty` |
 | `Orthowidth` | from `cam1` | match your ortho camera's Ortho Width |
@@ -409,6 +408,10 @@ safe to press at any time.
 It updates on changes and button presses, not on a timer, so a process that dies on its
 own reads `Running` until something asks. `sc_uptime_s` freezing is what catches that.
 `Active` is a command, not a reading.
+
+**A project saved with `Active` on starts capturing when it is opened**, and so does a
+`.tox` dropped into a running project. The camera opens without anyone pressing
+anything, which is the point - but it is worth knowing before you save.
 
 ---
 
@@ -432,6 +435,9 @@ channels are normalised 0..1, about a thousand times smaller.
 
 | parameter | default | what it does |
 |---|---|---|
+| `Screenspaceonly` | on | drops every raw normalised channel that has a `_tx`/`_px` companion |
+| `Deleteempty` | on | keeps only the channels actually being computed |
+| `Slotassign` | on | h0 is the right hand, h1 the left |
 | `Activateframes` | 3 | consecutive good frames before `active` turns on |
 | `Deactivateframes` | 6 | consecutive bad frames before it turns off |
 | `Velocityfilter` | 0.15 s | window a velocity is averaged over |

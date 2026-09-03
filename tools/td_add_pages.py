@@ -71,6 +71,23 @@ def main():
             par.destroy()
             print("   retired      %s" % name)
 
+    # 3b. DIVIDERS THIS FILE GENERATED AND NO LONGER WANTS. Moving a section between
+    #     pages changes its parameter name - `Hdrgeneraloutput` becomes
+    #     `Hdradvancedoutput` - and the old one would then be a parameter the table
+    #     has never heard of, failing the check below on an edit that is entirely
+    #     normal. Measured the moment `Output` moved to Advanced.
+    #
+    #     Safe to destroy without asking, and only these: a divider is generated, has
+    #     no value, and is identified by the `Hdr` prefix this file controls. Anything
+    #     else unknown still stops the build.
+    wanted_headers = {name for _p, name, _l, _a in td_pages.sections()}
+    placed = set(td_pages.placement())
+    for par in list(comp.customPars):
+        if (par.name.startswith("Hdr") and par.style == "Header"
+                and par.name not in wanted_headers and par.name not in placed):
+            print("   dropped      %s (a section that moved)" % par.name)
+            par.destroy()
+
     # 4. Anything the table does not know about. Checked BEFORE the moves, so the
     #    message names a page somebody can go and look at.
     present = [par.name for par in comp.customPars]

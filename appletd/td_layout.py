@@ -137,6 +137,10 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "sidecar_control": (-5 * COL_W, -4 * MASTER_ROW_H),
     "sidecar_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H),
     "sidecar_exit": (-1 * COL_W, -4 * MASTER_ROW_H),
+    # Beside the teardown DAT, because it is the other half of the same job: one
+    # starts the process when a project opens, the other stops it when TouchDesigner
+    # quits.
+    "sidecar_start": (1 * COL_W, -4 * MASTER_ROW_H),
     "filter_callbacks": (-5 * COL_W, -4 * MASTER_ROW_H - ROW_H),
     "groups_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H - ROW_H),
     "lat_threshold_callbacks": (-1 * COL_W, -4 * MASTER_ROW_H - ROW_H),
