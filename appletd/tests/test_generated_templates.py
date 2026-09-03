@@ -34,7 +34,7 @@ TOOLS = pathlib.Path(__file__).resolve().parents[2] / "tools"
 TEMPLATES: tuple[tuple[str, str, dict[str, Any]], ...] = (
     ("td_add_about.py", "CONTROL_SOURCE",
      {"comp": "/project1/appletd", "magic": b"\x00\x00\x00\x0110",
-      "min_bytes": 50_000}),
+      "min_bytes": 50_000, "licence": "/blob/main/LICENSE"}),
     ("td_add_about.py", "CALLBACK_SOURCE",
      {"control": "/project1/appletd/about_control"}),
 )
@@ -78,7 +78,8 @@ def test_the_about_swap_script_renders_and_compiles() -> None:
     constants = _constants("td_add_about.py")
     dat_text = constants["CONTROL_SOURCE"] % {
         "comp": "/project1/appletd", "magic": constants["TOX_MAGIC"],
-        "min_bytes": constants["TOX_MIN_BYTES"]}
+        "min_bytes": constants["TOX_MIN_BYTES"],
+        "licence": constants["LICENCE_PATH"]}
     module: dict[str, Any] = {"op": lambda _path: None, "run": None}
     exec(compile(dat_text, "about_control", "exec"), module)
 
@@ -95,7 +96,8 @@ def test_the_swap_script_uses_only_names_the_header_defines() -> None:
     constants = _constants("td_add_about.py")
     dat_text = constants["CONTROL_SOURCE"] % {
         "comp": "/project1/appletd", "magic": constants["TOX_MAGIC"],
-        "min_bytes": constants["TOX_MIN_BYTES"]}
+        "min_bytes": constants["TOX_MIN_BYTES"],
+        "licence": constants["LICENCE_PATH"]}
     module: dict[str, Any] = {"op": lambda _path: None, "run": None}
     exec(compile(dat_text, "about_control", "exec"), module)
     body = module["_SWAP"]
@@ -104,3 +106,23 @@ def test_the_swap_script_uses_only_names_the_header_defines() -> None:
     # And nothing from the DAT's own scope, which will not exist by then.
     for leaked in ("_say(", "_url(", "_comp(", "TOX_MAGIC", "TOX_MIN_BYTES"):
         assert leaked not in body, f"the swap script reaches back for {leaked}"
+
+
+def test_the_snapshot_records_mode_and_the_restore_puts_it_back() -> None:
+    """A REGRESSION GUARD, 2026-09-03. The first updater snapshotted `par.eval()` and
+    restored with `par.val = value`, which reads a live expression as the NUMBER it
+    happens to evaluate to and writes it back as a constant. The expression TEXT
+    survives, so the damage is invisible: `Renderw` still says
+    `op('render1').width ...` and simply stops tracking. Three parameters on the live
+    component were frozen that way before anybody noticed.
+
+    Textual, because the behaviour needs TouchDesigner and this does not.
+    """
+    constants = _constants("td_add_about.py")
+    source = constants["CONTROL_SOURCE"]
+    assert "values[par.name] = par.eval()" not in source, (
+        "the snapshot is reading expressions as their evaluated value again")
+    assert '"mode": par.mode.name' in source, "the snapshot does not record par.mode"
+    swap = source.split("_SWAP = ")[1]
+    for needed in ("par.expr = ", "par.bindExpr = ", 'entry.get("mode")'):
+        assert needed in swap, f"the restore never uses {needed!r}"

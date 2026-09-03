@@ -1588,6 +1588,47 @@ the thing lives.** Moving an operator moved the answer.
 
 ---
 
+### 2.27 `eval()` is not a value, and restoring one loses the mode — 2026-09-03
+
+The About page's updater saves every custom parameter before `loadTox` and puts them
+back after. The first version did it the obvious way:
+
+```python
+values[par.name] = par.eval()      # snapshot
+par.val = value                    # restore
+```
+
+That is **wrong for any parameter that is not a constant**, and wrong invisibly.
+`Renderw` is an expression over `op('render1').width`. `eval()` returns `1280` — the
+number it happens to hold — and `par.val = 1280` writes it back as a CONSTANT. The
+expression TEXT is untouched, so the parameter still reads
+`op('render1').width if ...` when you look at it. It has simply stopped tracking.
+`ParMode` is where the truth is:
+
+```
+Renderw   mode=ParMode.CONSTANT  expr="op('render1').width ..."  val=1280  eval=1280
+```
+
+Nothing errors, nothing is empty, and the numbers are the right numbers until somebody
+resizes the render. It survived a swap test that checked exactly one thing — that a
+value came back — because a frozen expression comes back too.
+
+**A snapshot stores mode, expression text and constant; a restore replays the mode.**
+Assigning `.expr` switches the parameter into expression mode by itself (2.25 has the
+same note for the builders). An EXPORT is skipped: it comes from a wire, and `loadTox`
+rebuilds those.
+
+**And the new version's expression wins.** If the component being installed drives a
+parameter from `render1` or `cam1`, a constant carried over from the old one is a
+number that was true once — the same rule `td_build_vision.py` already applies when it
+rebuilds over a tuned component, and it should not be two rules.
+
+THE GENERAL SHAPE, which is the reason this is here and not only in the journal: any
+code that copies parameters — a preset, a snapshot, a "reset to defaults", a diff —
+has to decide whether it is copying VALUES or copying PARAMETERS, and `eval()` quietly
+answers "values" while looking like it answered "parameters".
+
+
 ## 3. Traps — all of these cost real time in the spike
 
 **GIL starvation from a polling main thread.** A tight
