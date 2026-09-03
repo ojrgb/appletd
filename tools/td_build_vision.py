@@ -1412,9 +1412,16 @@ def main():
     # The output shaping: what LEAVES the COMP, as opposed to what it computes.
     par_screen = page.appendToggle(
         "Screenspaceonly", label="Screen Space Only (drop raw normalised)")[0]
-    # OFF. The raw normalised channels are what every existing project reads, and a
-    # toggle that ships ON would delete them out from under one.
-    par_screen.default = False
+    # ON since 2026-09-03, by the user. It shipped OFF because the raw normalised
+    # channels are what every existing project reads and a toggle that ships ON
+    # deletes them out from under one - true, and the reason it stayed off while there
+    # were projects to break. The component now ships for people who have not built
+    # against it yet, and for them the raw pair is duplicate volume: `_tx`/`_ty` in
+    # the space they will actually use, or two of everything.
+    #
+    # Paired with `Coordspx` shipping OFF - see the note in td_add_groups.py GROUPS.
+    # Dropping a channel fails loudly at its consumer; freezing one does not.
+    par_screen.default = True
 
     # Drop the channels of every group that is not computing. The whole point of
     # the single output: a component handed to a beginner opens with a channel list
@@ -1438,13 +1445,15 @@ def main():
     # what they mean; this only creates them, because every control on this page is
     # created here so the page order is decided in one place.
     #
-    # BOTH DEFAULTS PRESERVE TODAY'S OUTPUT - `Fingertipsonly` off, `Handbox` on. A
-    # new toggle that changes what an existing project receives is a silent breakage,
-    # and the beginner-facing short list is one flipped default away when it is
-    # wanted deliberately.
+    # `Fingertipsonly` ON and `Handbox` on, since 2026-09-03. Both defaults used to
+    # PRESERVE TODAY'S OUTPUT on the argument that a new toggle changing what an
+    # existing project receives is a silent breakage. That argument protected projects
+    # built against the old shape; the flip is the deliberate one it described, taken
+    # by the user once the short list became the shape worth shipping - fifteen joints
+    # per hand instead of twenty-one, and the rest one toggle away.
     par_tips = page.appendToggle(
         "Fingertipsonly", label="Finger Tips Only")[0]
-    par_tips.default = False
+    par_tips.default = True
 
     # Whether the builders may move nodes. `appletd.td_layout.placement` has the
     # rule and what it cannot protect - the short version is that it holds the group

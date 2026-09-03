@@ -4629,3 +4629,34 @@ Worth naming the pattern, because it is the third instance in two days: **a swap
 everything the exported file happened to be doing at the moment it was saved.** Parameter
 modes, `Active`, the status light. Anything readOnly is skipped by the snapshot and comes
 from the file, and anything the file was saved mid-something with arrives mid-something.
+
+**The shipping defaults are now the tuned ones — 2026-09-03, by the user.** What the
+component opens as was, until today, an accident of history: every toggle defaulted to
+whatever preserved the output at the moment it was added. That was the right rule while
+projects existed to break, and it left the published component opening with 1,861
+channels and every derive group on.
+
+Now: `Verbosity` Minimal, `Coordstx` and `Twohands` on, every other derive group off,
+`Screenspaceonly` and `Fingertipsonly` on, `Facekeypoints` and `Onefaceonly` on.
+Thirty-six channels out of the box instead of a wall.
+
+Two things this turned up, both of the same family as the swap defects — state that
+lives in one place and is read from another.
+
+**A preset must not contradict the defaults, and it briefly did.** `Verbosity` now
+DEFAULTS to "Minimal", so `PRESETS["Minimal"]` and the `GROUPS` defaults have to
+describe the same component. They did not: the defaults said `Twohands` on and the
+preset said off, so pressing the button the panel already claimed to be set to would
+have switched it off. `Twohands` joined the tuple. The file already carried a warning
+about this under "Interaction"; it arrived by the other door.
+
+**A default changed in a builder does not reach a parameter that already exists.**
+`Facekeypoints` and `Onefaceonly` write their default only at creation, so flipping the
+table moved nothing - the rebuild reported the new default and the panel still held the
+old one. Caught by checking `.default` as well as `.val` after a rebuild, which is the
+only reason it was not shipped. Both now reconcile on every build, guarded, default
+only and never the value.
+
+`Depthpinsdraw` was left alone deliberately and is the user's call: it is on in the dev
+project, but switching it on changes the depth output from `mono32float` to
+`rgba32float` for everybody, which is a format change and not a preference.

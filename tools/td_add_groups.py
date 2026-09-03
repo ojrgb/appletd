@@ -82,14 +82,18 @@ COMP_PATH = MASTER_PATH + "/hands"
 GROUPS = (
     # name          default  gated
     ("Coordstx",    True,  "native"),
-    # ON, and the default CHANGED on 2026-08-21 when this toggle stopped being
-    # advisory. It used to ship off and gate nothing, so the `_px`/`_py` channels
-    # were always live. Now off means FROZEN - the channels are still there, holding
-    # whatever they last cooked, which is a plausible wrong number rather than a
-    # visible failure. A toggle that can do that has to default to NOT doing it, and
-    # turning it off has to be a deliberate saving. Same reasoning as
-    # `Screenspaceonly`, which ships off because on deletes channels.
-    ("Coordspx",    True,  "native"),
+    # OFF, changed 2026-09-03 by the user, who is the ultimate approver of what this
+    # component ships as. It shipped ON from 2026-08-21 on the argument that off means
+    # FROZEN - the `_px`/`_py` channels still there, holding whatever they last cooked,
+    # a plausible wrong number rather than a visible failure - so a toggle that can do
+    # that should not do it by default.
+    #
+    # What changed is not the hazard but who meets it. `Screenspaceonly` now ships ON
+    # too, so the raw normalised channels are DROPPED rather than frozen, and a
+    # dropped channel fails loudly at its consumer instead of quietly reading stale.
+    # The two defaults are a pair and moving one without the other brings the old
+    # problem straight back.
+    ("Coordspx",    False, "native"),
     # `Lmcoordstx` and `Lmcoordspx` WERE here, one per space, gating the face's
     # landmark halves separately from its bounding box. COLLAPSED into the two above
     # on 2026-08-24 by request: needing both `Coordstx` and `Lmcoordstx` on before a
@@ -98,16 +102,16 @@ GROUPS = (
     # that wants a face without 348 channels reaches for instead. They are in
     # RETIRED_PARS, because removing the code that creates a parameter does not remove
     # the parameter.
-    ("Core",        True,  "derive"),
-    ("Presence",    True,  "derive"),
-    ("Contacts",    True,  "derive"),
+    ("Core",        False, "derive"),
+    ("Presence",    False, "derive"),
+    ("Contacts",    False, "derive"),
     # The two MASTER switches for the hands attribute layer, added 2026-08-21
     # because the existing toggles could not express "off". See COOK_VETOED.
-    ("Temporal",    True,  "native"),
-    ("Latches",     True,  "native"),
-    ("Pose",        True,  "derive"),
+    ("Temporal",    False, "native"),
+    ("Latches",     False, "native"),
+    ("Pose",        False, "derive"),
     ("Twohands",    True,  "derive"),
-    ("Gestures",    True,  "derive"),
+    ("Gestures",    False, "derive"),
     ("Descriptor",  False, "derive"),
     # 3D inferred from a 2D projection, added 2026-08-21. Both OFF: the numbers are
     # honest but uncalibrated, and `Palmarea`/`Zreference` on the Tuning page are what
@@ -847,15 +851,22 @@ PRESETS = {
     # `Landmarks` was here until 2026-08-23. It gated nothing anywhere - not one
     # entry in COOK_GATED, COOK_VETOED or COOK_REQUIRES - so the raw landmark
     # channels were always on and "Minimal" is what it always actually was.
-    "Minimal": ("Coordstx",),
+    # `Twohands` joined this on 2026-09-03, and not for taste: `Verbosity` now DEFAULTS
+    # to "Minimal", so this tuple and the `GROUPS` defaults have to describe the same
+    # component. They did not for about ten minutes - the defaults said `Twohands` on,
+    # this said off, and pressing the button the panel already claimed to be set to
+    # would have switched it off. That is exactly the contradiction the note under
+    # "Interaction" warns about, arriving by the other door.
+    "Minimal": ("Coordstx", "Twohands"),
     # Excluded from Interaction for the same reason each ships OFF: `Coordspx` is
     # channel volume nobody asked for, `Descriptor` is 84 channels,
     # and `Depth`/`Tilt` are UNCALIBRATED - `Palmarea` and `Zreference` are still set
     # against synthetic geometry (BUILD_PLAN step 13).
     #
-    # A preset must not contradict the defaults. `Verbosity` itself defaults to
-    # "Interaction", so a preset that included these would turn them on the moment
-    # anyone pressed the button their panel already claimed to be set to.
+    # A preset must not contradict the defaults - and since 2026-09-03 the default is
+    # "Minimal", so it is that tuple which has to match `GROUPS`, not this one. This
+    # still excludes them for its own reasons: `Coordspx` is channel volume nobody
+    # asked for, `Descriptor` is 84 channels, `Depth` and `Tilt` are UNCALIBRATED.
     "Interaction": tuple(n for n, _d, _g in GROUPS
                          if n not in ("Coordspx", "Descriptor", "Depth", "Tilt")),
     "Everything": tuple(n for n, _d, _g in GROUPS),
@@ -1379,8 +1390,11 @@ def _page(comp, name="Attributes"):
     # NOTE what is deliberately absent: an `else` that writes anything. Everything on
     # this page that already exists is left alone unless it demonstrably differs.
 
-    # The face's abbreviated form. OFF by default, which keeps the output identical
-    # to the one this component produced before the key points existed.
+    # The face's abbreviated form. ON since 2026-09-03: four points per face is what
+    # a project actually reaches for, and 348 landmark channels is not a default so
+    # much as a decision nobody made. It used to ship OFF to keep the output identical
+    # to the one this component produced before the key points existed, which was the
+    # right call while anything depended on that and is now just inertia.
     #
     # NOT in GROUPS, and that is the whole reason it is appended here by hand. Every
     # entry in GROUPS is a capability, so `Verbosity = Everything` turns them all on;
@@ -1391,15 +1405,28 @@ def _page(comp, name="Attributes"):
     # expecting a saving.
     if ONEFACE_TOGGLE not in existing:
         one = page.appendToggle(ONEFACE_TOGGLE, label="One Face Only")[0]
-        one.default = False
-        one.val = False
+        one.default = True
+        one.val = True
+    elif existing[ONEFACE_TOGGLE].default is not True:
+        # A DEFAULT CHANGED IN THIS FILE HAS TO REACH A COMPONENT THAT ALREADY HAS THE
+        # PARAMETER. These two were written only at creation, so flipping the table
+        # above on 2026-09-03 moved nothing: the rebuild reported the new default and
+        # the panel still held the old one, which is the builder and the component
+        # disagreeing with no way to see it. The GROUPS loop below has always done
+        # this; these two were simply missed.
+        #
+        # Guarded, and only the DEFAULT - never the value. Writing to a parameter
+        # somebody has tuned is how DESIGN.md 2.17 starts.
+        existing[ONEFACE_TOGGLE].default = True
 
     keypoint_label = _costed(KEYPOINTS_TOGGLE, "Face Key Points")
     if KEYPOINTS_TOGGLE not in existing:
         points = page.appendToggle(KEYPOINTS_TOGGLE, label=keypoint_label)[0]
-        points.default = False
-        points.val = False
-    elif existing[KEYPOINTS_TOGGLE].label != keypoint_label:
+        points.default = True
+        points.val = True
+    if KEYPOINTS_TOGGLE in existing and existing[KEYPOINTS_TOGGLE].default is not True:
+        existing[KEYPOINTS_TOGGLE].default = True   # see ONEFACE_TOGGLE above
+    if KEYPOINTS_TOGGLE in existing and existing[KEYPOINTS_TOGGLE].label != keypoint_label:
         # The label carries a GENERATED NUMBER, so it is one of the two places this
         # file overwrites a label on an existing parameter - see the GROUPS loop
         # below for why that is deliberate and why it is not done anywhere else.
@@ -1408,7 +1435,7 @@ def _page(comp, name="Attributes"):
     menu = existing.get("Verbosity")
     if menu is None:
         menu = page.appendMenu("Verbosity", label="Level of Detail")[0]
-        menu.val = "Interaction"
+        menu.val = "Minimal"
     # ONLY WHEN THEY DIFFER, and this cost a rebuild to learn - 2026-08-24, the same
     # failure DESIGN.md 2.17 records for `appendMenu` and by the same mechanism.
     # Assigning `menuNames` to an EXISTING menu resets it to index 0 - "Minimal" -
@@ -1432,8 +1459,8 @@ def _page(comp, name="Attributes"):
     # after the snapshot below has already put everything back. A guard cannot undo
     # a reset that has not happened yet, which is why this file's rule is now: touch
     # nothing that does not need touching.
-    if menu.default != "Interaction":
-        menu.default = "Interaction"
+    if menu.default != "Minimal":
+        menu.default = "Minimal"
 
     cost_gating = {name for names in COOK_GATED.values() for name in names}
     for group, default, gated in GROUPS:
