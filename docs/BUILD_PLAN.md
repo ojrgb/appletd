@@ -2359,6 +2359,29 @@ different operator - the descendant count is 310 rather than 619, `Beta` reads t
 2.625 set after the copy was taken, `Renderw` is still an EXPRESSION, and all eight
 pages are there under the original name and path.
 
+### 26.7 An update lands quiet — 2026-09-03
+
+`Active` is forced off on the new component and skipped by the restore, so an update
+never starts a capture on its own.
+
+That is not tidiness. **The sidecar is a separate OS process and destroying its
+component does not stop it.** `sidecar_exit` fires when TouchDesigner exits, not when a
+COMP is destroyed, and the launcher finds the process by scanning command lines - so a
+swap with `Active` on would strand a sidecar holding the CAMERA with nothing left in
+the network that knows its pid.
+
+So the swap stops it first, while the component that owns it is still alive, and
+`stop()` SIGTERMs and waits rather than killing, which is what releases the device
+properly instead of leaving the OS to reclaim it (DESIGN.md 8). A camera is also a
+shared device somebody else may have taken during the update. Turning it back on is one
+click, and it is the user's click.
+
+VERIFIED 2026-09-03 without a camera, which covers everything but terminating a live
+process: id 45435 -> 45746, the live-only marker DAT gone, 309 descendants, `Active`
+False, no sidecar spawned, `Beta` restored, and **101** settings restored rather than
+102 - the one skipped being `Active` itself. Terminating a RUNNING sidecar across a swap
+is still unexercised.
+
 ### 26.4 The marker is an ETag, not a version
 
 A version we publish is a second source of truth that drifts. An ETag is the server's

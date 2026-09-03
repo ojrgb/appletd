@@ -12,6 +12,9 @@ Maintained with ❤️ by **Omer Jacoby** —
 [instagram](https://www.instagram.com/ojrgb/) ·
 [linkedin](https://www.linkedin.com/in/omer-jacoby-12a12886/)
 
+Please read the [disclaimer](#disclaimer) before using this component — using it means
+you accept it.
+
 [![a hand driving instanced geometry, with the CHOP viewer alongside](docs/media/demo-hands.gif)](https://github.com/ojrgb/appletd/blob/main/docs/media/demo-hands.mp4)
 
 *Click for the full clip in real colour.*

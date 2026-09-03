@@ -153,3 +153,25 @@ def test_the_swap_loads_into_the_parent_and_not_into_itself() -> None:
     # And the order: the replacement has to exist before the original is destroyed.
     assert code.index("parent_comp.loadTox") < code.index("comp.destroy()"), (
         "the old component is destroyed before the new one has loaded")
+
+
+def test_the_swap_stops_the_sidecar_and_lands_with_active_off() -> None:
+    """A swap destroys the component that owns the sidecar, but not the sidecar - it is
+    a separate OS process, `sidecar_exit` fires on TouchDesigner's exit rather than on a
+    COMP being destroyed, and the launcher finds it by scanning command lines. So an
+    update with `Active` on would strand a process holding the CAMERA with nothing left
+    that knows its pid.
+
+    Two halves, and the test needs both: stop the old one while the component that owns
+    it is still alive, and do not let the parameter restore switch the new one on.
+    """
+    constants = _constants("td_add_about.py")
+    swap = constants["CONTROL_SOURCE"].split("_SWAP = ")[1]
+    code = "\n".join(line for line in swap.splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert "control.module.stop()" in code, "the old sidecar is never stopped"
+    assert code.index("control.module.stop()") < code.index("parent_comp.loadTox"), (
+        "the sidecar must be stopped while the component that owns it still exists")
+    assert 'fresh.par.Active = False' in code, "the new component is not forced quiet"
+    assert 'if name == "Active"' in code, (
+        "the restore can still switch Active back on from the snapshot")

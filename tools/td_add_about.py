@@ -298,6 +298,20 @@ comp = op(COMP_PATH)
 parent_comp = comp.parent()
 old_name, old_x, old_y = comp.name, comp.nodeX, comp.nodeY
 
+# THE SIDECAR IS A SEPARATE OS PROCESS, and destroying this component does not stop it.
+# `sidecar_exit` fires when TouchDesigner exits, not when a COMP is destroyed, and the
+# launcher finds the process by scanning for its command line - so a swap with `Active`
+# on would leave a sidecar holding the CAMERA with nothing left in the network that
+# knows its pid. `stop()` SIGTERMs it and waits, which is what releases the device
+# properly rather than letting the OS reclaim it (DESIGN.md 8).
+control = comp.op("sidecar_control")
+if control is not None:
+    try:
+        print("[appletd] stopping %%d sidecar(s) before the swap"
+              %% control.module.stop())
+    except Exception as problem:
+        print("[appletd] could not stop the sidecar: %%r" %% (problem,))
+
 # The wiring, as (index, path, index) triples - paths and not operators, because the
 # operators on the far end outlive this and the connectors do not.
 wired_in, wired_out = [], []
@@ -324,6 +338,15 @@ if fresh is None or fresh.op("out1") is None:
     if hasattr(comp.par, "Updatestate"):
         comp.par.Updatestate = "Refused - the download did not load as a component"
 else:
+    # AN UPDATE LANDS QUIET. `Active` is forced off on the new component before
+    # anything else touches it, and is skipped by the restore below, so a swap never
+    # starts a capture on its own. Two reasons: the sidecar that was running belonged
+    # to the component that is about to be destroyed, and a camera is a shared device
+    # somebody else may have taken in the meantime. Turning it back on is one click and
+    # it is the user's click.
+    if hasattr(fresh.par, "Active"):
+        fresh.par.Active = False
+
     # 3. Settings onto the NEW component, before anything is destroyed.
     restored, dropped = 0, []
     try:
@@ -333,6 +356,8 @@ else:
         print("[appletd] could not read the saved settings: %%r" %% (problem,))
         saved = {}
     for name, value in saved.items():
+        if name == "Active":
+            continue                   # never restored - an update lands quiet, above
         par = getattr(fresh.par, name, None)
         if par is None or par.readOnly:
             dropped.append(name)
@@ -382,7 +407,8 @@ else:
         print("[appletd]   no parameter in this version for: %%s" %% ", ".join(dropped))
         print("[appletd]   the old values are in " + SNAPSHOT)
     if hasattr(fresh.par, "Updatestate"):
-        fresh.par.Updatestate = "Updated - %%d setting(s) restored" %% restored
+        fresh.par.Updatestate = ("Updated - %%d setting(s) restored, Active is off"
+                                 %% restored)
 
 try:
     os.remove(TOX)
