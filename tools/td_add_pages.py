@@ -20,7 +20,7 @@ A PARAMETER THE TABLE DOES NOT MENTION STOPS THE BUILD. Not a warning: a control
 lands wherever its builder happened to run is what this file exists to prevent, and a
 warning in a 13-builder chain is a line nobody reads.
 
-Ref: appletd/td_pages.py, docs/BUILD_PLAN.md step 27.
+Ref: appletd/td_pages.py, docs/BUILD_PLAN.md step 27, DESIGN.md 2.17.
 """
 
 import os

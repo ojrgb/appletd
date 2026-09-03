@@ -2423,3 +2423,62 @@ ASSIGNMENTS above it rather than substituted into it, which removes a layer enti
 And `appletd/tests/test_generated_templates.py` now renders every builder template with
 plausible substitutions and compiles the result - catching the escaping, a stray `\n`
 that closes a string early, and any syntax error in code no other test can reach.
+
+---
+
+## Step 27 — a page per stream, and one table that owns the layout — DONE 2026-09-03
+
+The panel grew a page at a time, each builder appending to whichever page suited it, and
+it showed: `Filter` held three parameters, `Tuning` held thresholds for a stream you may
+not have enabled, and five streams' toggles sat in one list on `Vision`.
+
+### 27.1 The shape
+
+`Vision` becomes **General** - capture, the coordinate spaces, output shaping, smoothing
+and install. Then a page per stream - **Hands**, **Body Pose**, **Face**, **Segmentation
+Mask**, **Depth** - each holding its own on/off toggle, its attribute toggles and its
+tuning. **Advanced** takes the geometry (`Resw`, `Resh`, `Renderw`, `Renderh`,
+`Orthowidth`), the `Temporal` and `Latches` master switches, and the internals.
+
+Sections inside a page are a Header parameter with `startSection` on.
+
+**The coordinate toggles stay global, on General.** Per-stream ones were specified and
+then dropped: `coords` is one COMP split by KIND (`world`, `pixels`, `lm_*`) rather than
+by stream, so per-stream toggles could only trim the output while the compute ran anyway.
+Splitting `coords` per stream would have recovered ~1.4 ms - the merged form measures
+4.8862 ms against 3.4519 - and cost ~45 operators. Not taken: two toggles that genuinely
+freeze the work beat six that look the same and do less.
+
+### 27.2 One table, applied last
+
+`appletd/td_pages.py` says where every parameter goes. `tools/td_add_pages.py` runs after
+every other builder and moves them there, adds the dividers, sorts, and destroys the pages
+nothing is left on.
+
+MEASURED FIRST, on a throwaway COMP, because it decided the whole approach:
+
+    par.page = page      moves the parameter and KEEPS ITS VALUE
+    page.name = "..."    renames in place, parameters intact
+
+So there is no snapshot and no restore. 59 parameters moved with their values. This is
+NOT the destroy-and-re-append that `MOVED_PARS` still needs for a parameter changing
+STYLE - that one really does lose the value.
+
+**A parameter the table does not mention stops the build**, naming the page it is on. A
+warning in a 14-builder chain is a line nobody reads.
+
+### 27.3 Two sources of truth, found the hard way
+
+`tools/td_add_install.py` sorted the Vision page by name, and raised the moment the page
+was renamed - it was ordering parameters that had moved. `tools/td_build_vision.py` had
+its own `VISION_PAGE_ORDER` doing the same job.
+
+Both are gone. Builders append to the page a control belongs on; the layout pass owns
+ORDER for every page, from the one table.
+
+### 27.4 What was removed
+
+`Level of Detail` and its presets. Its entire job was writing the toggles it sat above,
+and it had already caused one silent failure by resetting them from a deferred callback
+(2.17). The preset half of the generated callback went with it, along with six comments
+that referred to it.
