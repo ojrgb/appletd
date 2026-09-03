@@ -532,6 +532,18 @@ def main():
         # and so what is about to be downloaded is visible before it is.
         url = page.appendStr("Updateurl", label="Update From")[0]
         url.val = TOX_URL
+    else:
+        # AND RESET ON EVERY BUILD, which is the one parameter here that gets that
+        # treatment. Testing the updater means pointing this at a `file://` copy or a
+        # branch, and an export taken afterwards SHIPS that - a component whose Update
+        # button fetches a scratchpad path that exists on one machine. It nearly did:
+        # the 2026-09-03 export carried `file:///private/tmp/.../livecam2.tox` and was
+        # caught by reading the file back rather than by anything automatic.
+        #
+        # A rebuild is a developer action, so taking the default back costs a fork
+        # nothing it cannot redo in one edit - the same trade `td_build_vision.py`
+        # makes when it reclaims an expression somebody typed over.
+        comp.par.Updateurl = TOX_URL
     if "Checkupdate" not in have:
         page.appendPulse("Checkupdate", label="Check for Updates")
     if "Updatestate" not in have:
