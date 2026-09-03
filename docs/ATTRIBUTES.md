@@ -27,8 +27,7 @@ two thresholds, `on < off`.
     start pulse = rising edge      end pulse = falling edge
 
 The dead band is both the debounce and the re-arm rule: a start cannot fire again until
-the points separate past `off`. No timer, nothing tuned against frame rate. Motion
-events (swipe, wave) use a `Refractory` timer instead, having no released state.
+the points separate past `off`. No timer, nothing tuned against frame rate.
 
 Three gate terms, all required:
 
@@ -141,7 +140,7 @@ count rather than passing silently.
 | `h{i}_point_x`, `h{i}_point_y` | unit vector index_mcp→index_tip |
 | `h{i}_point_angle` | its angle |
 
-### Motion — 20 channels
+### Motion — 16 channels
 
 Temporal; depends on regular frame delivery.
 
@@ -153,8 +152,6 @@ Temporal; depends on regular frame delivery.
 | `h{i}_dir_x`, `h{i}_dir_y` | the same heading as a unit vector, held with it |
 | `h{i}_moving` | 1 when speed > `Speedfloor` |
 | `h{i}_accel` | d/dt of speed |
-| `h{i}_steadiness` | 1 − normalised variance of palm position over `Steadywindow`. **NOT BUILT** |
-| `h{i}_dwell` | seconds the palm has stayed within `Dwellradius`. **NOT BUILT** |
 
 All three heading channels hold together. Holding only the angle left the unit vector
 following live velocity, so a stationary hand reported `dir` = 180 while `dir_x` read +1.
@@ -162,7 +159,7 @@ following live velocity, so a stationary hand reported `dir` = 180 while `dir_x`
 `dir` uses `atan2`, which no CHOP provides, so it is computed in `appletd/motion.py`.
 The holding is native.
 
-### Two hands — 14 channels
+### Two hands — 12 channels
 
 Symmetric attributes only; see §9.
 
@@ -170,10 +167,8 @@ Symmetric attributes only; see §9.
 |---|---|
 | `hands_distance` | distance(h0_palm, h1_palm) / mean size |
 | `hands_together` | state on `hands_distance`, `Togetheron` / `Togetheroff` |
-| `hands_scale` | `hands_distance` relative to its value when both hands became active; starts at 1.0. **NOT BUILT** — needs a Hold latched by `Scalereset` |
 | `hands_center_x`, `hands_center_y` | midpoint of the two palms |
 | `hands_angle` | angle of h0_palm→h1_palm |
-| `hands_twist` | d/dt of `hands_angle`, unwrapped. **NOT BUILT** — the derivative of an angle wraps at ±180 and spikes if differentiated naively; publish sin/cos of `hands_angle` and use `cos*d(sin) − sin*d(cos)` |
 | `hands_approach` | d/dt of `hands_distance`. Negative closing |
 | `index_distance`, `index_center_x`, `index_center_y` | as above, for the index tips |
 | `both_pinching` | `h0_pinching AND h1_pinching` |
@@ -182,7 +177,7 @@ Symmetric attributes only; see §9.
 
 ### Gestures — 18 channels
 
-Held states, each debounced by `Gestureframes`.
+Held states, from combinations of the curls.
 
 | channel | condition |
 |---|---|
@@ -211,22 +206,6 @@ Logic.
 
 Snap and clap need no audio. Audio is the better sensor only for *attack timing* inside
 10 ms; for event triggering the vision path is sufficient.
-
-#### Specified, not built
-
-`tools/td_add_temporal.py` prints these as NOT YET BUILT on every run. They are a
-specification, not a contract — nothing publishes them today.
-
-| channel | intended definition | what it needs |
-|---|---|---|
-| `h{i}_e_pinch_click` | a start and end inside `Clickms` | a timed latch |
-| `h{i}_e_pinch_double` | two clicks inside `Doublems` | the above, plus a second timer |
-| `h{i}_e_swipe_left/_right/_up/_down` | speed above `Swipespeed`, direction inside `Swipesector`, then deceleration | thresholds plus a refractory Count |
-| `h{i}_e_wave` | `Wavecrossings` sign changes of `vel_x` within `Wavewindow`, hand open | as above |
-| `e_cross` | sign change of (h0_palm_x − h1_palm_x) | as above |
-| `e_pull_apart`, `e_squeeze` | `hands_approach` beyond ±`Approachrate`, sustained two frames | as above |
-| `e_twist_cw`, `e_twist_ccw` | `hands_twist` beyond ±`Twistrate` | `hands_twist` first |
-| `e_frame` | both hands in L shapes with adjacent bounding boxes | — |
 
 ### Depth — 12 channels
 
@@ -296,8 +275,8 @@ no screen-space companion.
 | `Depth` | 12 |
 | `Tilt` | 4 |
 
-Always on, with no toggle: the 137 raw landmark channels, the 40 finger triggers, the 20
-motion channels and the 34 event pulses. Removing a group's channels needs an exact
+Always on, with no toggle: the 137 raw landmark channels, the 40 finger triggers, the 16
+motion channels and the event pulses. Removing a group's channels needs an exact
 channel-to-group map, which a wildcard cannot provide for these. Use `Finger Tips Only`
 to cut the landmark channels, and `Temporal`/`Latches` to freeze the subsystems.
 
@@ -493,29 +472,6 @@ arithmetic and says nothing about how a hand sits.
 | `Sourceversion` | str | read-only | the build this component was made from |
 | `Forceinstall` | pulse | — | reinstall regardless of the stamp |
 | `Keeplayout` | toggle | off | builders leave existing nodes where you put them |
-
-### Specified, not built
-
-These appear in no builder and on no page. They tune the events in §3 that are likewise
-unbuilt, and are listed so the specification stays complete.
-
-| parameter | intended default | for |
-|---|---|---|
-| `Sizejoint` | middle_mcp | what defines `h{i}_size` |
-| `Gestureframes` | 3 | frames a held gesture must persist |
-| `Steadywindow`, `Steadytolerance` | 0.50 s, 0.02 | `steadiness` |
-| `Dwellradius` | 0.05 | `dwell` |
-| `Refractory` | 0.25 s | re-arm time for motion events |
-| `Clickms`, `Doublems` | 300, 400 ms | click and double-click |
-| `Swipespeed`, `Swipesector` | 1.50 /s, 45° | swipe |
-| `Wavewindow`, `Wavecrossings` | 1.00 s, 3 | wave |
-| `Approachrate` | 1.20 /s | `e_pull_apart` / `e_squeeze` |
-| `Twistrate` | 90 deg/s | the twist events |
-| `Scalereset` | pulse | sets `hands_scale` to 1.0 |
-
-`Oscport` splits in two directions: the OSC In CHOPs bind it by expression and listen
-immediately, while the running process keeps sending to the old port until restarted. The
-symptom of that gap is `sc_uptime_s` freezing — the same signal as a dead process.
 
 ### Page: Vision
 
@@ -791,8 +747,8 @@ the filter barely opened. Sustained motion in one direction drives the adaptatio
 
 **Per-hand identity depends on `Slotassign`.** With it on, `h0` is the right hand and
 `h1` the left every frame. With it off, `h0` can swap physical hands between frames and
-anything with memory measures a hand that changed identity: velocity, `held`, `dwell`,
-every latch and counter. MEASURED (`DESIGN.md` 6.3): with assignment off and two hands
+anything with memory measures a hand that changed identity: velocity, `held`, every
+latch and counter. MEASURED (`DESIGN.md` 6.3): with assignment off and two hands
 crossing, `h0_size` reads the MEAN of both hands' sizes.
 
 Consequence of it being on: a single LEFT hand puts nothing in `h0`. Symmetric two-hand
@@ -833,8 +789,6 @@ pickle's identity check (`DESIGN.md` 2.11).
 | smoothing | Filter, `type = oneeuro` |
 | Schmitt latches and edge pulses | Feedback + Logic |
 | debounce | Count or Trail + Logic |
-| refractory windows, dwell | Timer, Count |
-| steadiness | Trail + Analyze |
 | group gating | `allowCooking` per group COMP, plus a Select on the output |
 
 The Script CHOP runs main-thread Python, which was never the problem — the 28× starvation
