@@ -2288,3 +2288,75 @@ toggle.
 **One contract change to announce**: output channel ORDER. Composed channels land in one
 block after the raw ones instead of interleaved per stream. Name-based `Select`s survive;
 anything reading by index does not.
+
+
+---
+
+## Step 26 — an About page, and a button that replaces the component — DONE 2026-09-03
+
+The last of the three items agreed on 2026-08-24. A page at the end holding what this
+is, where it came from, and the two pulses that fetch a newer `.tox` and swap this
+component for it in place.
+
+### 26.1 Why it is not beside Install
+
+They do different things and confusing them is expensive. **`Install` writes the
+SIDECAR's files** - a Python, pyobjc, the package, the depth model - and never touches
+the component. **`Update` replaces the COMPONENT** and never touches the install.
+Somebody who presses the wrong one after a failure learns nothing, so they are on
+different pages with labels that say which is which.
+
+### 26.2 The COMP replaces itself, and that is the whole design
+
+`loadTox` destroys every child of its target. `about_control` - the DAT holding the
+code - is one of those children, so it cannot be the thing that calls it. Both the
+download and the swap are handed to `run()`, which executes in TouchDesigner's own
+module context: the string is compiled before the DAT dies and never refers back to it.
+
+The swap script is written to a temp file rather than passed as a string, because a
+string long enough to do this safely is unreadable as one.
+
+### 26.3 What survives
+
+Every custom parameter value, to a JSON file, restored **by name** after the swap. A
+file and not operator storage, because storage belongs to the COMP that `loadTox` is
+about to rewrite. A parameter that moved page keeps its value; one the new version has
+retired is dropped and named in the textport, with the old values left on disk.
+
+VERIFIED END TO END, 2026-09-03, by pointing `Updateurl` at a `file://` copy of the
+component itself and setting `Orthowidth = 3.75` **after** taking that copy. After the
+swap: the COMP survived, all eight pages returned, **`Orthowidth` read 3.75** - a value
+the downloaded file did not contain - and 102 settings were restored.
+
+### 26.4 The marker is an ETag, not a version
+
+A version we publish is a second source of truth that drifts. An ETag is the server's
+own answer to "is this the same bytes", costs a HEAD request, and is right even for a
+change that does not move `Sourceversion` - a network edit, a re-export.
+
+`-L` on that HEAD matters: `github.com/.../raw/...` answers 302 to
+raw.githubusercontent.com, and without it the size read `0.0 MB` and the ETag was the
+redirect's rather than the file's.
+
+A component downloaded by hand has no stored ETag, so the first check always reports an
+update. That is honest - we do not know which build is in front of us.
+
+### 26.5 What arrives is checked before it is trusted
+
+`curl -f` still writes a file when a captive portal or a proxy answers with HTML, and
+`loadTox` on 900 bytes of HTML replaces a working component with nothing. So the
+download is checked for the six magic bytes a `.tox` starts with and a plausible size
+before anything is swapped.
+
+### 26.6 The escaping trap, for the fifth time
+
+`_SWAP` is a template inside a template inside a template: this builder generates a
+DAT, and the DAT generates the swap script. Every `%` in the middle layer then needs
+escaping twice, and getting it wrong fails when somebody presses Update rather than at
+build.
+
+Two things came out of it. The four values the swap script needs are written as
+ASSIGNMENTS above it rather than substituted into it, which removes a layer entirely.
+And `appletd/tests/test_generated_templates.py` now renders every builder template with
+plausible substitutions and compiles the result - catching the escaping, a stray `\n`
+that closes a string early, and any syntax error in code no other test can reach.

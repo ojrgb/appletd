@@ -155,6 +155,9 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     # nothing cooks it - the Install button reads it on demand.
     "src": (-7 * COL_W, MASTER_ROW_H),
     # The install panel's three DATs, in their own row below the sidecar's.
+    # The About page's two DATs, in the row below the install panel's.
+    "about_control": (-5 * COL_W, -4 * MASTER_ROW_H - 6 * ROW_H),
+    "about_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H - 6 * ROW_H),
     "install_control": (-5 * COL_W, -4 * MASTER_ROW_H - 5 * ROW_H),
     "install_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H - 5 * ROW_H),
     "install_start": (-1 * COL_W, -4 * MASTER_ROW_H - 5 * ROW_H),

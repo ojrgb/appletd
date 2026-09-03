@@ -60,6 +60,9 @@ LAYERS = (
     # AFTER embed: the button writes out what embed put in, and its own probe
     # reads the version embed stamped.
     ("install", "td_add_install.py"),
+    # LAST, so the About page is the last tab. It touches no operator any other
+    # builder owns - one page and two DATs.
+    ("about", "td_add_about.py"),
 )
 
 # What each layer drags along, and why. Anything listed here is added to the run
