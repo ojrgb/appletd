@@ -22,6 +22,7 @@ worth it. This is the seatbelt: the generated file is at least valid Python.
 from __future__ import annotations
 
 import pathlib
+import re
 from typing import Any
 
 import pytest
@@ -126,3 +127,29 @@ def test_the_snapshot_records_mode_and_the_restore_puts_it_back() -> None:
     swap = source.split("_SWAP = ")[1]
     for needed in ("par.expr = ", "par.bindExpr = ", 'entry.get("mode")'):
         assert needed in swap, f"the restore never uses {needed!r}"
+
+
+def test_the_swap_loads_into_the_parent_and_not_into_itself() -> None:
+    """THE REGRESSION THAT MATTERED, 2026-09-03. `comp.loadTox(path)` does not replace
+    the contents of `comp` - it loads the .tox's root component as a CHILD of it. The
+    first updater called it on the component being updated, which nested a copy inside
+    the thing it meant to replace, left every original operator and parameter in place,
+    and printed "Updated". Two nested copies were found in the live component: 1,239
+    descendants where there should have been 309.
+
+    Every check that updater passed was one that passed just as well when nothing had
+    happened - a value "surviving" the swap survives best when the parameter was never
+    replaced. So this asserts the SHAPE that makes a real replacement possible.
+    """
+    constants = _constants("td_add_about.py")
+    swap = constants["CONTROL_SOURCE"].split("_SWAP = ")[1]
+    # CODE ONLY. The comment above the call names the wrong form in order to warn
+    # about it, and a substring check would match the warning and call it the bug.
+    code = "\n".join(line for line in swap.splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert re.search(r"(?<!parent_)comp\.loadTox\(", code) is None, (
+        "the swap is loading into the component again - that nests, it does not replace")
+    assert "parent_comp.loadTox(TOX)" in code, "the swap must load into the PARENT"
+    # And the order: the replacement has to exist before the original is destroyed.
+    assert code.index("parent_comp.loadTox") < code.index("comp.destroy()"), (
+        "the old component is destroyed before the new one has loaded")

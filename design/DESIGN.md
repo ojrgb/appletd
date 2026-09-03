@@ -1629,6 +1629,45 @@ has to decide whether it is copying VALUES or copying PARAMETERS, and `eval()` q
 answers "values" while looking like it answered "parameters".
 
 
+### 2.28 `loadTox` does not replace a component, it nests one — 2026-09-03
+
+`COMP.loadTox(path)` reads as "load this .tox into this component". What it actually
+does is load the .tox's ROOT COMPONENT AS A CHILD. Calling it on the component you
+meant to replace therefore puts a copy inside the original, leaves every existing
+operator and parameter exactly where it was, and raises nothing.
+
+Measured on a bare Base COMP, loading the same file three times:
+
+| loads | children | descendants | saved size |
+|---|---|---|---|
+| 1 | 1 | 308 | 339,904 |
+| 2 | 2 | 616 | 678,346 |
+| 3 | 3 | 924 | 1,016,788 |
+
+Linear, one whole copy per call. The live component was found holding **two** nested
+copies of itself — 1,239 descendants where 309 was right — from two runs of what was
+believed to be a working updater.
+
+**A component is replaced from its PARENT.** `parent.loadTox(TOX)` puts the new one
+beside the old, where TouchDesigner renames the collision itself; the old one is
+destroyed only once the new one exists and has been checked, and the new one then takes
+its name, position and wiring. An interrupted update leaves a duplicate to delete
+rather than a hole where the component was.
+
+THE REAL LESSON IS ABOUT THE TEST, not the API. The first updater was "verified end to
+end": a copy was saved, a parameter changed afterwards, the swap run, and the parameter
+read back with its new value — the value the downloaded file did not contain. That was
+presented as proof the restore worked. **It was proof of the bug.** The parameter kept
+its value because the parameter was never replaced. Every check in that test passed
+strictly more easily when nothing happened at all.
+
+A swap test has to assert something that is IMPOSSIBLE without the swap. The one that
+found this puts a marker DAT in the saved copy, deletes it from the live component, and
+afterwards checks three things: the marker is back, the COMP's `.id` has CHANGED, and
+the descendant count did not grow. A test that cannot fail is not evidence, and
+"it still works afterwards" is the easiest thing in the world for a no-op to satisfy.
+
+
 ## 3. Traps — all of these cost real time in the spike
 
 **GIL starvation from a polling main thread.** A tight

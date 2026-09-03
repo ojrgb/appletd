@@ -2306,15 +2306,23 @@ the component. **`Update` replaces the COMPONENT** and never touches the install
 Somebody who presses the wrong one after a failure learns nothing, so they are on
 different pages with labels that say which is which.
 
-### 26.2 The COMP replaces itself, and that is the whole design
+### 26.2 The swap happens from the PARENT — corrected 2026-09-03
 
-`loadTox` destroys every child of its target. `about_control` - the DAT holding the
-code - is one of those children, so it cannot be the thing that calls it. Both the
-download and the swap are handed to `run()`, which executes in TouchDesigner's own
-module context: the string is compiled before the DAT dies and never refers back to it.
+This section first said the component replaces itself, on the belief that `loadTox`
+destroys the children of its target. **It does not.** `COMP.loadTox(path)` loads the
+.tox's root component as a CHILD of the target, so calling it on the component being
+updated nests a copy inside it and changes nothing else. DESIGN.md 2.28 has the
+measurements and the two nested copies it left in the live component.
 
-The swap script is written to a temp file rather than passed as a string, because a
-string long enough to do this safely is unreadable as one.
+The replacement is done from the parent: `parent.loadTox(TOX)` puts the new component
+beside the old, the old is destroyed only after the new one has arrived and been
+checked, and the new one takes its name, position and wiring. An interrupted update
+leaves a duplicate to delete, not a hole.
+
+The code still runs through `run()` rather than from `about_control` directly, and that
+part was right for the right reason: the DAT holding it belongs to the component being
+destroyed. The swap script is written to a temp file rather than passed as a string,
+because a string long enough to do this safely is unreadable as one.
 
 ### 26.3 What survives
 
@@ -2323,10 +2331,19 @@ file and not operator storage, because storage belongs to the COMP that `loadTox
 about to rewrite. A parameter that moved page keeps its value; one the new version has
 retired is dropped and named in the textport, with the old values left on disk.
 
-VERIFIED END TO END, 2026-09-03, by pointing `Updateurl` at a `file://` copy of the
-component itself and setting `Orthowidth = 3.75` **after** taking that copy. After the
-swap: the COMP survived, all eight pages returned, **`Orthowidth` read 3.75** - a value
-the downloaded file did not contain - and 102 settings were restored.
+THE FIRST VERIFICATION OF THIS WAS WORTHLESS, and it is left here as the warning it
+earned. It pointed `Updateurl` at a `file://` copy, set `Orthowidth = 3.75` **after**
+taking that copy, ran the swap, and read 3.75 back - a value the downloaded file did
+not contain. That was called proof the restore worked. It was proof that **nothing had
+been replaced**: the parameter kept its value because the parameter was never touched.
+Every assertion in it passed more easily when the swap did nothing.
+
+VERIFIED, 2026-09-03, by a test that can fail. A marker DAT is put into the saved copy
+and deleted from the live component, so it can only come back through a real swap.
+After it: the marker is present, the COMP's `.id` changed from 9343 to **44812** - a
+different operator - the descendant count is 310 rather than 619, `Beta` reads the
+2.625 set after the copy was taken, `Renderw` is still an EXPRESSION, and all eight
+pages are there under the original name and path.
 
 ### 26.4 The marker is an ETag, not a version
 

@@ -105,6 +105,25 @@ def _say(comp, text):
     return text
 
 
+def _etag(url):
+    """The server's ETag for `url`, or "" if it will not say. A HEAD request, `-L` for
+    the same reason `check()` needs it - the redirect has an ETag of its own and it is
+    not the file's."""
+    try:
+        found = subprocess.run(["curl", "-fsSIL", url],
+                               capture_output=True, text=True, timeout=20)
+    except Exception:                               # noqa: BLE001 - "" is a fine answer
+        return ""
+    if found.returncode != 0:
+        return ""
+    tag = ""
+    for line in found.stdout.splitlines():
+        name, _, value = line.partition(":")
+        if name.strip().lower() == "etag":
+            tag = value.strip().strip('"')          # the LAST one is the final hop
+    return tag
+
+
 def check(comp=None):
     """Ask the server what it has, without downloading it. Returns the state text.
 
@@ -231,8 +250,12 @@ def update(comp=None):
     with open(snapshot, "w") as handle:
         json.dump(values, handle, indent=1, default=str)
 
-    etag = str(getattr(comp.par, "Updatefound", None)
-               and comp.par.Updatefound.eval() or "")
+    # THE ETAG OF THE URL WE JUST DOWNLOADED, not whatever `Updatefound` holds.
+    # `check()` writes that from the last URL it was pointed at, and `Updateurl` is a
+    # parameter somebody can edit in between - check `main`, switch to a fork, press
+    # Update, and the component would record that it came from `main`. Then the next
+    # check compares the fork's ETag against `main`'s and reports an update forever.
+    etag = _etag(url)
     swap = os.path.join(tempfile.gettempdir(), "appletd_do_update.py")
     # The four values as ASSIGNMENTS rather than substitutions. `_SWAP` is a template
     # inside a template inside a template - this DAT is generated, and it generates the
@@ -258,52 +281,109 @@ def update(comp=None):
 _SWAP = """import json
 import os
 
-comp = op(COMP_PATH)
-comp.loadTox(TOX)
+# REPLACING A COMPONENT IS A PARENT-SIDE OPERATION, and the first version of this got
+# it exactly backwards. `comp.loadTox(path)` does NOT replace the contents of `comp`:
+# it loads the .tox's root component AS A CHILD of it. Calling it on the component
+# being updated therefore nests a copy inside the thing you meant to replace, leaves
+# every original operator and parameter untouched, and reports success. Measured
+# 2026-09-03: three loads into one COMP gave children 1 -> 2 -> 3 and a descendant
+# count of 308 -> 616 -> 924. DESIGN.md 2.28.
+#
+# So the load goes to the PARENT, which is where a sibling can appear beside the old
+# one, and the old one is destroyed only once the new one is there and looks right.
+# The failure mode of an interrupted update is then a duplicate to delete, not a
+# missing component.
 
-# Put back every value the new version still has a parameter for. Names, not indices:
-# a parameter that moved page keeps its value, and one that was retired is dropped
-# rather than landing on whatever now sits in its place.
-restored, dropped = 0, []
-try:
-    with open(SNAPSHOT) as handle:
-        saved = json.load(handle)
-except Exception as problem:
-    print("[appletd] could not read the saved settings: %%r" %% (problem,))
-    saved = {}
-for name, value in saved.items():
-    par = getattr(comp.par, name, None)
-    if par is None or par.readOnly:
-        dropped.append(name)
-        continue
-    # A snapshot written before 2026-09-03 is a bare value, and it means CONSTANT.
-    entry = value if isinstance(value, dict) else {"mode": "CONSTANT", "val": value}
-    # THE NEW VERSION'S EXPRESSION WINS. Same rule the builder uses when it rebuilds
-    # over a tuned component: a parameter this build drives from `render1` or `cam1`
-    # is being driven for a reason, and a constant carried over from the old one is a
-    # number that was true once. Type over it after the update if you meant it.
-    if par.mode.name == "EXPRESSION" and par.expr and entry.get("mode") != "EXPRESSION":
-        continue
+comp = op(COMP_PATH)
+parent_comp = comp.parent()
+old_name, old_x, old_y = comp.name, comp.nodeX, comp.nodeY
+
+# The wiring, as (index, path, index) triples - paths and not operators, because the
+# operators on the far end outlive this and the connectors do not.
+wired_in, wired_out = [], []
+for index, connector in enumerate(comp.inputConnectors):
+    for wire in connector.connections:
+        wired_in.append((index, wire.owner.path, wire.index))
+for index, connector in enumerate(comp.outputConnectors):
+    for wire in connector.connections:
+        wired_out.append((index, wire.owner.path, wire.index))
+
+# 1. THE NEW ONE FIRST, beside the old. TouchDesigner renames the collision itself.
+known = set(parent_comp.children)
+parent_comp.loadTox(TOX)
+arrived = [child for child in parent_comp.children if child not in known]
+
+# 2. Does it look like the component? An HTML error page that survived the magic-byte
+#    check, or a .tox of something else entirely, stops here with the old one intact.
+fresh = arrived[0] if len(arrived) == 1 and arrived[0].isCOMP else None
+if fresh is None or fresh.op("out1") is None:
+    for stray in arrived:
+        stray.destroy()
+    print("[appletd] REFUSED: %%r did not load as a component. Nothing was changed."
+          %% (TOX,))
+    if hasattr(comp.par, "Updatestate"):
+        comp.par.Updatestate = "Refused - the download did not load as a component"
+else:
+    # 3. Settings onto the NEW component, before anything is destroyed.
+    restored, dropped = 0, []
     try:
-        if entry.get("mode") == "EXPRESSION" and entry.get("expr"):
-            par.expr = entry["expr"]     # assigning `.expr` switches the mode itself
-        elif entry.get("mode") == "BIND" and entry.get("bind"):
-            par.bindExpr = entry["bind"]
-        elif entry.get("mode") == "EXPORT":
-            pass          # an export comes from a wire, and `loadTox` rebuilds those
-        else:
-            par.val = entry.get("val")
-        restored += 1
-    except Exception:
-        dropped.append(name)
-if hasattr(comp.par, "Updateetag"):
-    comp.par.Updateetag = ETAG
-print("[appletd] updated. %%d setting(s) restored." %% restored)
-if dropped:
-    print("[appletd]   no parameter in this version for: %%s" %% ", ".join(dropped))
-    print("[appletd]   the old values are in " + SNAPSHOT)
-if hasattr(comp.par, "Updatestate"):
-    comp.par.Updatestate = "Updated - %%d setting(s) restored" %% restored
+        with open(SNAPSHOT) as handle:
+            saved = json.load(handle)
+    except Exception as problem:
+        print("[appletd] could not read the saved settings: %%r" %% (problem,))
+        saved = {}
+    for name, value in saved.items():
+        par = getattr(fresh.par, name, None)
+        if par is None or par.readOnly:
+            dropped.append(name)
+            continue
+        # A snapshot written before 2026-09-03 is a bare value, and it means CONSTANT.
+        entry = value if isinstance(value, dict) else {"mode": "CONSTANT", "val": value}
+        # THE NEW VERSION'S EXPRESSION WINS. Same rule the builder uses when it
+        # rebuilds over a tuned component: a parameter this build drives from
+        # `render1` or `cam1` is being driven for a reason, and a constant carried
+        # over from the old one is a number that was true once.
+        if (par.mode.name == "EXPRESSION" and par.expr
+                and entry.get("mode") != "EXPRESSION"):
+            continue
+        try:
+            if entry.get("mode") == "EXPRESSION" and entry.get("expr"):
+                par.expr = entry["expr"]   # assigning `.expr` switches the mode itself
+            elif entry.get("mode") == "BIND" and entry.get("bind"):
+                par.bindExpr = entry["bind"]
+            elif entry.get("mode") == "EXPORT":
+                pass       # an export comes from a wire, and the rewiring below does it
+            else:
+                par.val = entry.get("val")
+            restored += 1
+        except Exception:
+            dropped.append(name)
+
+    # 4. Only now. The old component's name is needed before it can be taken.
+    comp.destroy()
+    fresh.name = old_name
+    fresh.nodeX, fresh.nodeY = old_x, old_y
+
+    # 5. Back into the network it was in. A far end that has since gone is skipped
+    #    rather than raising - half a rewiring beats an exception here.
+    for index, path, far in wired_in:
+        source = op(path)
+        if source is not None and index < len(fresh.inputConnectors):
+            source.outputConnectors[far].connect(fresh.inputConnectors[index])
+    for index, path, far in wired_out:
+        target = op(path)
+        if target is not None and index < len(fresh.outputConnectors):
+            fresh.outputConnectors[index].connect(target.inputConnectors[far])
+
+    if hasattr(fresh.par, "Updateetag"):
+        fresh.par.Updateetag = ETAG
+    print("[appletd] updated. %%d setting(s) restored." %% restored)
+    if dropped:
+        print("[appletd]   no parameter in this version for: %%s" %% ", ".join(dropped))
+        print("[appletd]   the old values are in " + SNAPSHOT)
+    if hasattr(fresh.par, "Updatestate"):
+        fresh.par.Updatestate = "Updated - %%d setting(s) restored" %% restored
+
 try:
     os.remove(TOX)
 except OSError:

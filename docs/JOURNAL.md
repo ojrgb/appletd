@@ -4547,3 +4547,52 @@ against the live input, and it prints how many contract channels were trimmed aw
 **The trade, stated as one**: 45 fewer operators and one set of branches instead of
 three, for 1.44 ms, on a change whose stated goal was explicitly not milliseconds.
 Reverting is one `git revert`; nothing else depends on the merge.
+
+---
+
+## 2026-09-03 — the updater never updated anything
+
+The self-updater shipped on 2026-09-03 and was described in the commit as verified end
+to end. It was not. It had never replaced a component in its life.
+
+`COMP.loadTox(path)` reads as "load this .tox into this component". It loads the .tox's
+root component **as a child**. Called on the component being updated, it nests a copy
+inside the original and leaves everything else exactly as it was. Nothing raises. The
+snapshot, the validation, the scheduled `run()`, the parameter restore - all of it did
+what it was supposed to, to a component that was still the old one.
+
+The live component was carrying **two nested copies of itself**: 1,239 descendants
+where 309 is right, ~340 KB of dead weight per press. Nothing was wired to them, so the
+only cost was size and cooking, but three more presses would have quadrupled it again.
+
+WHAT MAKES THIS WORTH WRITING DOWN is not the API. It is that the test was designed so
+that it could not fail. The proof offered was: save a copy, change `Orthowidth` to 3.75
+afterwards, swap, and read 3.75 back - a value the downloaded file did not contain.
+That reads like a strong result. It is the exact signature of the bug. The parameter
+kept its value **because the parameter was never replaced**, and every other check -
+eight pages present, settings restored, the COMP still there - passes trivially when
+nothing happens. A no-op satisfies "it still works afterwards" better than a real
+change does.
+
+It took a completely unrelated observation to find it. The user noticed that `Renderw`,
+`Renderh` and `Orthowidth` had stopped tracking `render1` and `cam1`. That was a second
+real defect - the restore was writing `par.eval()` back with `par.val =`, freezing live
+expressions into constants - and chasing the file sizes it produced (343 KB -> 685 KB
+-> 1.37 MB) is what exposed the nesting. Neither bug would have been found by the test
+that was supposed to cover both.
+
+The rewrite loads into the PARENT, checks the arrival looks like a component, restores
+onto the new one, and only then destroys the old and takes its name, position and
+wiring. An interrupted update leaves a duplicate to delete rather than a hole.
+
+The new test asserts something impossible without a real swap: a marker DAT that exists
+only in the downloaded copy, plus the COMP's `.id`. It passes now - marker back, id
+9343 -> 44812, 310 descendants, `Beta` restored, expressions still expressions - and,
+more to the point, it would have failed loudly on the old code.
+
+Two smaller things fixed in passing: the ETag is now read from the URL that was
+actually downloaded rather than from whatever the last check looked at, and the About
+page carries the disclaimer as three Header lines with a button to the full licence.
+
+DESIGN.md 2.27 and 2.28. Still not exercised: a real download from GitHub followed by a
+swap, which needs a published `.tox` newer than the one in the component.
