@@ -219,11 +219,20 @@ a frame is stored. What you do with the numbers is yours to answer for.
 
 ---
 
-## Not for safety-critical use
+## Disclaimer
 
-Research and creative work. Not designed, tested or suitable for medical, automotive,
-security, access-control or any other use where a wrong answer causes harm. See the
-disclaimer in [LICENSE](LICENSE).
+**Provided as is, without warranty of any kind**, express or implied. You use it at your
+own risk, and the author is not liable for any claim, damage or loss arising from it. The
+binding text is in [LICENSE](LICENSE).
+
+**Not for safety-critical use.** Research and creative work. Not designed, tested or
+suitable for medical, automotive, security, access-control or any other use where a wrong
+answer causes harm.
+
+**It detects people.** Whether you may point a camera at someone, what you have to tell
+them, and what you may keep depends on where you are and who they are — none of which
+this repository knows. That is yours to answer for, and if the answer matters, it is a
+question for a lawyer rather than for a README.
 
 ---
 

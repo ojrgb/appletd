@@ -160,6 +160,22 @@ either it runs at each milestone from here or §3 should be deleted honestly.
 **Version control.** One commit per milestone, so every review has a clean diff
 and a bad milestone is revertible.
 
+**Work happens on a branch, and a push is asked for — added 2026-09-03.** Nothing
+is committed on `main`. Commits on the branch need no permission; **every `git
+push` does**, including the first one that creates the remote branch, and
+approval for one push is not approval for the next.
+
+The reason is direction, not distrust. This repository is public and carries a
+person's name, so a push is a publication and it does not come back: a fork, a
+clone or a search index keeps whatever went out for as long as it likes, and
+rewriting the branch afterwards changes none of those copies. Everything else in
+this project is revertible; that one operation is not. The branch is simply the
+place where a human reads it while it still is.
+
+`git add` takes explicit paths, never `-A`. This working tree holds the author's
+own spikes and scratch files, and `-A` has swept one of them in before
+(`.gitignore` names them).
+
 **Journal.** `docs/JOURNAL.md` gets a short entry per milestone: what was built,
 what was measured with numbers, what surprised us, what is still unknown.
 

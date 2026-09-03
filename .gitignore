@@ -21,8 +21,10 @@ fixtures/*.mov
 # compiled .mlmodelc is a build product of the .mlpackage and is equally not ours.
 models/
 
-# TouchDesigner writes a numbered backup beside every .toe on save, and a Backup/
-# folder next to it. Committing those would put dozens of near-identical binaries in
+# `appletd.toe` itself IS tracked - it is the project the component is built and
+# measured in, and a builder run that cannot be reproduced is not evidence. The
+# numbered backups are not: TouchDesigner writes one beside every .toe on save, and a
+# Backup/ folder next to it. Committing those would put dozens of near-identical binaries in
 # the history of a repo that ships example projects.
 *.toe.[0-9]*
 *.tox.[0-9]*
