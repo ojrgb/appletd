@@ -4608,3 +4608,24 @@ path a `file://` URL cannot test, because a file has no ETag.
 
 Both directions falsifiable this time: something that had to appear and something that
 had to disappear. The old code would have failed it twice.
+
+**And with a real camera.** The half that needed authorisation: does an update take the
+running sidecar down with it? A sidecar at 30 sends/s, and the `.tox` saved deliberately
+MID-CAPTURE so the downloaded file carried `Active` on and `Capturestate` "Running" -
+the file actively wanting a capture the swap must refuse to start.
+
+It passed, and found one more defect on the way. `Capturestate` is readOnly, so the
+snapshot skips it, so the new component inherits it from the FILE: the light read
+"Running" while `Active` was off and the process was dead, with nothing to correct it
+until the next button press. The swap now calls `set_state()`, which asks pgrep rather
+than the toggle's opinion.
+
+Final run: pid 14870 gone with `signal 15; stopping` in the log - the graceful path, so
+the camera is released rather than reclaimed by the OS - nothing respawned, `Active`
+False, `Capturestate` "Stopped", id 46057 -> 46368, marker gone, 309 descendants, `Beta`
+restored, expressions intact, eight pages.
+
+Worth naming the pattern, because it is the third instance in two days: **a swap inherits
+everything the exported file happened to be doing at the moment it was saved.** Parameter
+modes, `Active`, the status light. Anything readOnly is skipped by the snapshot and comes
+from the file, and anything the file was saved mid-something with arrives mid-something.

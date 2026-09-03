@@ -400,6 +400,19 @@ else:
         if target is not None and index < len(fresh.outputConnectors):
             fresh.outputConnectors[index].connect(target.inputConnectors[far])
 
+    # AND MAKE THE STATUS LIGHT TELL THE TRUTH. `Capturestate` is readOnly, so the
+    # snapshot skips it and the new component carries whatever the .tox was SAVED
+    # with - "Running", if it was exported while a capture was going. Nothing else
+    # recomputes it until the next button press, so the panel would sit there claiming
+    # a process that this swap has just killed. `set_state` asks pgrep instead of the
+    # toggle's opinion, which is the whole point of it (td_build_vision.py).
+    sidecar = fresh.op("sidecar_control")
+    if sidecar is not None:
+        try:
+            sidecar.module.set_state(fresh)
+        except Exception as problem:
+            print("[appletd] could not refresh the status: %%r" %% (problem,))
+
     if hasattr(fresh.par, "Updateetag"):
         fresh.par.Updateetag = ETAG
     print("[appletd] updated. %%d setting(s) restored." %% restored)

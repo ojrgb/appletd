@@ -2376,11 +2376,20 @@ properly instead of leaving the OS to reclaim it (DESIGN.md 8). A camera is also
 shared device somebody else may have taken during the update. Turning it back on is one
 click, and it is the user's click.
 
-VERIFIED 2026-09-03 without a camera, which covers everything but terminating a live
-process: id 45435 -> 45746, the live-only marker DAT gone, 309 descendants, `Active`
-False, no sidecar spawned, `Beta` restored, and **101** settings restored rather than
-102 - the one skipped being `Active` itself. Terminating a RUNNING sidecar across a swap
-is still unexercised.
+**And the status light has to be recomputed**, which the first version of this missed.
+`Capturestate` is readOnly, so the snapshot skips it and the new component inherits
+whatever the `.tox` was SAVED with. Export mid-capture and it says "Running" - a light
+claiming a process this swap has just killed, with nothing to correct it until the next
+button press. `set_state()` asks pgrep rather than the toggle's opinion, and the swap
+now calls it.
+
+VERIFIED WITH A LIVE CAMERA, 2026-09-03. A sidecar running at 30 sends/s, and the `.tox`
+deliberately saved MID-CAPTURE so it carried `Active` on and `Capturestate` "Running".
+After the swap: **pid 14870 gone**, with `signal 15; stopping` in the sidecar log - the
+graceful path, so the device is released rather than reclaimed - nothing respawned,
+`Active` False, `Capturestate` **"Stopped"**, id 46057 -> 46368, the live-only marker
+gone, 309 descendants, `Beta` restored, `Renderw` still an EXPRESSION, eight pages. And
+**101** settings restored rather than 102, the one skipped being `Active` itself.
 
 ### 26.4 The marker is an ETag, not a version
 

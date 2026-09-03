@@ -175,3 +175,8 @@ def test_the_swap_stops_the_sidecar_and_lands_with_active_off() -> None:
     assert 'fresh.par.Active = False' in code, "the new component is not forced quiet"
     assert 'if name == "Active"' in code, (
         "the restore can still switch Active back on from the snapshot")
+    # `Capturestate` is readOnly, so the snapshot skips it and the NEW component
+    # inherits whatever the .tox was saved with. Exported mid-capture, that is
+    # "Running" - a light claiming a process the swap has just killed.
+    assert "sidecar.module.set_state(fresh)" in code, (
+        "the status light is never recomputed, so it can outlive the process")
