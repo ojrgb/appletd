@@ -130,6 +130,18 @@ RUNTIME_MODULES: Final[tuple[str, ...]] = (
     "face",
     "face_types",
     "maskbuf",
+    # ADDED 2026-09-04, and it had been missing since motion.py was written on
+    # 08-23. `tools/td_add_temporal.py` generates a Script CHOP that does
+    # `from appletd.motion import MotionParams, directions` at COOK time, and that
+    # module never travelled - so an install had every other module and not this one.
+    #
+    # INVISIBLE ON THE DEV MACHINE, which is why it survived twelve days: the DAT
+    # resolves its package root and finds the CHECKOUT here, where motion.py exists.
+    # On a machine that only has an install it raises ModuleNotFoundError the moment
+    # `Temporal` or `Presence` is switched on. Found by the user toggling exactly
+    # that. Guarded now by test_install.py, which reads the imports back out of the
+    # generated DAT sources rather than trusting this list to be complete.
+    "motion",
     "osc",
     "pins",
     "pose",

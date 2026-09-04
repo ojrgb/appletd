@@ -59,12 +59,21 @@ def test_runtime_modules_is_exactly_the_import_closure() -> None:
     not to the list is simply never installed, and the network raises at its first
     cook on somebody else's machine.
 
-    The roots are the four entry points anything outside the package imports: the
-    sidecar process, and the three modules the generated DATs use.
+    The roots are the entry points anything outside the package imports: the sidecar
+    process, and the modules the generated DATs use.
+
+    THIS TEST PASSED THROUGH THE 2026-09-04 BUG, and that is worth stating plainly.
+    `motion` was missing from RUNTIME_MODULES *and* from the roots below, so the
+    closure it computed was wrong in exactly the way the list was, and the two agreed.
+    A guard that reads one hand-written tuple against another can do that.
+    `test_every_module_a_generated_dat_imports_is_embedded` is the answer: it takes
+    its roots from the builders' DAT sources, which cannot be forgotten because they
+    are the thing that does the importing.
     """
     package_dir = Path(install.__file__).parent
     wanted = _import_closure(
-        ("sidecar", "derive", "maskbuf", "pins", "spaces", "td_layout"), package_dir)
+        ("sidecar", "derive", "maskbuf", "pins", "spaces", "td_layout", "motion"),
+        package_dir)
     wanted.add("__init__")
     assert set(install.RUNTIME_MODULES) == wanted
 
@@ -597,3 +606,65 @@ def test_the_pinned_download_is_arm_and_carries_a_checksum() -> None:
     assert install.PYTHON_VERSION in install.PYTHON_URL
     assert len(install.PYTHON_SHA256) == 64
     assert install.PYTHON_BYTES > 20_000_000
+
+
+# ---------------------------------------------------------------------------
+# What the generated DATs import must actually travel
+# ---------------------------------------------------------------------------
+def _imports_in_generated_dats() -> dict[str, set[str]]:
+    """`appletd.X` -> the builders whose DAT source imports it.
+
+    Read out of the builders rather than listed here, so this cannot drift: any
+    module-level triple-quoted constant in `tools/` is a DAT body, and an
+    `from appletd.X import` inside one runs on the USER's machine at cook time.
+    """
+    import pathlib
+    import re
+
+    tools = pathlib.Path(__file__).resolve().parents[2] / "tools"
+    found: dict[str, set[str]] = {}
+    for path in sorted(tools.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for block in re.finditer(r"^[A-Z][A-Z0-9_]*\s*=\s*('''|\"\"\")(.*?)\1",
+                                 source, re.S | re.M):
+            for first, second in re.findall(
+                    r"from appletd\.(\w+) import|import appletd\.(\w+)",
+                    block.group(2)):
+                found.setdefault(first or second, set()).add(path.name)
+    return found
+
+
+# `appletd.temporal` is imported only by `td_add_temporal_proto.py`, which is not in
+# the build chain and ships its COMP with `allowCooking = False`. A parked experiment
+# does not justify 8 KB in every install; enabling it is a developer action taken from
+# a checkout. Listed here so the exclusion is a decision rather than an oversight.
+_NOT_SHIPPED = {"temporal"}
+
+
+def test_every_module_a_generated_dat_imports_is_embedded() -> None:
+    """THE 2026-09-04 BUG. `appletd/motion.py` was written on 08-23 and never added
+    to RUNTIME_MODULES, so it never reached an install. The Script CHOP that imports
+    it raised ModuleNotFoundError the moment `Temporal` was switched on - on any
+    machine without a checkout, which is every user's.
+
+    It survived twelve days because the DAT resolves its package root and finds the
+    CHECKOUT on the dev machine. This test does not care where the file is; it asks
+    whether the module INSTALLS.
+    """
+    missing = sorted(name for name in _imports_in_generated_dats()
+                     if name not in install.RUNTIME_MODULES
+                     and name not in _NOT_SHIPPED
+                     and name != "td")          # TouchDesigner's own module
+    assert missing == [], (
+        "these are imported by a generated DAT at cook time and are not in "
+        "RUNTIME_MODULES, so they will not exist on a machine that only has an "
+        "install: %s" % ", ".join(missing))
+
+
+def test_every_embedded_module_exists_on_disk() -> None:
+    """The other direction, which `tools/td_embed_package.py` also checks at build
+    time - kept here so a bad edit fails in a second rather than at a rebuild."""
+    import pathlib
+    package = pathlib.Path(install.__file__).parent
+    for name in install.EMBEDDED_MODULES:
+        assert (package / ("%s.py" % name)).is_file(), name
