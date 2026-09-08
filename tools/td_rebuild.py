@@ -81,36 +81,72 @@ LAYERS = (
 # What each layer drags along, and why. Anything listed here is added to the run
 # and then the whole run is sorted back into CHAIN ORDER, so listing a layer that
 # comes earlier is safe.
+#
+# EVERY LAYER HAS AN ENTRY, checked below. Six were simply absent, and `.get(name, ())`
+# made a missing entry indistinguishable from a considered empty one - which is the
+# opposite of what the docstring above promises. An empty tuple is now a statement.
+#
+# WHY SO MANY NAME `pages`. Thirteen of these builders append custom parameters, and
+# `td_add_pages.py` is what puts a parameter on the page and under the heading it
+# belongs to. Run one of them alone and its parameters stay wherever they were
+# appended - which is what "I rebuilt one layer and my parameters moved to General"
+# is. The layers that append nothing say so instead.
 REQUIRES = {
     # `td_build_vision.py` no longer destroys the callback DATs other builders own
     # (OTHER_BUILDERS_OWN), so a master rebuild is genuinely standalone.
     # It does re-derive the Attributes page's parameters though, and `groups` is what
     # writes the gating and the trim list from them.
-    "master": ("groups", "segmentation", "depth"),
+    "master": ("groups", "segmentation", "depth", "pages"),
     # These four each rebuild a group whose channels the trim list is generated
     # from, so the list has to be rewritten or the new channels are invisible - a
     # keep list fails closed (DESIGN.md 2.15).
-    "derive": ("groups",),
-    "temporal": ("groups",),
-    "latches": ("groups",),
+    "derive": ("groups", "pages"),
+    "temporal": ("groups", "pages"),
+    "latches": ("groups", "pages"),
     "coords": ("groups",),
     "screenspace": ("groups",),
     # `filter` is in the data path and gates through a bypass flag, not through
     # `allowCooking`, so it changes no channel NAMES and the trim list still holds.
     "filter": (),
-    "groups": (),
-    # NOTHING. `embed` writes Text DATs into a container nothing is wired to, and a
-    # parameter nothing cooks. It is the only layer here that cannot change a channel.
-    "embed": (),
-    # `install` reads `Sourceversion`, which `embed` writes.
-    "install": ("embed",),
+    "groups": ("pages",),
+    # `embed` writes Text DATs into a container nothing is wired to - it is the only
+    # layer here that cannot change a channel - but it does append `Sourceversion`,
+    # which the Install section of the General page has a place for.
+    "embed": ("pages",),
+    # `install` reads `Sourceversion`, which `embed` writes, and appends four
+    # parameters of its own.
+    "install": ("embed", "pages"),
     # Nothing. It owns its own page, its own three operators and its own callbacks,
     # and `td_build_vision.py` no longer destroys any of them (OTHER_BUILDERS_OWN).
-    "segmentation": (),
+    "segmentation": ("pages",),
     # Same as segmentation: its own page, its own three operators, its own callbacks,
     # and td_build_vision.py destroys none of them.
-    "depth": (),
+    "depth": ("pages",),
+    # Its own page, its own three operators, its own callbacks - and four parameters.
+    "flow": ("pages",),
+    # Two parameters and an image input, and no operator any other builder owns.
+    "topinput": ("pages",),
+    # NOTHING. `video` appends no parameter and owns five TOPs nothing else touches.
+    # It does own `video_over`, which `overlay` connects into - but recreating a
+    # connection is `overlay`'s job on its own next run, and `video` rebuilt alone
+    # leaves the overlay COMP itself intact.
+    "video": (),
+    # Two parameters per stream, appended to pages `pages` then sorts.
+    "overlay": ("pages",),
+    # Ten parameters on a page of its own, and `pages` is what puts the About page
+    # last and drops the headings in.
+    "about": ("pages",),
+    # NOTHING, and it must stay that way: it is what everything else requires, so a
+    # requirement of its own would be a cycle waiting to be written.
+    "pages": (),
 }
+
+_UNLISTED = [name for name in tuple(n for n, _ in LAYERS) if name not in REQUIRES]
+if _UNLISTED:
+    raise AssertionError(
+        "these layers have no REQUIRES entry, so `plan()` would treat them as having "
+        "no dependencies without anyone having decided that: %s"
+        % ", ".join(_UNLISTED))
 
 ALL = tuple(name for name, _script in LAYERS)
 
@@ -137,7 +173,7 @@ def plan(targets):
         if name in wanted:
             continue
         wanted.add(name)
-        queue.extend(REQUIRES.get(name, ()))
+        queue.extend(REQUIRES[name])
     return [(name, script) for name, script in LAYERS if name in wanted]
 
 

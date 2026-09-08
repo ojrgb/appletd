@@ -421,13 +421,38 @@ class Sidecar:
                 # may still hold the mapping, and on POSIX that keeps working after the
                 # file goes - so leaving the files is what lets TD show the last mask
                 # and the last depth map instead of going black the instant we exit.
-                for attribute in ("_mask_writer", "_depth_writer"):
+                # ALL THREE. `_flow_writer` was missing, so 7.2 MB of mapping was
+                # released only by the process exiting - which is usually the next
+                # thing that happens, and was not when the sidecar was driven from a
+                # test or a script that kept going.
+                for attribute in ("_mask_writer", "_depth_writer", "_flow_writer"):
                     writer = getattr(self, attribute, None)
                     if writer is not None:
                         setattr(self, attribute, None)
                         writer.close()
             finally:
                 self.socket.close()
+
+    def _camera_revoked(self) -> bool:
+        """True if this host no longer has camera access. Never raises.
+
+        Only asked while the camera has delivered nothing for a status interval, so
+        the answer is worth a framework call. Returns False on the TOP Input path and
+        on anything unexpected: a wrong "permission was revoked" is worse than
+        silence, because it sends somebody to System Settings over a wire they have
+        not plugged in.
+        """
+        if self.frames_path:
+            return False               # no camera is open; permission is irrelevant
+        try:
+            import AVFoundation as AVF
+
+            from appletd.engine import AUTH_STATUS_AUTHORIZED
+            status = AVF.AVCaptureDevice.authorizationStatusForMediaType_(
+                AVF.AVMediaTypeVideo)
+        except Exception:              # noqa: BLE001 - a diagnostic may not fail
+            return False
+        return int(status) != AUTH_STATUS_AUTHORIZED
 
     def _parent_is_gone(self) -> bool:
         """True if the process that launched us has exited.
@@ -724,6 +749,20 @@ class Sidecar:
                     if REQUEST_DEPTH in self.streams:
                         parts.append("depth %d @ %.1f ms"
                                      % (self.n_depth_written, self._depth_ms()))
+                    # CAMERA PERMISSION, ASKED AGAIN, and only while starved.
+                    # Revoking camera access in System Settings while this is
+                    # running does not raise anything: AVFoundation simply stops
+                    # delivering, so the age climbs and every other cause of a
+                    # stalled camera looks identical. The status is a cheap
+                    # read - microseconds - and it is read only when nothing has
+                    # arrived for a whole status interval, so it costs nothing in
+                    # the normal case and names the cause in the one case where
+                    # nothing else can.
+                    if sends == 0.0 and self._camera_revoked():
+                        parts.append("CAMERA ACCESS WAS REVOKED for this host "
+                                     "application while it was running - re-grant "
+                                     "it in System Settings > Privacy & Security "
+                                     "> Camera and restart capture")
                     if self.source.errors:
                         parts.append("ERRORS: %s" % self.source.errors)
                     print(" | ".join(parts), flush=True)

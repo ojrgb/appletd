@@ -26,6 +26,27 @@ from collections.abc import Iterable
 from itertools import pairwise
 from typing import Any, Final
 
+# ---------------------------------------------------------------------------
+# How many depth pin rows the panel has
+# ---------------------------------------------------------------------------
+# HERE, because four places need to agree and three of them had `range(1, 9)` typed
+# into them: the pin parameters themselves (`tools/td_add_depth.py`), the launch
+# signature and the Parameter Execute's watch list (`tools/td_build_vision.py`), and
+# the page layout (`appletd/td_pages.py`). Raising the count would have built a panel
+# with rows nothing watched, nothing placed and nothing restarted for - each failing
+# silently and differently.
+#
+# NOT in `appletd/pins.py`, which is where it looks like it belongs: the solver has no
+# maximum, it fits whatever it is handed. Eight is a fact about the PANEL, and this is
+# the module the panel's builders already share. It also keeps `td_pages.py` free of
+# numpy, which `pins.py` would drag in.
+#
+# WHY A FIXED NUMBER AT ALL: this is a numbered block of parameters that looks like an
+# extendable list and is not one. TouchDesigner's own Sequence could not be built from
+# Python in this version - four different orderings of `appendSequence` all left
+# `blockPars` empty.
+MAX_PINS: Final = 8
+
 # MEASURED on a live network: a CHOP/DAT node is 130 x 90, a base COMP 160 x 130.
 NODE_W: Final = 130
 NODE_H: Final = 90
@@ -344,6 +365,44 @@ def placement(xy: tuple[int, int], keep_layout: bool,
     if keep_layout and existed:
         return None
     return xy
+
+
+def keep_layout(master: Any) -> bool:
+    """Is `Keeplayout` on? False when the parameter does not exist yet.
+
+    One definition, because three builders had grown their own identical copy and
+    twenty-odd operators had none at all - they wrote `nodeX`/`nodeY` straight from
+    the table, so somebody who tidied the master network and switched the parameter
+    on watched everything move back on the next rebuild.
+    """
+    if master is None:
+        return False
+    par = getattr(master.par, "Keeplayout", None)
+    return bool(par.eval()) if par is not None else False
+
+
+def ensure(comp: Any, kind: Any, name: str, xy: tuple[int, int],
+           keep: bool) -> Any:
+    """Get-or-create `name` inside `comp`, placed according to `Keeplayout`.
+
+    THE POINT IS THE `existed` IT CAPTURES. Every call site was written as
+    `node = comp.op(NAME) or comp.create(...)` followed by an unconditional write to
+    `nodeX`/`nodeY` - by which time whether the node had been there a moment ago is
+    unknowable, so `placement()` could not be called even by a builder that wanted
+    to. Doing both here is what makes honouring the flag a one-liner rather than a
+    four-line dance nobody performed.
+
+    `kind` is passed in rather than imported: this module never imports `td`, so a
+    builder hands it `td.textDAT` and this stays testable outside TouchDesigner.
+    """
+    node = comp.op(name)
+    existed = node is not None
+    if node is None:
+        node = comp.create(kind, name)
+    where = placement(xy, keep, existed)
+    if where is not None:
+        node.nodeX, node.nodeY = where
+    return node
 
 
 def overlaps(placed: dict[str, tuple[int, int]],

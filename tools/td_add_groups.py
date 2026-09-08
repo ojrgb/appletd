@@ -299,7 +299,11 @@ EARLY_CHOP = "early_trim"
 # a beginner reading the list should not meet three quality scalars per hand before
 # they meet a fingertip. The 80 per-joint `*_conf` channels are dropped outright -
 # those nobody inspects.
-PER_JOINT_CONF = ("*_conf",)
+# The per-joint confidences, and ONLY those. `*_conf` also matches `human?_conf` -
+# a person BOX's confidence, which is not a joint and which `ATTRIBUTES.md` documents
+# as a pose channel. It was dropped from the output and was not in `INSPECTABLE`
+# either, so there was nowhere to read it at all.
+PER_JOINT_CONF = ("h?_*_conf", "p?_*_conf")
 HOUSEKEEPING = ("sc_*", "seq", "*_seq", "age_ms", "*_age_ms")
 
 # Per-hand identity and quality scalars. Off the OUTPUT by request, and
@@ -415,7 +419,17 @@ SECOND_FACE_CHANNELS = ("f[1-9]_*",)
 # `sc_*`, `seq` and `age_ms` are deliberately uncovered: they arrive on the hands port
 # but belong to the SIDECAR, not to hands, and NEVER_ON_OUTPUT drops them regardless.
 STREAM_CHANNELS = {
-    "hands": ("h?_*", "hands_*", "index_*", "n_hands"),
+    # The last nine are NAMES, not patterns, and they are here because they were
+    # missing. Nine hands channels carry no `h?_` or `hands_` prefix: `n_valid` and
+    # `both_valid` from `derive()`, `n_active`, `both_active` and `ready` from
+    # `temporal`, and the four the `together` latch publishes. With `Streamhands`
+    # off they stayed on the output - and `clap_count` and `apart_count` are
+    # COUNTERS, so they hold their last value rather than falling to zero and being
+    # swept up by `trim_empty`. A frozen counter that used to mean something is the
+    # exact "plausible wrong number" that layer exists to prevent.
+    "hands": ("h?_*", "hands_*", "index_*", "n_hands",
+              "n_valid", "both_valid", "n_active", "both_active", "ready",
+              "e_clap", "e_apart", "clap_count", "apart_count"),
     # `human?_*` is the person BOXES, which joined the pose contract with the human
     # rectangles request - a separate prefix because they are per-PERSON and the
     # `p?_` channels are per-joint.
@@ -791,16 +805,30 @@ def _check_stream_patterns():
 
     `sc_*`, `seq` and `age_ms` are exempt - they arrive on the hands port and belong
     to the sidecar, and NEVER_ON_OUTPUT drops them whatever a stream is doing.
+
+    WHY THE HANDS UNIVERSE IS BUILT BY RUNNING `derive()` AND ASKING `temporal`.
+    It used to come from `derived_roles`, whose own docstring says it classifies only
+    SOME of what `derive_chop` publishes - 24 names against 195. So this guard passed
+    while `STREAM_CHANNELS["hands"]` missed nine channels: it could not see them to
+    complain about them. Both modules are pure Python, so the honest universe is
+    simply what they emit, and getting it costs one call.
     """
-    from appletd.spaces import DERIVED_SOURCES, channel_roles, derived_roles
+    from appletd import temporal
+    from appletd.derive import derive
+    from appletd.spaces import channel_roles
 
     exempt = ("sc_", )
     owned = {}
     for stream in STREAM_CHANNELS:
         names = list(channel_roles(stream))
         if stream == "hands":
-            for source in DERIVED_SOURCES:
-                names += [n for n in derived_roles(source) if n not in names]
+            # WHAT THEY ACTUALLY PUBLISH, asked of them rather than of a
+            # classification of them. `derive()` over a zeroed contract emits every
+            # name it can emit; `temporal.channel_names()` is the whole set by
+            # construction.
+            emitted = dict.fromkeys(channel_roles(stream), 0.0)
+            names += [n for n in derive(emitted) if n not in names]
+            names += [n for n in temporal.channel_names() if n not in names]
         owned[stream] = set(names)
     for stream, patterns in STREAM_CHANNELS.items():
         hit = {name for name in owned[stream]
@@ -968,9 +996,19 @@ def _apply_gating(comp):
         toggle = getattr(comp.par, TRIM_TOGGLE, None)
         on = True if toggle is None else bool(toggle.eval())
         keep = _trim_keep(comp, wanted)
-        if keep is not None:
+        # AN EMPTY KEEP LIST IS NOT "KEEP NOTHING". It means every group reported
+        # disabled - all the `Stream*` toggles off - and writing "" to a Select that
+        # is NOT bypassed empties the output in total silence: no error, no warning,
+        # `out1` at 0 channels and every consumer downstream reading nothing.
+        #
+        # The builder's own `_apply_gating` has carried this guard since it was
+        # measured, and this copy - the half the file's docstring flags as
+        # hand-copied and drift-prone - lost it. Currently masked by the corrective
+        # second pass a frame later, which is not a reason to leave it: the second
+        # pass is guarded on `moved`, and turning every stream off moves nothing.
+        if keep:
             trim.par.channames = " ".join(keep)
-        trim.bypass = keep is None or not on
+        trim.bypass = not keep or not on
     house = comp.op("housekeeping_sel")
     if house is not None:
         house.par.channames = " ".join(_housekeeping_names(comp))
@@ -1474,7 +1512,14 @@ def main():
     # A Delete CHOP: its list is PATTERNS, and both operators cost list length x
     # input channels - the Delete's constant is only the worse one when the list is
     # literal names (BENCHMARKS.md, measured).
-    from appletd.td_layout import master_xy, rewire_master_chain, rewire_stream_head, stream_xy
+    from appletd.td_layout import (
+        ensure,
+        keep_layout,
+        master_xy,
+        rewire_master_chain,
+        rewire_stream_head,
+        stream_xy,
+    )
 
     # One `strip` per stream that has something it can remove at its own input.
     for stream in STRIP_TOGGLES:
@@ -1495,15 +1540,15 @@ def main():
                         "input, before the filter. tools/td_add_groups.py writes it.")
         rewire_stream_head(child)
 
-    early = master.op(EARLY_CHOP)
-    if early is None:
-        early = master.create(td.deleteCHOP, EARLY_CHOP)
+    early_existed = master.op(EARLY_CHOP) is not None
+    early = ensure(master, td.deleteCHOP, EARLY_CHOP, master_xy(EARLY_CHOP),
+                   keep_layout(master))
+    if not early_existed:
         early.par.delchannels = True
         early.par.delsamples = False
         early.par.select = "byname"
         early.par.discard = "scoped"
         early.bypass = True
-    early.nodeX, early.nodeY = master_xy(EARLY_CHOP)
     early.color = (0.5, 0.32, 0.32)
     early.comment = ("the OUTPUT-SHAPING toggles, applied BEFORE coords composes "
                      "anything. tools/td_add_groups.py writes the scope.")

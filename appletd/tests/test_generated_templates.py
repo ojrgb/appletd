@@ -46,7 +46,7 @@ TEMPLATES: tuple[tuple[str, str, dict[str, Any]], ...] = (
     # the middle layer is the escaping this file exists to catch.
     ("td_build_vision.py", "SIDECAR_CONTROL_SOURCE",
      {"resolver": "PACKAGE_ROOT", "port": 10000, "comp": "/project1/appletd",
-      "request_toggles": (("hands", "Streamhands"),)}),
+      "request_toggles": (("hands", "Streamhands"),), "max_pins": 8}),
 )
 
 

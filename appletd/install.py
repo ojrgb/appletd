@@ -99,7 +99,15 @@ MODEL_FILES: Final[tuple[str, ...]] = (
 )
 # The weight file is the one worth checking a size on: a truncated download leaves a
 # file that exists and will not load.
-MODEL_WEIGHT_MIN_BYTES: Final = 40_000_000
+#
+# EXACT, not a floor. This was 40_000_000 against a real 49_419_072 - 81% - so a
+# download cut off four fifths of the way through passed both the shell's check and
+# `model_present()`, and the first thing to notice was Core ML refusing to load it,
+# with nothing in the panel to say why. The file comes from a pinned URL, so its size
+# is a constant and anything else is a bad copy. The route back is that both callers
+# then treat it as absent: the installer downloads it again, and the panel says the
+# model is missing rather than saying it is there and failing later.
+MODEL_WEIGHT_BYTES: Final = 49_419_072
 
 STAMP_NAME: Final = "INSTALLED.json"
 SITE_PACKAGES: Final = "site-packages"
@@ -172,8 +180,52 @@ EMBEDDED_MODULES: Final[tuple[str, ...]] = RUNTIME_MODULES + PANEL_MODULES
 # requirements previously - an interpreter with pyobjc and no numpy runs until
 # `appletd.pins` is imported and then dies.
 _VERIFY_IMPORTS: Final = "import objc, numpy"
+# The same two as directories, for the cheap version of the question in `probe`.
+PACKAGE_MARKERS: Final[tuple[str, ...]] = ("objc", "numpy")
 _VERIFY_TIMEOUT_S: Final = 30.0
 
+
+
+# ---------------------------------------------------------------------------
+# Getting a value into shell source without it becoming shell
+# ---------------------------------------------------------------------------
+# `Sidecarpython` and the install root are FREE TEXT typed into TouchDesigner, and
+# they land in a `/bin/sh` script. Interpolating them into a double-quoted assignment
+# was wrong twice over: a path holding a double quote closed the quote, so
+# `/Users/x/My "Docs"/appletd` installed to `/Users/x/My Docs/appletd` and reported
+# DONE - the wrong directory, exit 0, nothing to tell you. And `$(...)` or a backtick
+# in the same position is not a path at all, it is a command, run as the user with
+# whatever TouchDesigner can reach.
+#
+# Single quotes, and the one character that cannot appear inside them closed and
+# reopened: `it's` becomes `'it'"'"'s'`. Inside single quotes `sh` expands nothing -
+# no `$`, no backtick, no backslash, no glob - so the value arrives as itself
+# whatever it holds.
+
+
+def sh_quote(value: str) -> str:
+    """`value` as a POSIX shell word that expands to exactly `value`.
+
+    Contract: the result INCLUDES its quotes, so the template writes `ROOT=%(root)s`
+              and never `ROOT="%(root)s"` - an outer pair of quotes would put the
+              value back into an expanding context and undo this.
+    """
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _plain(name: str, value: str) -> str:
+    """A constant that gets embedded INSIDE quotes in the template, checked.
+
+    `$ROOT/%(site_packages)s` cannot be quoted separately - it is half of a path - so
+    these have to be inert by construction instead. They are module constants, so a
+    failure here is a bug in this file rather than anything a user did, and it fires
+    at render time rather than in somebody's shell.
+    """
+    if any(c in value for c in "\"'`$\\\n"):
+        raise ValueError(
+            "%s = %r cannot be embedded in the install script: it contains a "
+            "character the surrounding double quotes would act on." % (name, value))
+    return value
 
 # ---------------------------------------------------------------------------
 # The installer, as a shell script
@@ -198,14 +250,54 @@ INSTALL_SCRIPT: Final = r"""#!/bin/sh
 # every time Install is pressed, from the pinned constants in appletd/install.py.
 set -eu
 
-ROOT="%(root)s"
-PYTHON="%(python)s"
-PY_URL="%(python_url)s"
-PY_SHA="%(python_sha)s"
-WANT_MODEL="%(want_model)s"
-VERSION="%(version)s"
+ROOT=%(root)s
+PYTHON=%(python)s
+PY_URL=%(python_url)s
+PY_SHA=%(python_sha)s
+WANT_MODEL=%(want_model)s
+VERSION=%(version)s
 
-say() { echo "$1 $2"; }
+STEP="starting"
+REPORTED=no
+
+# WHEN TO GIVE UP ON A DOWNLOAD. `curl` with no limits waits for ever, and a captive
+# portal or a stalled proxy is not a broken connection - it is an open socket that
+# never delivers. So the panel sat on "downloading Python (26 MB)" indefinitely with
+# nothing to press.
+#
+# `--speed-time` with `--speed-limit`, not `--max-time`: a wall clock would abort a
+# slow-but-working download on a bad hotel connection, which is the case most likely
+# to need the download to finish. This gives up only when less than 1 KB has moved in
+# 60 s, which no working download does and no hung one survives.
+CURL_LIMITS="--connect-timeout 30 --speed-limit 1024 --speed-time 60 --retry 2"
+
+say() {
+    if [ "$1" = FAIL ]; then REPORTED=yes; fi
+    if [ "$1" = STEP ]; then STEP="$2"; fi
+    echo "$1 $2"
+}
+
+# WHY A TRAP, given `set -e`. Every failure this script EXPECTS says FAIL and exits.
+# Every other one - curl on a 404, pip unable to write, tar on a corrupt archive, a
+# disk that filled - exits immediately and prints nothing, so the last line is the
+# STEP that was in progress. The panel shows the last line, so a dead install was
+# indistinguishable from one still working, forever. Now every exit that nobody has
+# already explained says which step it died on and with what.
+on_exit() {
+    status=$?
+    rm -f "$ERR"
+    if [ "$status" -ne 0 ] && [ "$REPORTED" = no ]; then
+        echo "FAIL $STEP (exit $status)"
+    fi
+}
+
+# NAMED, not fixed at /tmp/appletd_import_err. A predictable path in a world-writable
+# directory is somebody else's file to make first: a symlink points the redirect at
+# something of theirs, and a plain file owned by another account makes the redirect
+# fail and takes the install down with it for a reason that has nothing to do with
+# the install.
+ERR=$(mktemp "${TMPDIR:-/tmp}/appletd_import_err.XXXXXX")
+trap on_exit EXIT
 
 case "$(uname -m)" in
   arm64) ;;
@@ -222,7 +314,7 @@ if [ -z "$PYTHON" ]; then
         PYTHON="$ROOT/%(python_bin)s"
     else
         say STEP "downloading Python (26 MB)"
-        curl -fL --progress-bar "$PY_URL" -o python.tar.gz
+        curl -fL $CURL_LIMITS --progress-bar "$PY_URL" -o python.tar.gz
         # CHECKED, not trusted. This is a third-party binary and the hash is the one
         # the test suite was run against - a mismatch means "not what we verified".
         got=$(shasum -a 256 python.tar.gz | cut -d' ' -f1)
@@ -252,7 +344,6 @@ say STEP "checking the packages import"
 # THE check, and the only one that has ever told the truth about an interpreter:
 # run it and import. Version, path and code signature all agreed this morning while
 # the import failed on library validation.
-ERR=/tmp/appletd_import_err
 if ! PYTHONPATH="$SITE" "$PYTHON" -c "import objc, numpy" 2>"$ERR"; then
     say FAIL "pyobjc will not import: $(tr '\n' ' ' < "$ERR" | tail -c 200)"
     exit 5
@@ -262,7 +353,7 @@ fi
 if [ "$WANT_MODEL" = "yes" ]; then
     PKG="$ROOT/%(models_dir)s/%(model_package)s"
     WEIGHT="$PKG/%(weight_path)s"
-    if [ -f "$WEIGHT" ] && [ "$(wc -c < "$WEIGHT")" -gt %(weight_min)d ]; then
+    if [ -f "$WEIGHT" ] && [ "$(wc -c < "$WEIGHT")" -eq %(weight_bytes)d ]; then
         say STEP "the model is already here"
     else
         say STEP "downloading the depth model (47 MB)"
@@ -307,24 +398,31 @@ def render_script(root: str, version: str, requirements: Iterable[str],
     for relative in MODEL_FILES:
         # No -s on any of them: a 47 MB download with no progress bar looks like a
         # hang, and this output is what the panel is showing.
-        curls.append('        curl -fL --progress-bar -o "$PKG/%s" "%s/%s"'
-                     % (relative, base, relative))
+        curls.append('        curl -fL $CURL_LIMITS --progress-bar -o "$PKG/%s" '
+                     '"%s/%s"'
+                     % (_plain("MODEL_FILES entry", relative), base,
+                        _plain("MODEL_FILES entry", relative)))
+    # QUOTED, every one that a user can reach: `root` is the install root typed into
+    # the panel and `python` is `Sidecarpython`. The rest are module constants, so
+    # they go through `_plain` instead - checked rather than quoted, because they sit
+    # inside a longer double-quoted word in the template and cannot carry quotes of
+    # their own.
     return INSTALL_SCRIPT % {
-        "root": root,
-        "python": python,
-        "python_url": PYTHON_URL,
-        "python_sha": PYTHON_SHA256,
-        "python_bin": PYTHON_BIN,
-        "site_packages": SITE_PACKAGES,
-        "requirements": " ".join('"%s"' % r for r in requirements),
-        "want_model": "yes" if want_model else "no",
-        "models_dir": MODELS_DIRNAME,
-        "model_package": MODEL_PACKAGE,
-        "weight_path": MODEL_FILES[-1],
-        "weight_min": MODEL_WEIGHT_MIN_BYTES,
+        "root": sh_quote(root),
+        "python": sh_quote(python),
+        "python_url": sh_quote(PYTHON_URL),
+        "python_sha": sh_quote(PYTHON_SHA256),
+        "python_bin": _plain("PYTHON_BIN", PYTHON_BIN),
+        "site_packages": _plain("SITE_PACKAGES", SITE_PACKAGES),
+        "requirements": " ".join(sh_quote(r) for r in requirements),
+        "want_model": sh_quote("yes" if want_model else "no"),
+        "models_dir": _plain("MODELS_DIRNAME", MODELS_DIRNAME),
+        "model_package": _plain("MODEL_PACKAGE", MODEL_PACKAGE),
+        "weight_path": _plain("MODEL_FILES[-1]", MODEL_FILES[-1]),
+        "weight_bytes": MODEL_WEIGHT_BYTES,
         "model_curls": "\n".join(curls),
-        "stamp": STAMP_NAME,
-        "version": version,
+        "stamp": _plain("STAMP_NAME", STAMP_NAME),
+        "version": sh_quote(version),
     }
 
 
@@ -567,18 +665,33 @@ def write_stamp(root: str, version: str, python: str) -> str:
     return path
 
 
+def packages_present(root: str) -> bool:
+    """Are the Python packages really there, or just their directory?
+
+    The two that `_VERIFY_IMPORTS` names, because they are the two whose absence stops
+    the sidecar: `objc` is the whole point and `numpy` is what `appletd.pins` needs.
+    Directories rather than an import, because `probe` runs on the main thread when
+    the component loads and must not spawn anything - `verify_interpreter` is the
+    slow, honest version of this question and has its own button.
+    """
+    site = os.path.join(root, SITE_PACKAGES)
+    return all(os.path.isdir(os.path.join(site, name))
+               for name in PACKAGE_MARKERS)
+
+
 def model_present(root: str) -> bool:
     """Is the depth model really there, weights and all?
 
     NOT `isdir(models)`, which was the old test: an interrupted download leaves the
     directory and a truncated `weight.bin`, and Core ML then fails to load a model
-    that looks installed. `MODEL_WEIGHT_MIN_BYTES` exists for exactly this and the
+    that looks installed. `MODEL_WEIGHT_BYTES` exists for exactly this and the
     installer's own shell already checks it - this is the same question asked from
-    Python so the panel can answer it too.
+    Python so the panel can answer it too. The same EXACT size on both sides, so the
+    two never disagree about whether a download finished.
     """
     weight = os.path.join(root, MODELS_DIRNAME, MODEL_PACKAGE, MODEL_FILES[-1])
     try:
-        return os.path.getsize(weight) >= MODEL_WEIGHT_MIN_BYTES
+        return os.path.getsize(weight) == MODEL_WEIGHT_BYTES
     except OSError:
         return False
 
@@ -593,6 +706,12 @@ def probe(root: str = DEFAULT_INSTALL_ROOT, wanted_version: str = "") -> Install
     The states, and each is a fact rather than a guess:
         missing        no stamp, so nothing has ever been installed here
         incomplete     a stamp, but a module, the packages or the model is absent.
+                       "The packages" used to mean `isdir(site-packages)`, which an
+                       EMPTY directory satisfies - and pip creates the `--target`
+                       directory before it does anything that can fail. So a pip that
+                       died on a proxy, over a previous good install whose stamp was
+                       still there, read `installed`: the button went grey and the
+                       sidecar died on `import objc` with nothing connecting the two.
                        THE MODEL COUNTS - it was computed here and
                        then left out of this decision, so an install with no model
                        read "installed", which disables the Install button. Turning
@@ -607,7 +726,7 @@ def probe(root: str = DEFAULT_INSTALL_ROOT, wanted_version: str = "") -> Install
     package_dir = os.path.join(root, "appletd")
     present = sum(1 for module in RUNTIME_MODULES
                   if os.path.exists(os.path.join(package_dir, module + ".py")))
-    packages = os.path.isdir(os.path.join(root, SITE_PACKAGES))
+    packages = packages_present(root)
     model = model_present(root)
     version = None
     if stamp is not None:

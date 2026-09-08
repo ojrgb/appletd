@@ -561,14 +561,6 @@ def _verify_hysteresis(comp):
     return problems
 
 
-def _keep_layout(master):
-    """Has the user asked the builders to leave their node arrangement alone?
-
-    `getattr` with a default, because this parameter is younger than several of the
-    builders and a COMP built before it existed must still build rather than raise.
-    """
-    par = getattr(master.par, "Keeplayout", None)
-    return bool(par is not None and par.eval())
 
 
 def _place(node, xy, keep, existed):
@@ -618,6 +610,49 @@ def _clear_keeping_ports(td, group, ports):
     return kept
 
 
+def _check_latches():
+    """Every name in the `LATCHES` table must be a name something else answers to.
+
+    THE SILENT FAILURE THIS IS FOR. The generated threshold writer looks its
+    parameter up with `getattr(comp.par, pair[column], None)` and skips a miss - so a
+    mistyped `Pinchon` writes nothing, the Constant CHOP keeps its 0, and the latch
+    engages below zero, which is never. No error, no red node, one gesture that
+    simply does not work. The distance and validity columns fail the same way
+    further downstream: a Select CHOP with no matching channel is empty, not angry.
+
+    Pure - it reads `appletd.tuning` and `appletd.spaces` and raises. Called from
+    `main()` at build and from `appletd/tests/test_build_guards.py`, because a guard
+    that only runs inside TouchDesigner only runs where the damage is already done.
+    """
+    from appletd import temporal
+    from appletd.derive import derive
+    from appletd.spaces import channel_roles
+    from appletd.tuning import THRESHOLD_DEFAULTS as DEFAULTS
+
+    # What a latch may WATCH: the hands contract plus everything derive() and
+    # temporal actually publish, asked of them rather than classified.
+    available = dict.fromkeys(channel_roles("hands"), 0.0)
+    universe = set(available) | set(derive(available)) | set(temporal.channel_names())
+
+    problems = []
+    for row in LATCHES:
+        working, distance, valid, on, off = row[0], row[1], row[2], row[3], row[4]
+        for name in (distance, valid):
+            if name not in universe:
+                problems.append(
+                    "latch %r watches %r, which nothing publishes - the Select CHOP "
+                    "would be empty and the latch would never fire" % (working, name))
+        for name in (on, off):
+            if name not in DEFAULTS:
+                problems.append(
+                    "latch %r uses threshold %r, which is not in tuning."
+                    "THRESHOLD_DEFAULTS - the writer skips it silently and the "
+                    "Constant CHOP keeps its 0" % (working, name))
+    if problems:
+        raise RuntimeError("LATCHES has %d broken reference(s):\n  %s"
+                           % (len(problems), "\n  ".join(problems)))
+
+
 def main():
     global THRESHOLD_DEFAULTS
     import td
@@ -641,9 +676,12 @@ def main():
         del sys.modules[stale]
     # One table, shared with the tests. Its import-time self-check refuses a
     # threshold pair with no dead band, which is a build that would chatter.
-    from appletd.td_layout import master_xy, stream_xy
+    from appletd.td_layout import ensure, keep_layout, master_xy, stream_xy
     from appletd.tuning import THRESHOLD_DEFAULTS as DEFAULTS
     THRESHOLD_DEFAULTS = DEFAULTS
+    # BEFORE anything is built, so a broken reference stops here rather than
+    # producing a bank in which one latch quietly never fires.
+    _check_latches()
 
     master = op(MASTER_PATH)
     comp = op(COMP_PATH)
@@ -682,7 +720,7 @@ def main():
         print("   (unfroze `%s` to build it - td_add_groups.py sets the final "
               "state)" % GROUP)
     kept = _clear_keeping_ports(td, group, ("in1", "in2", "out1"))
-    _place(group, stream_xy(GROUP), _keep_layout(master), group_existed)
+    _place(group, stream_xy(GROUP), keep_layout(master), group_existed)
     group.color = (0.5, 0.35, 0.45)
     removed = 0
     for child in list(comp.children):
@@ -1014,9 +1052,8 @@ def main():
     # On the MASTER, because that is where the parameters it watches live - a
     # Parameter Execute DAT fires for the COMP named in `par.op`, and naming the
     # stream would mean watching parameters that are not there.
-    threshold_dat = master.op("lat_threshold_callbacks") or master.create(
-        td.parameterexecuteDAT, "lat_threshold_callbacks")
-    threshold_dat.nodeX, threshold_dat.nodeY = master_xy("lat_threshold_callbacks")
+    threshold_dat = ensure(master, td.parameterexecuteDAT, "lat_threshold_callbacks",
+                     master_xy("lat_threshold_callbacks"), keep_layout(master))
     threshold_dat.text = THRESHOLD_CALLBACK % {
         "rows": [(row[3], row[4]) for row in LATCHES], "group": GROUP,
         "stream": comp.name}

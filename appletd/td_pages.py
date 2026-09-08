@@ -27,6 +27,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from appletd.td_layout import MAX_PINS
+
 # The page order, top to bottom. `About` last because it is the only page that is not
 # about running the thing.
 PAGE_ORDER: Final = ("General", "Hands", "Body Pose", "Face", "Segmentation Mask",
@@ -91,7 +93,8 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
         ("", ("Streamdepth",)),
         ("Pins", ("Depthpinson", "Depthpincount", "Depthpinsdraw",
                   *("Depthpin%d%s" % (row, axis)
-                    for row in range(1, 9) for axis in ("x", "y", "m")))),
+                    for row in range(1, MAX_PINS + 1)
+                    for axis in ("x", "y", "m")))),
         ("Output", ("Depthfit", "Depthwindownear", "Depthwindowfar", "Depthunits",
                     "Depthsourcew", "Depthsourceh")),
         ("This frame's fit", ("Depthfitalpha", "Depthfitbeta", "Depthfitpins",

@@ -444,9 +444,20 @@ def freeze(comp=None):
 
 
 def apply_freeze(token):
-    """The scheduled half of `freeze`. Declines if a later press superseded it."""
+    """The scheduled half of `freeze`. Declines if a later press superseded it.
+
+    OR IF CAPTURE HAS STOPPED since it was armed. `tick_countdown` already treats
+    `Active` going off as "this can no longer happen" and puts the real state back -
+    so without the same check here the countdown says Stopped and the freeze lands
+    anyway, locking five outputs with nothing on the panel to explain it. The two
+    halves have to agree about the precondition.
+    """
     comp = op(%(comp)r)
     if comp is None or int(comp.fetch("freeze_token", 0)) != token:
+        return 0
+    live = getattr(comp.par, "Active", None)
+    if live is not None and not bool(live.eval()):
+        set_state(comp)
         return 0
     return _freeze_now(comp)
 
@@ -602,6 +613,12 @@ def ensure_running(comp=None):
     thaw(comp)
     if set_state(comp) == "Running":
         return "Running"
+    # ANY OTHER STATE STARTS ONE, including "Not Ours". A sidecar somebody left in a
+    # terminal used to be adopted - `set_state` said Running because the machine-wide
+    # pgrep found it and the launch signature saved in the .toe happened to match -
+    # so this returned without starting anything and every flag on the panel
+    # described a process that did not exist. `start()` stops first, machine-wide,
+    # which is what makes taking over possible at all.
     comp.par.Capturepid = start()
     return set_state(comp)
 
@@ -612,8 +629,20 @@ def start():
     Stop-first for the same reason engine.start() does it: two processes holding
     one camera is the failure DESIGN.md 8 names, and it is easy to reach by
     pressing a button twice.
+
+    AND IT REFUSES rather than starting a second one. `stop()` used to be advisory -
+    it printed when a process outlived its deadline and returned anyway, and this
+    went on to `Popen`. Two sidecars then wrote one seqlock buffer with independent
+    `seq` counters, which no reader can detect: every check is against whichever
+    writer wrote last. Returns 0, which is the "no pid" the caller already handles.
     """
     stop()
+    survivors = running_pids()
+    if survivors:
+        print("[appletd] NOT starting: %%d sidecar(s) still running (%%s). Two "
+              "writers on one buffer publish torn frames that read as coherent."
+              %% (len(survivors), " ".join(str(p) for p in survivors)))
+        return 0
     # The toggle reaches the sidecar as a LAUNCH FLAG, read once at startup.
     # That is the whole mechanism, and it is why the toggle says "restart to
     # apply": the sidecar is a separate process and there is no control channel
@@ -747,6 +776,22 @@ def start():
         # now and gone in milliseconds; this is what turns that into a status.
         run("op(%(comp)r).op('sidecar_control').module.check_started()",
             delayMilliSeconds=1200)
+        # AND RE-TRIM ONCE THE NEW CHANNELS HAVE ARRIVED.
+        #
+        # The output trim is a Select with a KEEP LIST, and that list is rebuilt when
+        # a TOGGLE changes - which is the wrong moment. Switching a stream on fires
+        # the callback immediately, while the channels it turns on do not exist until
+        # this process has restarted and sent its first frame. So the list is computed
+        # against the OLD channel set, and the new stream's channels are missing from
+        # the output until something else happens to move a parameter.
+        #
+        # A DELAY AND NOT AN EVENT, and it is a heuristic: nothing here can watch an
+        # OSC In CHOP's channel count, and a Parameter Execute only sees parameters.
+        # Three seconds clears the camera's ~1.5 s warm-up with room. Re-trimming when
+        # nothing changed is cheap and idempotent, so being early costs a rebuild of a
+        # list rather than a wrong one.
+        run("op(%(comp)r).op('groups_callbacks').module._apply_gating("
+            "op(%(comp)r))", delayMilliSeconds=3000)
     # The ports each stream lands on, printed because "which port is pose on" is
     # the first question when the pose COMP shows no channels.
     print("[appletd]   hands -> %%d   pose -> %%d   face -> %%d  (base + 0/1/2)"
@@ -866,9 +911,13 @@ def depth_pins(comp):
 def stop():
     """Stop every running sidecar. Returns how many were stopped.
 
-    SIGTERM, not SIGKILL: the sidecar handles SIGTERM by stopping its capture
-    session properly, and killing it outright would leave the camera to be
-    reclaimed by the OS rather than released (DESIGN.md 8).
+    SIGTERM FIRST, and SIGKILL a second later if that was ignored. The sidecar
+    handles SIGTERM by stopping its capture session properly, and killing it outright
+    leaves the camera to be reclaimed by the OS rather than released (DESIGN.md 8) -
+    so SIGTERM is what we ask with. But a process that has declined to leave after a
+    second is worse than an ungracefully closed camera: `start()` used to launch a
+    second sidecar beside it, and two writers on one seqlock buffer publish torn
+    frames that every reader check calls coherent.
     """
     pids = running_pids()
     for pid in pids:
@@ -899,8 +948,39 @@ def stop():
             break
         time.sleep(0.02)
     else:
-        print("[appletd] %%d process(es) still running 1 s after SIGTERM - the "
-              "status will say so rather than assume" %% len(running_pids()))
+        # SIGKILL, AND THEN LOOK AGAIN. Printing and carrying on was not enough:
+        # `start()` calls this and then `Popen`s regardless, so a sidecar that
+        # outlived the second went on writing the SAME seqlock buffer as the new one,
+        # with its own `seq` counter. The reader's four checks all pass, because all
+        # four are against the new writer's counter, and a torn image is published as
+        # coherent. On the depth buffer the `aux` carries the affine fit, so a fit
+        # from one process pairs with pixels from the other - the exact failure
+        # `_write_depth` exists to prevent.
+        #
+        # Two presses of Restart inside 1.5 s reaches it, and so does a `Cameraflip`
+        # during the camera's warm-up, because that calls `restart()` directly.
+        #
+        # SIGTERM is still what we ASK with - it lets the sidecar release the camera
+        # properly (DESIGN.md 8). SIGKILL is what we insist with, one second later,
+        # for a process that has already declined to leave.
+        stubborn = running_pids()
+        for pid in stubborn:
+            print("[appletd] pid %%d ignored SIGTERM for 1 s - SIGKILL" %% pid)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                print("[appletd] cannot kill pid %%d - not ours" %% pid)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            if not running_pids():
+                break
+            time.sleep(0.02)
+        else:
+            print("[appletd] %%d process(es) SURVIVED SIGKILL - refusing to start "
+                  "another, because two writers on one buffer publish torn frames "
+                  "that every reader check calls coherent" %% len(running_pids()))
     return len(pids)
 
 
@@ -1006,12 +1086,15 @@ def refresh_cameras(comp=None, want=None):
 # other - the mistake that launched the sidecar without `depth` while the panel said
 # otherwise.
 def launch_pars(comp):
-    names = ["Camera", "Inputmode", "Framesbuffer",
+    names = ["Camera", "Cameraflip", "Inputmode", "Framesbuffer",
              "Slotassign", "Oscport", "Segquality", "Multiperson",
              "Flowaccuracy", "Flowbuffer",
              "Maskbuffer", "Depthbuffer", "Depthpinson", "Depthpincount"]
     names += [par_name for _n, par_name in REQUEST_TOGGLES]
-    for index in range(1, 9):
+    # `%(max_pins)d`, not a 9 typed here. Three files had that 9 and one had the
+    # definition, so raising the pin count would have built a panel with rows this
+    # signature never looked at - a pin moved, no "Requires Restart", nothing said.
+    for index in range(1, %(max_pins)d + 1):
         names += ["Depthpin%%d%%s" %% (index, suffix) for suffix in ("x", "y", "m")]
     return [n for n in names if hasattr(comp.par, n)]
 
@@ -1074,13 +1157,28 @@ def set_state(comp=None):
     HOW EACH STATE IS DECIDED, and the honesty matters because a status light that
     lies is worse than no light:
 
-      Stopped           no process matching the sidecar is running. Checked with
+      Stopped           no sidecar at all is running on this machine. Checked with
                         pgrep, so this is the real thing and not the toggle's opinion.
-      Requires Restart  a process IS running, but a launch flag has changed since it
-                        started - so the panel and the process disagree. This is the
-                        state that is otherwise invisible - a launch flag moved and
-                        nothing says the process has not seen it.
-      Running           a process is running and its launch flags still match.
+      Not Ours          a sidecar IS running and it is not the one this component
+                        started. See below - this state exists because its absence
+                        was a lie.
+      Requires Restart  OUR process is running, but a launch flag has changed since
+                        it started - so the panel and the process disagree. This is
+                        the state that is otherwise invisible - a launch flag moved
+                        and nothing says the process has not seen it.
+      Running           our process is running and its launch flags still match.
+
+    WHY "OURS" HAS TO BE ASKED. `running_pids()` is machine-wide on purpose, so Stop
+    can stop a sidecar started from a terminal - that is the deliberate part and it
+    stays. But pairing a machine-wide answer with a launch signature stored in THIS
+    COMP, which persists into the `.toe`, made a sidecar left running in a terminal
+    read as `Running` the moment the saved signature happened to match. `ensure_
+    running` then declined to start anything, the `sc_*` channels arrived on the same
+    port so uptime climbed, and the panel looked healthy while every launch flag on
+    it described a process that did not exist. Two TouchDesigner instances holding
+    the component did the same to each other.
+
+    `Capturepid` was already being written and never read. It is read now.
 
     Called on every launch-flag change and on every button. NOT on a timer: pgrep
     costs milliseconds, which is nothing on a change and rude every frame. So a
@@ -1090,12 +1188,20 @@ def set_state(comp=None):
     comp = comp or op(%(comp)r)
     if comp is None:
         return "Stopped"
-    if not running_pids():
+    pids = running_pids()
+    ours = int(comp.par.Capturepid.eval()) if hasattr(comp.par, "Capturepid") else 0
+    if not pids:
         # WITH THE REASON, when the log gave one. "Stopped" on its own is true and
         # useless - it was the answer while a rejected launch flag sat unread in the
         # log for twenty minutes.
         reason = comp.fetch("failure_reason", "")
         state = ("Stopped - %%s" %% reason) if reason else "Stopped"
+    elif ours not in pids:
+        # SOMEBODY ELSE'S. Named rather than folded into "Running", because the two
+        # need opposite actions: ours wants a restart, theirs wants Stop pressed or
+        # the other TouchDesigner closed. `Stop` still reaches it - that is
+        # machine-wide by design - so the way out is on the panel.
+        state = "Not Ours - pid %%s" %% " ".join(str(pid) for pid in pids[:3])
     elif comp.fetch("launch_signature", None) != launch_signature(comp):
         state = "Requires Restart"
     else:
@@ -1404,6 +1510,14 @@ OTHER_BUILDERS_OWN = {
     "install_control": "td_add_install.py",
     "install_callbacks": "td_add_install.py",
     "install_start": "td_add_install.py",
+    # The About page's two DATs. THESE WERE MISSING, and it was not hypothetical: the
+    # .toe as saved had all four About pulses on the master with neither DAT behind
+    # them, so Check For Update, Apply Update, Open In Browser and Licence did
+    # nothing at all. A master rebuild had eaten them, `about` is not pulled in by
+    # anything, and a pulse with no Parameter Execute watching it fails silently -
+    # there is no error to see and no cook to notice.
+    "about_control": "td_add_about.py",
+    "about_callbacks": "td_add_about.py",
 }
 # How a nested operator reaches a parameter on this COMP. Same form every builder
 # uses, and it is depth-independent - see the module docstring.
@@ -1580,8 +1694,10 @@ def main():
     )
     from appletd.td_layout import (
         COL_W,
+        MAX_PINS,
         OUTPUT_ORDER,
         PACKAGE_ROOT_SOURCE,
+        keep_layout,
         master_xy,
         rewire_master_chain,
         stream_row,
@@ -1651,6 +1767,17 @@ def main():
             # not recognise, and these were hand-built first and would have been
             # deleted by the next chain run.
             | {"renderchange", "camchange"})
+    # WHERE THINGS WERE, taken BEFORE the destroy loop. This builder recreates its
+    # own operators - `sidecar_control`, `sidecar_callbacks`, `status` and the rest -
+    # rather than reusing them, so by the time each is placed there is nothing left
+    # to ask where it used to be, and `Keeplayout` could not hold them however it was
+    # written. Somebody who tidied the master network watched it un-tidy itself on
+    # every rebuild, which is precisely what that parameter promises not to do.
+    #
+    # Restored after creation, and only for a name that WAS here: a genuinely new
+    # operator is placed from the table, because "leave it alone" for something that
+    # has never existed means piling it wherever TouchDesigner dropped it.
+    was_at = {child.name: (child.nodeX, child.nodeY) for child in comp.children}
     for child in list(comp.children):
         if child.name not in kept:
             child.destroy()
@@ -2142,10 +2269,15 @@ def main():
              par_ortho.eval(), bool(par_smooth.eval())))
 
     # -- the three streams -------------------------------------------------
-    # Read once. Everything below that PERSISTS across a rebuild honours it; the
-    # loose DATs at the top level do not, because this script destroys and recreates
-    # them every run and there is nothing to preserve.
-    keep_layout = bool(par_keep.eval())
+    # Read once, and named `keep` so it does not shadow `keep_layout` - the shared
+    # helper the rest of the builders use, imported above.
+    #
+    # It used to say "the loose DATs at the top level do not honour this, because
+    # this script destroys and recreates them and there is nothing to preserve".
+    # That was true and it was the bug: `was_at` at the top of this function now
+    # remembers where they were BEFORE the destroy, and the restore pass at the end
+    # puts them back.
+    keep = bool(par_keep.eval())
     outputs = []
     for index, stream in enumerate(STREAM_NAMES):
         row = stream_row(index)
@@ -2153,7 +2285,7 @@ def main():
         osc_existed = osc is not None
         if osc is None:
             osc = comp.create(td.oscinCHOP, stream + "_osc")
-        _at(osc, (-4 * COL_W, row), keep_layout, osc_existed)
+        _at(osc, (-4 * COL_W, row), keep, osc_existed)
         # An EXPRESSION on `Oscport`, not a baked number: the port is a parameter
         # now, and the receiver has to follow it the moment it changes. The offset
         # comes from the package (DESIGN.md 6.4), so the receiver cannot end up
@@ -2174,8 +2306,8 @@ def main():
         # an existing one alike. Otherwise a layout change reaches new projects only
         # - which is how the master and the streams ended up laid out to two
         # different conventions at once.
-        _place_shell(td, child, stream, keep_layout)
-        _at(child, (-2 * COL_W, row), keep_layout, child_existed)
+        _place_shell(td, child, stream, keep)
+        _at(child, (-2 * COL_W, row), keep, child_existed)
         child.color = (0.35, 0.45, 0.55)
         child.inputConnectors[0].connect(osc)
 
@@ -2196,7 +2328,7 @@ def main():
     merge_existed = merge is not None
     if merge is None:
         merge = comp.create(td.mergeCHOP, "merge_streams")
-    _at(merge, master_xy("merge_streams"), keep_layout, merge_existed)
+    _at(merge, master_xy("merge_streams"), keep, merge_existed)
     for _attempt in range(16):
         if not merge.inputs:
             break
@@ -2239,7 +2371,7 @@ def main():
         # Set on creation only, so the list it wrote survives a rebuild of the shell.
         empty.par.channames = "*"
         empty.bypass = True
-    _at(empty, master_xy("trim_empty"), keep_layout, empty_existed)
+    _at(empty, master_xy("trim_empty"), keep, empty_existed)
     empty.color = (0.5, 0.32, 0.32)
     # NOT wired to the merge directly any more. Four builders own a stage of the
     # master's data path, so the order lives in
@@ -2259,13 +2391,13 @@ def main():
     if house_sel is None:
         house_sel = comp.create(td.selectCHOP, "housekeeping_sel")
         house_sel.par.channames = ""
-    _at(house_sel, master_xy("housekeeping_sel"), keep_layout, house_sel_existed)
+    _at(house_sel, master_xy("housekeeping_sel"), keep, house_sel_existed)
     house_sel.inputConnectors[0].connect(merge)
     house = comp.op("housekeeping")
     house_existed = house is not None
     if house is None:
         house = comp.create(td.nullCHOP, "housekeeping")
-    _at(house, master_xy("housekeeping"), keep_layout, house_existed)
+    _at(house, master_xy("housekeeping"), keep, house_existed)
     house.inputConnectors[0].connect(house_sel)
     # Cook Type = Selective, the default, so it costs nothing until something looks.
     house.comment = ("the channels out1 does not carry: sc_*, seq, age_ms. "
@@ -2275,7 +2407,7 @@ def main():
     out_existed = out is not None
     if out is None:
         out = comp.create(td.outCHOP, "out1")
-    _at(out, master_xy("out1"), keep_layout, out_existed)
+    _at(out, master_xy("out1"), keep, out_existed)
     # The connector number, pinned - see appletd/td_layout.py OUTPUT_ORDER.
     out.par.connectorder = OUTPUT_ORDER["out1"]
     # PRESERVED, never recreated - an Out CHOP IS the COMP's output connector, and
@@ -2329,7 +2461,8 @@ def main():
     control.nodeX, control.nodeY = master_xy("sidecar_control")
     control.text = SIDECAR_CONTROL_SOURCE % {
         "resolver": PACKAGE_ROOT_SOURCE, "port": OSC_PORT,
-        "comp": comp.path, "request_toggles": REQUEST_TOGGLES}
+        "comp": comp.path, "request_toggles": REQUEST_TOGGLES,
+        "max_pins": MAX_PINS}
 
     callbacks = comp.create(td.parameterexecuteDAT, "sidecar_callbacks")
     callbacks.nodeX, callbacks.nodeY = master_xy("sidecar_callbacks")
@@ -2351,7 +2484,7 @@ def main():
     # DAT's `pars` is a pattern list and naming one that does not exist is harmless.
     watched += ["Depthpinson", "Depthpincount"]
     watched += ["Depthpin%d%s" % (index, suffix)
-                for index in range(1, 9) for suffix in ("x", "y", "m")]
+                for index in range(1, MAX_PINS + 1) for suffix in ("x", "y", "m")]
     callbacks.par.pars = " ".join(dict.fromkeys(watched))
     callbacks.par.active = True
     callbacks.par.onpulse = True
@@ -2499,6 +2632,21 @@ def main():
         # whatever it had and `Refresh Camera List` is one click away.
         print("   (could not enumerate devices: %r - press Refresh Camera List)"
               % (problem,))
+
+    # PUT THEM BACK, last, after every operator this builder makes exists. See
+    # `was_at` above: the ones this script recreates rather than reuses had no
+    # position to preserve at the moment they were placed, so `Keeplayout` is applied
+    # here instead, from the snapshot taken before the destroy.
+    if keep_layout(comp):
+        restored = 0
+        for child in comp.children:
+            previous = was_at.get(child.name)
+            if previous is not None and (child.nodeX, child.nodeY) != previous:
+                child.nodeX, child.nodeY = previous
+                restored += 1
+        if restored:
+            print("   Keep Layout: %d operator(s) put back where you had them"
+                  % restored)
 
     print("   Reference a fingertip as:  op('%s/hands')['h0_index_tip_tx']"
           % comp.path)

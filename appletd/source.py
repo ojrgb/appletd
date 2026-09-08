@@ -328,6 +328,9 @@ class InProcessSource:
         """
         self._slot_mode = slot_mode
         self._streams = streams
+        # What `start()` managed to build, filled in there. Empty here rather than
+        # equal to `streams`, so nothing reports a stream as live before a start.
+        self._started: tuple[str, ...] = ()
         # The MASK's destination, injected. This module does not own it and does not
         # import `maskbuf` - a mask goes to a shared buffer rather than into a
         # LatestBox, because a box is for something TouchDesigner PULLS on its own
@@ -347,6 +350,10 @@ class InProcessSource:
         self._frames_path = frames_path
         self._frames_stop: threading.Event | None = None
         self._frames_thread: threading.Thread | None = None
+        # Held by the reader thread around the ONE call that reaches into the engine.
+        # `stop()` takes it to know that no frame is inside the engine before it
+        # begins tearing that engine down - see `_stop_frame_reader`.
+        self._frames_submitting: threading.Lock | None = None
         # DEPTH's destination and its configuration. The PINS live here rather than in
         # the detector's defaults because they are a property of the ROOM, not of the
         # model - and a default pin list that silently produced metres for somebody
@@ -468,6 +475,18 @@ class InProcessSource:
                         pins=self._depth_pins, drop_m=self._depth_drop_m,
                         compute=self._depth_compute)
 
+            # WHAT WAS ACTUALLY BUILT, which is not the same as what was asked for.
+            # Three of these requests are dropped when they have no destination -
+            # `segment`, `flow` and `depth` above - and `_retained_errors` says so,
+            # but `streams_started` was returning `self._streams` and so published
+            # `sc_segment = 1` for a request that had not been made. Its own
+            # docstring promises the opposite (DESIGN.md 6.4).
+            self._started = tuple(
+                name for name in self._streams
+                if not (name == REQUEST_SEGMENT and seg_detector is None)
+                and not (name == REQUEST_FLOW and flow_detector is None)
+                and not (name == REQUEST_DEPTH and depth_detector is None))
+
             engine = HandEngine(
                 on_frame=self.box.publish,
                 hands=STREAM_HANDS in self._streams,
@@ -542,6 +561,7 @@ class InProcessSource:
         # from a tracking failure.
         self.frame_reader = reader
         stop_event = threading.Event()
+        submitting = threading.Lock()
 
         def pump() -> None:
             from appletd.frames import sample_buffer_from_bgra
@@ -561,28 +581,64 @@ class InProcessSource:
                     stop_event.wait(0.002)
                     continue
                 pixels, captured_at = newest
-                try:
-                    engine.submit_sample_buffer(
-                        sample_buffer_from_bgra(pixels, captured_at))
-                except Exception as exc:               # noqa: BLE001
-                    self._retained_errors.append("frame submit failed: %s" % exc)
-                    stop_event.wait(0.25)
+                # THE ONE CALL THAT REACHES INTO THE ENGINE, and the only thing the
+                # lock covers. Re-checking `stop_event` INSIDE it is what makes the
+                # barrier a barrier: a teardown that has set the event and taken the
+                # lock knows both that no frame is in the engine now and that none
+                # can enter, because the next pass through here is holding nothing
+                # and will see the flag.
+                with submitting:
+                    if stop_event.is_set():
+                        break
+                    try:
+                        engine.submit_sample_buffer(
+                            sample_buffer_from_bgra(pixels, captured_at))
+                    except Exception as exc:           # noqa: BLE001
+                        self._retained_errors.append("frame submit failed: %s" % exc)
+                        stop_event.wait(0.25)
             reader.close()
 
         thread = threading.Thread(target=pump, name="appletd-frames", daemon=True)
         thread.start()
         self._frames_stop = stop_event
         self._frames_thread = thread
+        self._frames_submitting = submitting
 
     def _stop_frame_reader(self) -> None:
+        """Stop the reader thread, and do not return while a frame is in the engine.
+
+        `stop()`'s own comment says this has to happen "before the engine, or a frame
+        can arrive mid-teardown" - and a bounded `join` does not deliver that. A
+        reader that had not finished in a second was simply left running, and
+        `engine.stop()` went ahead underneath it: `submit_sample_buffer` runs Vision
+        requests against detectors the stop is releasing, which is a segfault rather
+        than an exception.
+
+        So the join is still bounded - a reader that will not go must not hang
+        TouchDesigner - but a timeout falls through to the submit lock, which is the
+        actual barrier. Anything past both is recorded, because at that point the
+        guarantee is genuinely gone and saying so is all that is left.
+        """
         stop_event, thread = self._frames_stop, self._frames_thread
+        submitting = self._frames_submitting
         self._frames_stop, self._frames_thread = None, None
+        self._frames_submitting = None
         if stop_event is not None:
             stop_event.set()
         if thread is not None and thread.is_alive():
             # Bounded, like `stop()` in the launcher: a reader that will not go is
             # reported rather than waited on for ever.
             thread.join(timeout=1.0)
+        if thread is not None and thread.is_alive() and submitting is not None:
+            # It did not finish. Take the lock the pump holds around its submit: once
+            # this returns, no frame is inside the engine and none can enter, because
+            # the pump re-checks the stop event under the same lock.
+            if submitting.acquire(timeout=2.0):
+                submitting.release()
+            else:
+                self._retained_errors.append(
+                    "the TOP Input reader was still inside the engine 3 s after "
+                    "being told to stop; tearing down anyway")
 
     def stop(self) -> None:
         """Stop the engine and release it. Idempotent, and safe after a failed start.
@@ -609,6 +665,7 @@ class InProcessSource:
                 engine.stop()
             finally:
                 self._engine = None
+                self._started = ()
 
     def latest(self) -> LandmarkFrame:
         return self.box.latest()
@@ -642,8 +699,12 @@ class InProcessSource:
         is the distinction the sidecar's `sc_*` channels publish: a stream that
         was requested and failed to start must not report itself as live
         (DESIGN.md 6.4).
+
+        `_started`, not `_streams`: `segment`, `flow` and `depth` are each dropped
+        when nothing was given to publish them to, and this used to report them
+        anyway - which is the one thing the sentence above says it does not do.
         """
-        return self._streams if self.running else ()
+        return self._started if self.running else ()
 
     @property
     def running(self) -> bool:

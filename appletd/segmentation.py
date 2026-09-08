@@ -61,6 +61,12 @@ ONE_COMPONENT_8: Final = 0x4C303038
 VISION_DEFAULT_QUALITY: Final = "accurate"
 
 
+# A 256-byte lookup that is 1 where a SOFT mask says "more person than background".
+# `bytes.translate` does the whole frame in one pass of C; the comprehension it
+# replaces was 29.0 ms on a 1920x1080 mask against 6.4 for this.
+_ABOVE_HALF: Final = bytes(1 if value >= 128 else 0 for value in range(256))
+
+
 class MaskImage(NamedTuple):
     """One mask, un-padded and packed. `pixels` is `width * height` bytes.
 
@@ -85,10 +91,18 @@ class MaskImage(NamedTuple):
         A cheap sanity signal rather than a real measurement: it is what tells you
         the difference between "the mask is empty" and "the mask is the whole frame",
         both of which look like a plausible image and neither of which is useful.
+
+        THE TWO MASKS MEAN DIFFERENT THINGS BY A BYTE, which is what was wrong here.
+        A single-person mask is an alpha, 0..255, and half is the sensible line. An
+        INSTANCE mask is a person index, 1..4 - so a `>= 128` threshold made this
+        return 0.0 for every multi-person frame there has ever been, and the one
+        signal for "is this mask empty" said empty exactly when it was not.
         """
         if not self.pixels:
             return 0.0
-        return sum(1 for value in self.pixels if value >= 128) / len(self.pixels)
+        if self.people:
+            return (len(self.pixels) - self.pixels.count(0)) / len(self.pixels)
+        return self.pixels.translate(_ABOVE_HALF).count(1) / len(self.pixels)
 
 
 def verify_segmentation_support() -> None:

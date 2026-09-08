@@ -496,12 +496,18 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from appletd.td_layout import master_xy
+    from appletd.td_layout import ensure, keep_layout, master_xy
 
     comp = op(MASTER_PATH)
     if comp is None:
         print("FAIL no COMP at %s - run tools/td_build_vision.py first" % MASTER_PATH)
         return
+
+    # ONE call, so `Keeplayout` reaches every operator this builder places.
+    # Twenty-odd of them wrote nodeX/nodeY straight from the table, so
+    # tidying the master network and switching the parameter on lasted
+    # exactly until the next rebuild.
+    keep = keep_layout(comp)
 
     print("=" * 70)
     print("about: the page, and the updater, on %s" % comp.path)
@@ -575,14 +581,12 @@ def main():
               "Updatestate", "Applyupdate", "Updateetag", "Updatefound",
               "Notice1", "Notice2", "Notice3", "Openlicence")
 
-    control = comp.op(CONTROL) or comp.create(td.textDAT, CONTROL)
-    control.nodeX, control.nodeY = master_xy(CONTROL)
+    control = ensure(comp, td.textDAT, CONTROL, master_xy(CONTROL), keep)
     control.text = CONTROL_SOURCE % {"comp": comp.path, "magic": TOX_MAGIC,
                                      "min_bytes": TOX_MIN_BYTES,
                                      "licence": LICENCE_PATH}
 
-    callbacks = comp.op(CALLBACKS) or comp.create(td.parameterexecuteDAT, CALLBACKS)
-    callbacks.nodeX, callbacks.nodeY = master_xy(CALLBACKS)
+    callbacks = ensure(comp, td.parameterexecuteDAT, CALLBACKS, master_xy(CALLBACKS), keep)
     callbacks.text = CALLBACK_SOURCE % {"control": control.path}
     callbacks.par.op = comp.path
     callbacks.par.pars = ("Checkupdate Applyupdate Openrepository Openlicence")

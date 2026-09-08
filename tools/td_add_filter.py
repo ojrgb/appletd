@@ -204,7 +204,7 @@ def main():
         del sys.modules[stale]
     from appletd.spaces import passthrough_names, scope_pattern, smoothed_names
     from appletd.streams import STREAM_NAMES
-    from appletd.td_layout import master_xy, stream_xy
+    from appletd.td_layout import ensure, keep_layout, master_xy, stream_xy
 
     master = op(MASTER_PATH)
     if master is None:
@@ -228,14 +228,13 @@ def main():
         built.append(_build_one(td, master, child, stream,
                                 smoothed_names(stream), passthrough_names(stream),
                                 failures, scope_pattern(stream),
-                                stream_xy(GROUP), _keep_layout(master)))
+                                stream_xy(GROUP), keep_layout(master)))
 
     # One DAT for all three groups. Beside the streams rather than inside one, so it
     # keeps working if any group is rebuilt without it - and because a single toggle
     # driving three groups has no business living in one of them.
-    bypass_dat = master.op("filter_callbacks") or master.create(
-        td.parameterexecuteDAT, "filter_callbacks")
-    bypass_dat.nodeX, bypass_dat.nodeY = master_xy("filter_callbacks")
+    bypass_dat = ensure(master, td.parameterexecuteDAT, "filter_callbacks",
+                     master_xy("filter_callbacks"), keep_layout(master))
     bypass_dat.text = BYPASS_CALLBACK % {
         "streams": list(STREAM_NAMES), "group": GROUP, "prefix": PREFIX,
         "node": PREFIX + "smooth"}
@@ -270,14 +269,6 @@ def main():
         print("   then toggle Smoothing and compare")
 
 
-def _keep_layout(master):
-    """Has the user asked the builders to leave their node arrangement alone?
-
-    `getattr` with a default, because this parameter is younger than several of the
-    builders and a COMP built before it existed must still build rather than raise.
-    """
-    par = getattr(master.par, "Keeplayout", None)
-    return bool(par is not None and par.eval())
 
 
 def _place(node, xy, keep, existed):

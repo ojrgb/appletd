@@ -238,7 +238,30 @@ class MaskWriter:
         # 0600, since a mask of a person in a room is not world-readable data.
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            os.ftruncate(fd, self._capacity)
+            # GROW ONLY, NEVER SHRINK, and this is a crash rather than a tidiness
+            # rule. `O_CREAT` keeps an existing file's INODE, and `ftruncate` to a
+            # SMALLER size takes the pages out from under any reader already mapped
+            # to the old length. Touching one of them is SIGBUS - a signal, not an
+            # exception, so nothing can catch it and no traceback is written.
+            #
+            # REPRODUCED: map 1 MB, `ftruncate` to 4 KB on a second descriptor, touch
+            # offset 512 KB - the process dies with exit 138 (128 + SIGBUS).
+            #
+            # Both directions of that are reachable. A TOP whose resolution drops
+            # rebuilds this writer smaller and kills the SIDECAR reading it; a
+            # `Segquality` change from `accurate` to `fast` rebuilds it smaller and
+            # kills TOUCHDESIGNER, whose Script TOP reads it on the main thread.
+            #
+            # Growing is safe: a reader mapped to the old, shorter length simply does
+            # not see the new pages, and its `(st_ino, st_size)` identity check
+            # notices the change and remaps. A file LARGER than this frame needs is
+            # equally safe, because the header says how much of it is live - so the
+            # capacity becomes whatever the file already is.
+            existing = os.fstat(fd).st_size
+            if existing < self._capacity:
+                os.ftruncate(fd, self._capacity)
+            else:
+                self._capacity = existing
             # The magic goes down on the DESCRIPTOR, before the mapping exists.
             # MEASURED as a real race, not a theoretical one: between `ftruncate`
             # and the first header write the file is full-size and all zeros, and a

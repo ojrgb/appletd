@@ -54,20 +54,30 @@ def main():
                   if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
     from appletd.streams import DEFAULT_CAMERA_NAME
-    from appletd.td_layout import OUTPUT_ORDER, master_xy
+    from appletd.td_layout import (
+        OUTPUT_ORDER,
+        ensure,
+        keep_layout,
+        master_xy,
+    )
 
     comp = op(MASTER_PATH)
     if comp is None:
         print("no COMP at %s - run tools/td_build_vision.py first" % MASTER_PATH)
         return
 
+    # ONE call, so `Keeplayout` reaches every operator this builder places.
+    # Twenty-odd of them wrote nodeX/nodeY straight from the table, so
+    # tidying the master network and switching the parameter on lasted
+    # exactly until the next rebuild.
+    keep = keep_layout(comp)
+
     print("=" * 70)
     print("video: the camera image on %s" % comp.path)
     print("=" * 70)
 
     # -- the device ---------------------------------------------------------
-    video = comp.op(VIDEO_IN) or comp.create(td.videodeviceinTOP, VIDEO_IN)
-    video.nodeX, video.nodeY = master_xy(VIDEO_IN)
+    video = ensure(comp, td.videodeviceinTOP, VIDEO_IN, master_xy(VIDEO_IN), keep)
     # OPENED ONLY WHEN ASKED. This is a second client on the camera, so a project
     # that wants channels and no picture must not pay for it - and must not hold a
     # device open that something else might want.
@@ -117,8 +127,7 @@ def main():
     # sit wherever the two happened to disagree.
     #
     # Input 0 is the camera and 1 the frames, so the index is simply the mode.
-    source = comp.op(SOURCE) or comp.create(td.switchTOP, SOURCE)
-    source.nodeX, source.nodeY = master_xy(SOURCE)
+    source = ensure(comp, td.switchTOP, SOURCE, master_xy(SOURCE), keep)
     source.par.index.expr = "op.Appletd.par.Inputmode.eval() != 'camera'"
     source.inputConnectors[0].connect(video)
     frames = comp.op("in_frames")
@@ -139,22 +148,27 @@ def main():
     # This picture is different: TouchDesigner opens the camera itself, as a second
     # client, and this frame never goes near Vision. It is the one thing left to
     # mirror, and without it the overlay would sit on an unmirrored image.
-    flip = comp.op(FLIP) or comp.create(td.flipTOP, FLIP)
-    flip.nodeX, flip.nodeY = master_xy(FLIP)
+    flip = ensure(comp, td.flipTOP, FLIP, master_xy(FLIP), keep)
     flip.inputConnectors[0].connect(source)
     flip.par.flipx.expr = "op.Appletd.par.Cameraflip"
 
     # -- the composite ------------------------------------------------------
-    # Input 1 is the FOREGROUND. `tools/td_add_overlay.py` connects the overlay
-    # render there; with nothing connected this passes the camera through, which is
+    # THE CAMERA IS THE BACKGROUND, and on an Over TOP the background is the SECOND
+    # input - `inputConnectors[1]`, labelled "Input 2" in the parameter dialog.
+    # `tools/td_add_overlay.py` takes `inputConnectors[0]`, the foreground.
+    #
+    # Said in indices because the comment that was here said "Input 1 is the
+    # FOREGROUND. td_add_overlay.py connects the overlay render there" directly above
+    # the line that connects the CAMERA to index 1. Anyone acting on it would put the
+    # overlay where the camera goes and lose the camera from the composite.
+    #
+    # With no overlay connected this passes the camera straight through, which is
     # what `Output Video` on its own should do.
-    over = comp.op(OVER) or comp.create(td.overTOP, OVER)
-    over.nodeX, over.nodeY = master_xy(OVER)
+    over = ensure(comp, td.overTOP, OVER, master_xy(OVER), keep)
     over.inputConnectors[1].connect(flip)
 
     # -- the output ---------------------------------------------------------
-    out = comp.op(OUT) or comp.create(td.outTOP, OUT)
-    out.nodeX, out.nodeY = master_xy(OUT)
+    out = ensure(comp, td.outTOP, OUT, master_xy(OUT), keep)
     out.inputConnectors[0].connect(over)
     # LAST connector, and `apply_output_visibility` removes from the end inwards, so
     # this being 3 is what keeps the other three from renumbering when it goes.

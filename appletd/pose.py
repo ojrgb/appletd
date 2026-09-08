@@ -34,8 +34,10 @@ from appletd.pose_types import (
     MAX_BODIES,
     N_BODY_JOINTS,
     Body,
+    HumanRect,
     PoseFrame,
     order_bodies,
+    order_humans,
 )
 from appletd.streams import ORIENTATION_UP
 from appletd.types import (
@@ -172,10 +174,40 @@ def body_from_observation(observation: ObjCObject) -> Body | None:
     )
 
 
+def human_from_observation(observation: ObjCObject) -> HumanRect:
+    """One VNHumanObservation -> one HumanRect. Pure apart from the ObjC reads.
+
+    Thread: capture queue only.
+    Contract: normalised, origin BOTTOM LEFT exactly as Vision reports it, so `y` is
+              the BOTTOM edge (DESIGN.md 7). Never returns None: unlike a body there
+              are no per-joint reads to fail, so a rectangle Vision reports is one we
+              can publish.
+    Traps: CGRect's origin IS the bottom-left corner, and `boundingBox` is already
+              normalised - no flip and no scaling here. The same treatment the face's
+              box gets.
+    """
+    box = observation.boundingBox()
+    return HumanRect(
+        x=NormX(float(box.origin.x)),
+        y=NormY(float(box.origin.y)),
+        w=float(box.size.width),
+        h=float(box.size.height),
+        confidence=Confidence(float(observation.confidence())),
+        found=True)
+
+
 def pose_frame_from_observations(observations: list[ObjCObject], seq: int,
                                  captured_at: float, width_px: int,
-                                 height_px: int) -> PoseFrame:
-    """Observations -> one PoseFrame with exactly MAX_BODIES slots.
+                                 height_px: int,
+                                 rectangles: list[ObjCObject] | None = None
+                                 ) -> tuple[PoseFrame, int]:
+    """Observations -> one PoseFrame with exactly MAX_BODIES slots, and a count.
+
+    The count is how many observations could not be read. RETURNED rather than
+    raised: raising discarded the skeletons that WERE readable, so three people in
+    shot and one bad observation published none of them - and the comment on that
+    raise said it was placed after the loop so exactly that would not happen. The
+    caller records it, so nothing is dropped silently (STANDARDS.md 2).
 
     Thread: capture queue only.
     Contract: bodies is always MAX_BODIES long, ordered LEFT TO RIGHT by
@@ -199,16 +231,17 @@ def pose_frame_from_observations(observations: list[ObjCObject], seq: int,
             continue
         bodies.append(body)
 
-    if n_unreadable:
-        # A person detected and then lost between Vision and the channel list.
-        # Surfaced rather than swallowed (STANDARDS.md 2), and raised after the
-        # loop so one bad observation does not discard the good ones' work.
-        raise EngineError(
-            "%d body observation(s) had unreadable joint points and were dropped"
-            % n_unreadable)
-
-    return PoseFrame(seq=seq, captured_at=captured_at, width=width_px,
-                     height=height_px, bodies=order_bodies(bodies))
+    # `n_unreadable` goes back to the caller: a person detected and then lost
+    # between Vision and the channel list, surfaced rather than swallowed, without
+    # the people who WERE readable going with it.
+    return PoseFrame(
+        seq=seq, captured_at=captured_at, width=width_px, height=height_px,
+        bodies=order_bodies(bodies),
+        # A SEPARATE request's observations, ordered on their own. `human0` is the
+        # leftmost RECTANGLE and `p0` the leftmost SKELETON, and nothing pairs them -
+        # see `HumanRect`.
+        humans=order_humans([human_from_observation(rectangle)
+                             for rectangle in (rectangles or [])])), n_unreadable
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +268,20 @@ class PoseDetector:
     def __init__(self) -> None:
         self._sequence = Vision.VNSequenceRequestHandler.alloc().init()
         self._request = Vision.VNDetectHumanBodyPoseRequest.alloc().init()
+        # THE PERSON BOXES, in the SAME `performRequests` call as the skeletons.
+        #
+        # THAT SAVES NOTHING, and the tempting assumption is that it does. MEASURED
+        # over 35 fixture frames: body pose alone 3.91 ms, rectangles alone 2.68 ms,
+        # both in one call 6.82 ms. Vision does not share its analysis between these
+        # two requests, so the pair costs what the two cost - the marginal price of
+        # the boxes is 2.91 ms and `Streampose` pays it whether it wants them or not.
+        # One call is simply one place where the orientation and the error check are
+        # got right, rather than two.
+        #
+        # `upperBodyOnly` is left OFF: a box that stops at the waist is a different
+        # measurement, and nothing here asked for one.
+        self._rect_request = Vision.VNDetectHumanRectanglesRequest.alloc().init()
+        self.rect_revision = int(self._rect_request.revision())
         # Built BEFORE verifying, because the request is the authority on which
         # joints it supports - the strongest form of this check needs it alive.
         verify_body_joint_table(self._request)
@@ -246,6 +293,9 @@ class PoseDetector:
         # Bodies Vision found beyond MAX_BODIES, dropped after the left-to-right
         # sort. See _detect.
         self.n_bodies_dropped = 0
+        # How many observations the LAST detect could not read. Reported by the
+        # engine after a successful publish.
+        self.last_unreadable = 0
 
     def detect_sample_buffer(self, sample_buffer: ObjCObject, seq: int,
                              captured_at: float, width_px: int,
@@ -263,7 +313,8 @@ class PoseDetector:
         """
         return self._detect(
             lambda: self._sequence.performRequests_onCMSampleBuffer_orientation_error_(
-                [self._request], sample_buffer, orientation, None),    # TRAP: out-param
+                [self._request, self._rect_request],
+                sample_buffer, orientation, None),                # TRAP: out-param
             seq, captured_at, width_px, height_px)
 
     def detect_pixel_buffer(self, pixel_buffer: ObjCObject, seq: int,
@@ -280,7 +331,8 @@ class PoseDetector:
         """
         return self._detect(
             lambda: self._sequence.performRequests_onCVPixelBuffer_orientation_error_(
-                [self._request], pixel_buffer, orientation, None),     # TRAP: out-param
+                [self._request, self._rect_request],
+                pixel_buffer, orientation, None),                 # TRAP: out-param
             seq, captured_at, width_px, height_px)
 
     def _detect(self, perform: Callable[[], tuple[bool, ObjCObject]], seq: int,
@@ -299,10 +351,15 @@ class PoseDetector:
             raise EngineError("Vision body-pose performRequests failed: %s" % (err,))
 
         results = list(self._request.results() or [])
+        # EACH REQUEST'S OWN RESULTS. They went in as one list and they come back on
+        # the objects, not merged - reading `self._request.results()` alone would have
+        # published skeletons and no boxes, which is what it did until this was built.
+        rectangles = list(self._rect_request.results() or [])
         if len(results) > MAX_BODIES:
             # Counted, not silent: "a third person is in shot and is not in the
             # channels" is invisible otherwise, and this is the one number that
             # says whether MAX_BODIES is the right size for a room.
             self.n_bodies_dropped += len(results) - MAX_BODIES
-        return pose_frame_from_observations(results, seq, captured_at,
-                                            width_px, height_px)
+        frame, self.last_unreadable = pose_frame_from_observations(
+            results, seq, captured_at, width_px, height_px, rectangles)
+        return frame

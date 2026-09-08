@@ -258,10 +258,6 @@ def _tuning_page(master, Params):
     return len(made), made
 
 
-def _keep_layout(master):
-    """Has the user asked the builders to leave their node arrangement alone?"""
-    par = getattr(master.par, "Keeplayout", None)
-    return bool(par is not None and par.eval())
 
 
 def _place(node, xy, keep, existed):
@@ -348,7 +344,7 @@ def main():
     # One layout table for every builder - two of them once placed their group on the
     # same coordinate, and nothing could notice.
     from appletd.derive import Params
-    from appletd.td_layout import PACKAGE_ROOT_SOURCE, stream_xy
+    from appletd.td_layout import PACKAGE_ROOT_SOURCE, keep_layout, stream_xy
 
     comp = op(COMP_PATH)
     master = op(MASTER_PATH)
@@ -364,7 +360,7 @@ def main():
     if made:
         print("   %s" % ", ".join(existing))
 
-    keep = _keep_layout(op(MASTER_PATH) or comp)
+    keep = keep_layout(op(MASTER_PATH) or comp)
     existing = comp.op("derive_callbacks")
     callbacks = existing or comp.create(td.textDAT, "derive_callbacks")
     _place(callbacks, stream_xy("derive_callbacks"), keep, existing is not None)

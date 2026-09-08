@@ -172,7 +172,7 @@ def main():
         derived_companioned_names,
     )
     from appletd.streams import STREAM_NAMES
-    from appletd.td_layout import master_xy, rewire_master_chain
+    from appletd.td_layout import ensure, keep_layout, master_xy, rewire_master_chain
 
     master = op(MASTER_PATH)
     if master is None:
@@ -221,13 +221,12 @@ def main():
     arrived, produced, deletable = _build_one(
         td, master, STREAM_MERGED, companioned_names(STREAM_MERGED),
         derived_companioned_names(), engaged, failures,
-        master_xy(NODE), _keep_layout(master))
+        master_xy(NODE), keep_layout(master))
 
     wired = rewire_master_chain(master)
 
-    callbacks = master.op("screenspace_callbacks") or master.create(
-        td.parameterexecuteDAT, "screenspace_callbacks")
-    callbacks.nodeX, callbacks.nodeY = master_xy("screenspace_callbacks")
+    callbacks = ensure(master, td.parameterexecuteDAT, "screenspace_callbacks",
+                     master_xy("screenspace_callbacks"), keep_layout(master))
     callbacks.text = CALLBACK % {
         "node": NODE, "parameter": PARAMETER,
         "stream_terms": {k: list(v) for k, v in STREAM_TERMS.items()},
@@ -262,10 +261,6 @@ def main():
         print("   counter, confidence and angle.")
 
 
-def _keep_layout(master):
-    """Has the user asked the builders to leave their node arrangement alone?"""
-    par = getattr(master.par, "Keeplayout", None)
-    return bool(par is not None and par.eval())
 
 
 def _place(node, xy, keep, existed):
@@ -303,8 +298,12 @@ _SIMPLE = " ".join("*_%s" % a for a in _AXES)
 # character between `h` and `_`, and `hands_center_x` has four.
 _HANDS_LOOSE = " ".join(
     ["h?_[a-ce-z]*_%s" % a for a in _AXES]
-    + ["hands_*_%s" % a for a in ("x", "y")]
-    + ["index_*_%s" % a for a in ("x", "y")])
+    # `hands_center_*` and `index_center_*` BY NAME. `hands_*_x` also matches
+    # `hands_angle_x`, a two-hand ANGLE with no composed twin - so this pattern
+    # DELETED it and nothing replaced it. Same correction as
+    # `spaces._MERGED_CANDIDATES`.
+    + ["hands_center_%s" % a for a in ("x", "y")]
+    + ["index_center_%s" % a for a in ("x", "y")])
 
 # AND THE ONE THAT FITS, which uses NOTHING but `?` and `*`.
 #
@@ -341,8 +340,9 @@ _KEYPOINTS = ("eye_left", "eye_right", "nose_tip", "mouth")
 
 _HANDS = " ".join(
     ["h?_%s*_%s" % (head, axis) for axis in ("x", "y") for head in _HEADS]
-    + ["hands_*_%s" % a for a in ("x", "y")]
-    + ["index_*_%s" % a for a in ("x", "y")])
+    # By name, not `hands_*_x` - see `_HANDS_LOOSE`.
+    + ["hands_center_%s" % a for a in ("x", "y")]
+    + ["index_center_%s" % a for a in ("x", "y")])
 # AND THE MERGED ONE, which is what this operator actually gets since the coordinate
 # spaces moved to the master (BUILD_PLAN step 25). It is `_HANDS` plus pose, plus the
 # face's box, its 348 landmark points and its four key points - every raw channel with
@@ -373,8 +373,15 @@ _HANDS = " ".join(
 STREAM_TERMS = {
     "hands": [term for axis in ("x", "y") for term in
               ["h?_%s*_%s" % (head, axis) for head in _HEADS]
-              + ["hands_*_%s" % axis, "index_*_%s" % axis, "h?_vel_%s" % axis]],
-    "pose": ["p?_*_%s" % axis for axis in ("x", "y")],
+              + ["hands_center_%s" % axis, "index_center_%s" % axis,
+                 "h?_vel_%s" % axis]],
+    # `human?_bbox_*` as well as the joints. The person boxes ARE transformed
+    # (`spaces._MERGED_CANDIDATES`), so leaving them out here left the raw channel on
+    # the output beside its own `_tx` twin - and, more expensively, stopped the merged
+    # pattern verifying at all, which falls back to the 4.4 ms literal list below.
+    "pose": ([term for axis in ("x", "y") for term in
+              ["p?_*_%s" % axis, "human?_bbox_%s" % axis]]
+             + ["human?_bbox_w", "human?_bbox_h"]),
     "face": [term for axis in ("x", "y") for term in
              ["f?_bbox_%s" % axis,
               # A landmark carries a two-digit point index; a key point does not.

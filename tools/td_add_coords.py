@@ -322,14 +322,6 @@ def _attach_once(merge, node, drop_names=()):
     return removed
 
 
-def _keep_layout(master):
-    """Has the user asked the builders to leave their node arrangement alone?
-
-    `getattr` with a default, because this parameter is younger than several of the
-    builders and a COMP built before it existed must still build rather than raise.
-    """
-    par = getattr(master.par, "Keeplayout", None)
-    return bool(par is not None and par.eval())
 
 
 def _place(node, xy, keep, existed):
@@ -475,7 +467,7 @@ def main():
         transform_branches,
     )
     from appletd.streams import STREAM_NAMES
-    from appletd.td_layout import master_xy, rewire_master_chain
+    from appletd.td_layout import keep_layout, master_xy, rewire_master_chain
 
     master = op(MASTER_PATH)
     if master is None:
@@ -507,7 +499,7 @@ def main():
                        {"landmarks": box_branches(STREAM_MERGED),
                         "keypoints": keypoint_branches(STREAM_MERGED)},
                        box_expressions, failures,
-                       master_xy(GROUP), _keep_layout(master))
+                       master_xy(GROUP), keep_layout(master))
     if built is None:
         return
     operators, channels, renames = built

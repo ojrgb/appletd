@@ -6,7 +6,7 @@ I add to it as I build. Tick them off and tell me which failed.
 **Nothing here is a known bug.** These are the checks that need a camera, a person, or a
 judgement about how something looks — none of which I can do from a script.
 
-Current as of 2026-09-08, after the overlay skeletons and Camera Flip.
+Current as of 2026-09-08, after the housekeeping pass over the code review.
 
 ---
 
@@ -204,3 +204,42 @@ overlay should stay the right size against the image.
     untracked, so I leave it alone.
   * Rebuilding with `tools/td_build_vision.py` alone puts new parameters back on the
     General page. `tools/td_rebuild.py` runs the pages layer after it; run that instead.
+
+
+---
+
+## After the housekeeping pass (chore/v2-housekeeping)
+
+Everything in this section is already verified by the suite or against the running
+project; these are the parts that need a camera, a person, or your judgement about how
+something behaves. **The full chain was run and is idempotent** - 18 builders, 174
+parameters in and out, nothing added, nothing lost, nothing changed.
+
+**Restart capture before testing any of this.** The sidecar imports the installed
+package once, at launch, and yours has been running since before this pass. The panel
+will now tell you this itself after a future install - `Installed - ... - restart
+capture to run it` - but it cannot know about the one already running.
+
+- [ ] **The About page's four buttons.** They were doing nothing at all - a master
+      rebuild had eaten `about_control` and `about_callbacks`, and a pulse with no
+      Parameter Execute behind it fails silently. Check For Update, Open In Browser,
+      Licence and Apply Update should all now do something.
+- [ ] **`Keep Layout`.** Rearrange the master network however you like, switch it on,
+      rebuild. Everything should stay where you put it - including `sidecar_control`
+      and the other DATs the master destroys and recreates, which never honoured it
+      before. Verified here with three operators; your arrangement is a better test.
+- [ ] **`Depthpinson`.** Turn Use Pins OFF, rebuild anything, and check it is still
+      off. It used to turn itself back on and switch `outdepth` from relative to
+      metric with nothing said.
+- [ ] **Turning every stream off.** `out1` should keep its channels frozen rather than
+      emptying. And with hands off specifically, `clap_count` and `apart_count` should
+      leave the output rather than sitting there holding their last value.
+- [ ] **Two TouchDesigner instances**, or a sidecar started from a terminal. The panel
+      should say `Not Ours - pid N` rather than `Running`. Pressing `Active` takes
+      over; `Stop` still reaches it.
+- [ ] **Restart capture twice quickly**, and flip `Camera Flip` during the camera
+      warm-up. Neither should ever leave two sidecars running - the log will say
+      `NOT starting` if one refuses to die.
+- [ ] **A multi-person mask.** `MaskImage.coverage` used to read 0.0 for every
+      instance mask; nothing on the panel shows it, so this is only worth checking if
+      you use it from a script.

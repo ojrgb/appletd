@@ -27,7 +27,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import AVFoundation as AVF
 import CoreMedia
@@ -111,9 +111,25 @@ QOS_CLASS_USER_INITIATED = 25
 # stopRunning() and the barrier.
 CALLBACK_DRAIN_S = 0.2
 
-# AVAuthorizationStatus.authorized. The TCC prompt attaches to the HOST app
+# AVAuthorizationStatus, all four. The TCC prompt attaches to the HOST app
 # (TouchDesigner.app), never to this code (DESIGN.md 8).
+#
+# `NOT_DETERMINED` is the one that matters and the one that was missing. macOS shows
+# the camera prompt when something ASKS - `requestAccessForMediaType:` - and an app
+# that has never asked does not appear in System Settings > Privacy & Security >
+# Camera at all. So refusing at status 0 with "grant camera access in System
+# Settings" sent a first-time user to a list their application was not in, with no
+# way to put it there. Asking is the only thing that can move status 0.
+AUTH_STATUS_NOT_DETERMINED = 0
+AUTH_STATUS_RESTRICTED = 1
+AUTH_STATUS_DENIED = 2
 AUTH_STATUS_AUTHORIZED = 3
+
+# How long to wait for somebody to answer the camera prompt. Long enough to find the
+# dialog behind a full-screen TouchDesigner and read it; short enough that an
+# unattended machine is not held for ever. A timeout is not a denial - the status is
+# re-read after it, and the message says which of the two happened.
+AUTH_PROMPT_TIMEOUT_S = 60.0
 
 # Frames per second to PIN the camera to, both floor and ceiling.
 #
@@ -308,8 +324,14 @@ def hand_from_observation(observation: ObjCObject) -> Hand | None:
 
 def frame_from_observations(observations: list[ObjCObject], seq: int,
                             captured_at: float, width_px: int,
-                            height_px: int) -> LandmarkFrame:
-    """Observations -> one LandmarkFrame with exactly MAX_HANDS slots.
+                            height_px: int) -> tuple[LandmarkFrame, int]:
+    """Observations -> one LandmarkFrame with exactly MAX_HANDS slots, and a count.
+
+    The count is how many observations could not be read. It is RETURNED rather
+    than raised: raising threw away the hand that WAS readable along with the one
+    that was not, which is the opposite of what the comment on that raise claimed
+    it was doing. The caller records it - nothing is dropped silently
+    (STANDARDS.md 2) - and publishes what there is.
 
     Thread: capture queue only.
     Contract: hands is always MAX_HANDS long, padded with the shared BLANK_HAND.
@@ -337,22 +359,18 @@ def frame_from_observations(observations: list[ObjCObject], seq: int,
     while len(hands) < MAX_HANDS:
         hands.append(BLANK_HAND)        # shared, frozen: no allocation
 
-    if n_unreadable:
-        # An observation whose points could not be read is a hand that was
-        # detected and then lost between Vision and the channel list. Rare
-        # enough that it has never been seen, silent enough to be worth
-        # surfacing if it ever happens (STANDARDS.md 2: never silently dropped).
-        raise EngineError(
-            "%d observation(s) had unreadable joint points and were dropped"
-            % n_unreadable)
-
+    # `n_unreadable` goes back to the caller. An observation whose points could not
+    # be read is a hand that was detected and then lost between Vision and the
+    # channel list - rare enough that it has never been seen, and worth surfacing if
+    # it ever happens. It used to be RAISED from here, which meant two hands in shot
+    # and one bad observation published neither.
     return LandmarkFrame(
         seq=seq,
         captured_at=captured_at,
         width=width_px,
         height=height_px,
         hands=tuple(hands),
-    )
+    ), n_unreadable
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +406,11 @@ class HandDetector:
         # silently changing behaviour.
         self.revision = int(self._request.revision())
         self.last_inference_ms = 0.0
+        # How many observations the LAST detect could not read. Reported by the
+        # engine after a successful publish, so a hand lost between Vision and the
+        # channel list is surfaced without the readable hand being thrown away
+        # with it.
+        self.last_unreadable = 0
 
     def detect_sample_buffer(self, sample_buffer: ObjCObject, seq: int,
                              captured_at: float,
@@ -414,9 +437,10 @@ class HandDetector:
         if not ok:
             raise EngineError("Vision performRequests failed: %s" % (err,))
 
-        return frame_from_observations(
+        frame, self.last_unreadable = frame_from_observations(
             list(self._request.results() or []), seq, captured_at,
             width_px, height_px)
+        return frame
 
     def detect_pixel_buffer(self, pixel_buffer: ObjCObject, seq: int,
                             captured_at: float,
@@ -439,9 +463,10 @@ class HandDetector:
         if not ok:
             raise EngineError("Vision performRequests failed: %s" % (err,))
 
-        return frame_from_observations(
+        frame, self.last_unreadable = frame_from_observations(
             list(self._request.results() or []), seq, captured_at,
             width_px, height_px)
+        return frame
 
 
 def pixel_buffer_from_bgra(bgra: Any) -> ObjCObject:
@@ -499,6 +524,65 @@ def discover_devices() -> list[ObjCObject]:
                    device_types, AVF.AVMediaTypeVideo,
                    AVF.AVCaptureDevicePositionUnspecified))
     return list(session.devices())
+
+
+def request_camera_access(timeout_s: float = AUTH_PROMPT_TIMEOUT_S) -> int:
+    """Ask for camera access if nobody ever has, and return the resulting status.
+
+    macOS only shows the camera prompt when something calls this, and until it does
+    the host application is not in System Settings > Privacy & Security > Camera at
+    all - there is no switch to turn on. So "status 0" is not a permission problem to
+    report, it is a question nobody has asked yet.
+
+    Thread: call from the thread that is about to start the session, and expect it to
+            BLOCK while a human reads a dialog. Bounded, because an unattended
+            machine would otherwise hold the caller for ever.
+    Returns: the status after asking. A timeout returns whatever the status is then,
+             which is normally still 0 - the caller distinguishes the two.
+    """
+    status = AVF.AVCaptureDevice.authorizationStatusForMediaType_(AVF.AVMediaTypeVideo)
+    if status != AUTH_STATUS_NOT_DETERMINED:
+        return int(status)
+
+    answered = threading.Event()
+
+    def handler(_granted: bool) -> None:
+        # RUNS ON AN ARBITRARY QUEUE. It sets an event and nothing else - the answer
+        # is read back from `authorizationStatusForMediaType_` on the waiting thread,
+        # so nothing from this callback crosses a thread boundary.
+        answered.set()
+
+    AVF.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+        AVF.AVMediaTypeVideo, handler)
+    answered.wait(timeout_s)
+    return int(AVF.AVCaptureDevice.authorizationStatusForMediaType_(
+        AVF.AVMediaTypeVideo))
+
+
+def require_camera_access() -> None:
+    """Raise EngineError unless the camera is authorised, saying what to DO.
+
+    One message per status, because they need different actions and "not authorised"
+    covers all four badly: nobody has been asked yet, an administrator has forbidden
+    it, somebody said no, or it is fine.
+    """
+    status = request_camera_access()
+    if status == AUTH_STATUS_AUTHORIZED:
+        return
+    if status == AUTH_STATUS_NOT_DETERMINED:
+        raise EngineError(
+            "the camera prompt was not answered within %.0f s. Look for a dialog "
+            "asking to use the camera - it may be behind TouchDesigner - and start "
+            "capture again." % AUTH_PROMPT_TIMEOUT_S)
+    if status == AUTH_STATUS_RESTRICTED:
+        raise EngineError(
+            "camera access is restricted on this Mac (status 1), which is a device "
+            "policy rather than a choice - Screen Time or an MDM profile. Nothing "
+            "here can change it.")
+    raise EngineError(
+        "camera access was refused for this host application (status %d). Turn it "
+        "on for the host - TouchDesigner.app, or your terminal - in System Settings "
+        "> Privacy & Security > Camera, then start capture again." % status)
 
 
 def pick_device(name_substr: str) -> ObjCObject:
@@ -670,6 +754,26 @@ class _CaptureDelegate(NSObject):
 # ---------------------------------------------------------------------------
 # The engine
 # ---------------------------------------------------------------------------
+# WHAT A RESTART CLEARS. `_reset_session_state` walks this; `__init__` assigns each
+# one by hand with the comment that says what it counts, and a test holds the two
+# together by building an engine and looking for `n_*` attributes this omits.
+#
+# It reset three of fifteen. The twelve that survived meant every drop RATE read
+# after a restart was the sum of two sessions - wrong exactly when it matters most,
+# which is debugging a stream that only misbehaves once it has been restarted.
+#
+# `_seq` is deliberately not here: it stays monotonic across a restart, so a consumer
+# reads a gap rather than time running backwards (DESIGN.md 6.1).
+SESSION_COUNTERS: Final[tuple[str, ...]] = (
+    "n_delivered", "n_published", "n_dropped",
+    "n_pose_published", "n_pose_dropped",
+    "n_face_published", "n_face_dropped",
+    "n_mask_published", "n_mask_dropped", "n_mask_empty",
+    "n_depth_published", "n_depth_dropped", "n_depth_empty",
+    "n_flow_published", "n_flow_dropped",
+)
+
+
 class HandEngine:
     """Runs the camera and Vision on a background queue; hands out LandmarkFrames.
 
@@ -743,8 +847,6 @@ class HandEngine:
         # never builds the request. Both or neither, for the same reason - a detector
         # with nowhere to publish would burn 2.21 ms a frame and drop the result.
         self._flow_detector = flow_detector if on_flow is not None else None
-        self.n_flow_published = 0
-        self.n_flow_dropped = 0
         self._on_flow = on_flow if flow_detector is not None else None
         self._seg_detector = segmentation_detector if on_mask is not None else None
         self._on_mask = on_mask if segmentation_detector is not None else None
@@ -816,19 +918,27 @@ class HandEngine:
         self._running = False
 
         self._seq = seq_start
+        # ASSIGNED HERE, one line each, so a type checker can see them and so the
+        # comment saying what a counter means lives next to the counter. What binds
+        # this to `SESSION_COUNTERS` - the list `_reset_session_state` walks - is
+        # `test_every_session_counter_is_in_the_reset_list`, which builds an engine
+        # and holds every `n_*` attribute it finds against that tuple. The two used
+        # to disagree by twelve.
         self.n_delivered = 0        # every buffer the camera handed us
         self.n_published = 0        # frames that reached on_frame
         self.n_dropped = 0          # buffers with no image, or failed inference
         self.n_pose_published = 0   # pose frames that reached on_pose
         self.n_pose_dropped = 0     # buffers where the pose request failed
         self.n_face_published = 0   # face frames that reached on_face
+        self.n_face_dropped = 0     # buffers where the face request failed
         self.n_mask_published = 0   # masks that reached on_mask
         self.n_mask_dropped = 0     # masks lost to a Vision or a buffer failure
         self.n_mask_empty = 0       # frames Vision found nobody in
         self.n_depth_published = 0  # depth maps that reached on_depth
         self.n_depth_dropped = 0    # maps lost to a Core ML or a buffer failure
         self.n_depth_empty = 0      # frames Core ML returned no observation for
-        self.n_face_dropped = 0     # buffers where the face request failed
+        self.n_flow_published = 0   # flow fields that reached on_flow
+        self.n_flow_dropped = 0     # fields lost to a Vision or a buffer failure
         self.delivered_px: tuple[int, int] | None = None
         self.errors: list[str] = []
         # Set on the first delivered frame. Lets a caller confirm liveness by
@@ -959,6 +1069,15 @@ class HandEngine:
         if frame is None:
             self.n_dropped += 1
             return
+        if detector.last_unreadable:
+            # RECORDED, and the frame still goes out. This used to be an exception
+            # from `frame_from_observations`, so one unreadable observation of two
+            # published neither hand - and the comment on that raise said it was
+            # raised after the loop precisely so the good one's work was not
+            # discarded, which it then discarded.
+            self._record_error(
+                "%d hand observation(s) had unreadable joint points; the readable "
+                "ones were published" % detector.last_unreadable)
 
         # Slots BEFORE the consumer sees anything, so `h0` means the same physical
         # hand to every consumer - the CHOP, the OSC stream, the fixture harness -
@@ -1015,6 +1134,12 @@ class HandEngine:
             self.n_pose_dropped += 1
             self._record_error("pose: %s" % exc)
             return
+        if detector.last_unreadable:
+            # Same as the hands path: recorded, and the frame still goes out. Three
+            # people in shot and one unreadable observation used to publish none.
+            self._record_error(
+                "pose: %d body observation(s) had unreadable joint points; the "
+                "readable ones were published" % detector.last_unreadable)
         self.n_pose_published += 1
         self._mark_first_frame()
         publish(pose_frame)
@@ -1211,13 +1336,19 @@ class HandEngine:
         TouchDesigner project-reload sequence. `_seq` is deliberately NOT reset: it
         stays monotonic, so a consumer sees a restart as a gap rather than as time
         running backwards.
+
+        AND THEN TWELVE MORE OF THEM DID. This reset three counters by name while
+        `__init__` declared fifteen, so `n_mask_dropped`, `n_pose_dropped` and the
+        rest carried across a restart and every drop RATE computed from them was the
+        sum of two sessions - which is worst exactly when it matters, debugging a
+        stream that only misbehaves after a restart. Counted from one list now, so a
+        counter added to `SESSION_COUNTERS` is reset by having been added.
         """
         self.delivered_px = None
         self.first_frame.clear()
         self.errors.clear()
-        self.n_delivered = 0
-        self.n_published = 0
-        self.n_dropped = 0
+        for name in SESSION_COUNTERS:
+            setattr(self, name, 0)
         # The slot assigner's memory is per-session too. Without this, the first
         # frame of a new session would be matched against the LAST frame of the
         # old one by the proximity fallback.
@@ -1285,16 +1416,9 @@ class HandEngine:
         # time running backwards.
         self._reset_session_state()
 
-        status = AVF.AVCaptureDevice.authorizationStatusForMediaType_(AVF.AVMediaTypeVideo)
-        if status != AUTH_STATUS_AUTHORIZED:
-            # Checked first because an unauthorised host delivers no frames
-            # rather than an error, and every other symptom looks the same
-            # (DESIGN.md 8). The prompt attaches to the host app.
-            raise EngineError(
-                "camera not authorised for this host application (status %d; 3 "
-                "means authorised). Grant camera access to the host - "
-                "TouchDesigner.app, or your terminal - in System Settings > "
-                "Privacy & Security > Camera." % status)
+        # Checked first because an unauthorised host delivers no frames rather than
+        # an error, and every other symptom looks the same (DESIGN.md 8).
+        require_camera_access()
 
         device = pick_device(self._camera_name)
 

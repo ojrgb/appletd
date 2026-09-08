@@ -323,14 +323,6 @@ def _attach_once(merge, node, drop_names=()):
     return removed
 
 
-def _keep_layout(master):
-    """Has the user asked the builders to leave their node arrangement alone?
-
-    `getattr` with a default, because this parameter is younger than several of the
-    builders and a COMP built before it existed must still build rather than raise.
-    """
-    par = getattr(master.par, "Keeplayout", None)
-    return bool(par is not None and par.eval())
 
 
 def _place(node, xy, keep, existed):
@@ -392,7 +384,7 @@ def main():
     # Where this group sits inside its stream. One table for every builder, because
     # two of them once placed their group on the same coordinate with nothing able
     # to notice.
-    from appletd.td_layout import PACKAGE_ROOT_SOURCE, stream_xy
+    from appletd.td_layout import PACKAGE_ROOT_SOURCE, keep_layout, stream_xy
 
     master = op(MASTER_PATH)
     comp = op(COMP_PATH)
@@ -430,7 +422,7 @@ def main():
         print("   (unfroze `%s` to build it - td_add_groups.py sets the final "
               "state)" % GROUP)
     kept = _clear_keeping_ports(td, group, ("in1", "in2", "out1", "out2"))
-    _place(group, stream_xy(GROUP), _keep_layout(master), existed)
+    _place(group, stream_xy(GROUP), keep_layout(master), existed)
     group.color = (0.3, 0.5, 0.4)
     removed = 0
     for child in list(comp.children):

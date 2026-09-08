@@ -60,7 +60,12 @@ PAGE = "Depth"
 # `insertBlock(0)` - all four fail the same way, so custom sequences appear not to be
 # constructible from Python in this build. Fixed rows with a count that greys out the
 # unused ones give the same behaviour through a mechanism that demonstrably works.
-MAX_PINS = 8
+# ONE definition, in appletd/td_layout.py, because four places have to agree and
+# three of them had `range(1, 9)` typed in - see the comment there. Populated by
+# main() after sys.path is set up, the same way `td_add_latches.py` takes
+# THRESHOLD_DEFAULTS: a module-scope `import appletd` is not safe in a builder,
+# because TouchDesigner's Python may not have the repository on its path yet.
+MAX_PINS = None
 
 # The defaults, from apple-vision-examples/examples/depth/depth.py. Placed at the edges
 # and the bottom because that is where a person in front of a webcam usually is NOT,
@@ -414,6 +419,7 @@ def _at(node, xy, keep, existed):
 
 
 def main():
+    global MAX_PINS
     import td
 
     if REPO_ROOT not in sys.path:
@@ -422,7 +428,14 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from appletd.td_layout import OUTPUT_ORDER, PACKAGE_ROOT_SOURCE, master_xy
+    from appletd.td_layout import MAX_PINS as PANEL_PINS
+    from appletd.td_layout import (
+        OUTPUT_ORDER,
+        PACKAGE_ROOT_SOURCE,
+        ensure,
+        master_xy,
+    )
+    MAX_PINS = PANEL_PINS
 
     master = op(MASTER_PATH)
     if master is None:
@@ -464,6 +477,10 @@ def main():
     if on_par is None:
         on_par = page.appendToggle(
             "Depthpinson", label="Use Pins  (metric depth)")[0]
+        # SET ON CREATION, so a fresh build agrees with its own default. A toggle
+        # appended by TouchDesigner starts at 0, and setting `default` afterwards
+        # does not move it - the parameter read off while its default said True.
+        on_par.val = True
     else:
         # A DELIBERATE RELABEL. Existing parameters keep their labels - a rebuild
         # must not overwrite one somebody edited - so dropping "restart to apply"
@@ -471,7 +488,10 @@ def main():
         # ever have applied to a network built from scratch. `Capturestate` reports
         # "Requires Restart" now, in one place instead of five labels.
         on_par.label = "Use Pins  (metric depth)"
-        on_par.val = True
+        # AND NOTHING ELSE. `on_par.val = True` was here, so every rebuild of the
+        # master turned pinning back on for somebody who had turned it off, and
+        # `outdepth` went from relative to metric with nothing said. A rebuild
+        # rewrites structure; a value is the user's.
     on_par.default = True
 
     count_par = existing.get("Depthpincount")
@@ -591,9 +611,8 @@ def main():
              and master.par.Depthbuffer.eval()))
 
     # -- the callbacks DAT -------------------------------------------------
-    callbacks = master.op("depth_callbacks") or master.create(td.textDAT,
-                                                             "depth_callbacks")
-    callbacks.nodeX, callbacks.nodeY = master_xy("depth_callbacks")
+    callbacks = ensure(master, td.textDAT, "depth_callbacks",
+                     master_xy("depth_callbacks"), keep_layout)
     callbacks.text = CALLBACK_SOURCE % {"resolver": PACKAGE_ROOT_SOURCE,
                                     "comp_for_root": MASTER_PATH}
 
@@ -671,9 +690,8 @@ def main():
              int(master.par.Depthsourceh.eval()), fit_top.bypass))
 
     # -- the parameter callbacks -------------------------------------------
-    par_exec = master.op("depth_par_callbacks") or master.create(
-        td.parameterexecuteDAT, "depth_par_callbacks")
-    par_exec.nodeX, par_exec.nodeY = master_xy("depth_par_callbacks")
+    par_exec = ensure(master, td.parameterexecuteDAT, "depth_par_callbacks",
+                     master_xy("depth_par_callbacks"), keep_layout)
     par_exec.text = PAR_CALLBACK_SOURCE % {"max_pins": MAX_PINS}
     par_exec.par.op = master.path
     par_exec.par.pars = ("Streamdepth Depthfit Depthpincount Depthpinson "

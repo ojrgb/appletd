@@ -1,4 +1,22 @@
-"""sys.path wiring and engine lifecycle, for use inside TouchDesigner.
+"""SUPERSEDED - THIS IS THE IN-PROCESS ROUTE, WHICH IS NOT HOW appletd RUNS.
+
+    Vision runs in a SIDECAR PROCESS now: `python -m appletd.sidecar`, launched
+    and stopped by the component `tools/td_build_vision.py` builds, publishing
+    over OSC and shared memory. Nothing in the supported path imports this
+    module. Start from README.md, or drop appletd.tox into a project.
+
+    WHY IT WAS REPLACED, because the reason is the whole design: running Vision
+    on a background thread INSIDE TouchDesigner puts native framework calls next
+    to TD's own, and a Vision call landing on a torn-down capture session is a
+    native crash that `except` cannot catch and that takes the application with
+    it. A separate process cannot do that - the worst it can do is exit, and the
+    panel says so. See DESIGN.md 8.
+
+    KEPT, not deleted: it is the reference for what the in-process path costs and
+    what it takes to do it safely, and the measurements in docs/BENCHMARKS.md
+    came off it. Read it as history. Do not build on it.
+
+    sys.path wiring and engine lifecycle, for use inside TouchDesigner.
 
     HOW TO USE IT, minimally: put this in a Text DAT and run it once.
 

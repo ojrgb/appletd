@@ -227,7 +227,12 @@ def _install_into(root: Path, *, version: str = "1", skip: str = "",
             continue
         (package / (module + ".py")).write_text("")
     if packages:
-        (root / install.SITE_PACKAGES).mkdir(exist_ok=True)
+        # The MARKERS, not just the directory: `probe` looks for `objc` and `numpy`
+        # inside it now, because pip creates its `--target` before it can fail and an
+        # empty site-packages used to read as a complete install.
+        for marker in install.PACKAGE_MARKERS:
+            (root / install.SITE_PACKAGES / marker).mkdir(parents=True,
+                                                          exist_ok=True)
     if model:
         # The WEIGHT FILE, at a plausible size - `probe` checks that now rather than
         # `isdir(models)`, because an interrupted download leaves the directory and a
@@ -235,7 +240,10 @@ def _install_into(root: Path, *, version: str = "1", skip: str = "",
         weight = (root / install.MODELS_DIRNAME / install.MODEL_PACKAGE
                   / install.MODEL_FILES[-1])
         weight.parent.mkdir(parents=True, exist_ok=True)
-        weight.write_bytes(b"\0" * (install.MODEL_WEIGHT_MIN_BYTES + 1))
+        # SPARSE, at exactly the pinned size: `probe` now checks equality, and 47 MB
+        # of real zeroes per fixture would cost more than the whole suite.
+        weight.write_bytes(b"")
+        os.truncate(weight, install.MODEL_WEIGHT_BYTES)
     install.write_stamp(str(root), version, "/some/python")
 
 
@@ -421,8 +429,9 @@ def test_every_placeholder_is_filled() -> None:
 def test_no_interpreter_means_download_one_and_a_path_means_do_not() -> None:
     """The whole point of the probe upstream: somebody who already has a working
     interpreter must not be handed 26 MB they do not need."""
-    assert 'PYTHON=""' in _script()
-    assert 'PYTHON="/usr/local/bin/python3"' in _script(python="/usr/local/bin/python3")
+    assert "PYTHON=''" in _script()
+    assert ("PYTHON='/usr/local/bin/python3'"
+            in _script(python="/usr/local/bin/python3"))
 
 
 def test_the_download_is_pinned_and_checksummed_in_the_script() -> None:
@@ -437,8 +446,8 @@ def test_the_model_is_only_fetched_when_asked_for() -> None:
     with_model = _script(want_model=True)
     without = _script(want_model=False)
     assert install.MODEL_PACKAGE in with_model
-    assert 'WANT_MODEL="yes"' in with_model
-    assert 'WANT_MODEL="no"' in without
+    assert "WANT_MODEL='yes'" in with_model
+    assert "WANT_MODEL='no'" in without
     for relative in install.MODEL_FILES:
         assert relative in with_model
 
@@ -530,7 +539,7 @@ def test_requirements_are_read_and_quoted(tmp_path: Path) -> None:
         "\n".join(["# a comment", "", "pkg==1.2.3", "other==4.5", ""]))
     lines = install.requirement_lines(str(tmp_path))
     assert lines == ["pkg==1.2.3", "other==4.5"]
-    assert '"pkg==1.2.3"' in _script(requirements=lines)
+    assert "'pkg==1.2.3'" in _script(requirements=lines)
 
 
 def test_an_include_in_requirements_is_refused(tmp_path: Path) -> None:
@@ -574,7 +583,7 @@ def test_the_shell_model_fetcher_agrees_with_these_constants() -> None:
     shell = (repo_root / "tools" / "fetch_models.sh").read_text()
     assert install.MODEL_REPO in shell
     assert install.MODEL_PACKAGE in shell
-    assert str(install.MODEL_WEIGHT_MIN_BYTES) in shell
+    assert str(install.MODEL_WEIGHT_BYTES) in shell
     for relative in install.MODEL_FILES:
         assert relative in shell, "%s is not in fetch_models.sh" % relative
 
@@ -668,3 +677,277 @@ def test_every_embedded_module_exists_on_disk() -> None:
     package = pathlib.Path(install.__file__).parent
     for name in install.EMBEDDED_MODULES:
         assert (package / ("%s.py" % name)).is_file(), name
+
+
+# ---------------------------------------------------------------------------
+# Getting a typed-in path into the script without it becoming shell
+# ---------------------------------------------------------------------------
+# `Sidecarpython` and the install root are free text in a TouchDesigner parameter, and
+# they end up in `/bin/sh`. RUN, not read: a text assertion that the value appears
+# quoted passes over a template that quotes it and then evals it, and the failure mode
+# these guard against is silent - the wrong directory, exit 0, DONE in the panel.
+_AWKWARD_ROOTS = (
+    "with space",
+    'with "quotes"',
+    "it's",
+    "$(exit 9)",
+    "`exit 9`",
+    "$HOME",
+    "semi;colon",
+    "star*glob",
+)
+
+
+@pytest.mark.parametrize("awkward", _AWKWARD_ROOTS)
+def test_an_awkward_install_root_is_used_verbatim(tmp_path: Path,
+                                                  awkward: str) -> None:
+    """The root arrives as itself, whatever is in it, and nothing in it is executed.
+
+    `/Users/x/My "Docs"/appletd` used to install to `/Users/x/My Docs/appletd`: the
+    quotes closed the template's own, `sh` joined the pieces, and the script reported
+    DONE about a directory nobody asked for.
+    """
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    environment = _stub_tools(stubs, sha=install.PYTHON_SHA256)
+    root = tmp_path / awkward
+    done = subprocess.run(["/bin/sh", "/dev/stdin"],
+                          input=_script(root=str(root)),
+                          capture_output=True, text=True, env=environment,
+                          check=False, timeout=30)
+    # Exit 4 is "no interpreter", the step after the root is made. An injected
+    # `exit 9` would land here instead, and a mangled root would fail at `cd`.
+    assert done.returncode == 4, done.stdout + done.stderr
+    assert root.is_dir(), "installed somewhere other than the root it was given"
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["bin", awkward]), \
+        "the script created a directory it was not asked for"
+
+
+@pytest.mark.parametrize("awkward", _AWKWARD_ROOTS)
+def test_an_awkward_interpreter_path_is_used_verbatim(tmp_path: Path,
+                                                      awkward: str) -> None:
+    """`Sidecarpython` is the same hole with a shorter fuse: it is typed by hand, and
+    an install that ran what was typed would run it as whoever is running TD."""
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    environment = _stub_tools(stubs, sha=install.PYTHON_SHA256)
+    python = tmp_path / awkward / "python3"
+    done = subprocess.run(["/bin/sh", "/dev/stdin"],
+                          input=_script(root=str(tmp_path / "root"),
+                                        python=str(python)),
+                          capture_output=True, text=True, env=environment,
+                          check=False, timeout=30)
+    assert done.returncode == 4, done.stdout + done.stderr
+    assert ("no interpreter at %s" % python) in done.stdout
+
+
+def test_sh_quote_survives_a_round_trip_through_a_real_shell() -> None:
+    """The quoter itself, against `sh` rather than against my idea of `sh`."""
+    awkward = [*_AWKWARD_ROOTS, "'", "''", "a'b\"c`d$e", "\\", "\t", "#hash"]
+    script = "\n".join("printf '%%s\\n' %s" % install.sh_quote(v) for v in awkward)
+    done = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True,
+                          check=True, timeout=30)
+    assert done.stdout.split("\n")[:len(awkward)] == awkward
+
+
+def test_a_constant_that_cannot_be_quoted_is_refused() -> None:
+    """The other half of the rule. `$ROOT/%(site_packages)s` is half of a path, so it
+    cannot carry quotes of its own and has to be inert instead - and "inert" has to be
+    checked, or the rule is just a comment."""
+    for value in ('has"quote', "has$dollar", "has`tick", "has\\backslash"):
+        with pytest.raises(ValueError, match="cannot be embedded"):
+            install._plain("TESTING", value)
+    assert install._plain("TESTING", "site-packages") == "site-packages"
+
+
+def test_a_failure_nobody_expected_still_says_so(tmp_path: Path) -> None:
+    """`set -e` plus no trap meant an unexpected failure printed nothing at all, and
+    the panel - which shows the last line - kept showing the STEP it died on. A dead
+    install was indistinguishable from one still working."""
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    environment = _stub_tools(stubs, sha=install.PYTHON_SHA256)
+    # curl as it behaves on a 404: exits non-zero, says nothing the script catches.
+    (stubs / "curl").write_text("#!/bin/sh\nexit 22\n")
+    (stubs / "curl").chmod(0o755)
+    done = subprocess.run(["/bin/sh", "/dev/stdin"],
+                          input=_script(root=str(tmp_path / "root")),
+                          capture_output=True, text=True, env=environment,
+                          check=False, timeout=30)
+    assert done.returncode == 22, done.stdout + done.stderr
+    last = done.stdout.strip().split("\n")[-1]
+    assert last.startswith("FAIL "), last
+    assert "downloading Python" in last, "it does not say which step died"
+    assert "22" in last, "it does not say what it died of"
+
+
+def test_an_expected_failure_is_not_reported_twice(tmp_path: Path) -> None:
+    """The trap has to keep quiet about the failures that already explained
+    themselves, or every real diagnosis gets a second, worse line after it."""
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    environment = _stub_tools(stubs, sha="0" * 64)
+    done = subprocess.run(["/bin/sh", "/dev/stdin"],
+                          input=_script(root=str(tmp_path / "root")),
+                          capture_output=True, text=True, env=environment,
+                          check=False, timeout=30)
+    assert done.returncode == 3, done.stdout + done.stderr
+    fails = [line for line in done.stdout.split("\n") if line.startswith("FAIL ")]
+    assert len(fails) == 1, fails
+    assert "does not match its checksum" in fails[0]
+
+
+def test_the_import_error_file_is_not_a_fixed_path_in_tmp(tmp_path: Path) -> None:
+    """/tmp/appletd_import_err was a predictable name in a world-writable directory:
+    somebody else's symlink to point the redirect at, or somebody else's plain file to
+    make the redirect fail and take the install down for an unrelated reason."""
+    script = _script()
+    assignments = [line for line in script.split("\n") if line.startswith("ERR=")]
+    assert assignments == ['ERR=$(mktemp "${TMPDIR:-/tmp}/appletd_import_err.XXXXXX")']
+    assert 'rm -f "$ERR"' in script, "and it is cleaned up"
+
+
+def test_an_empty_site_packages_does_not_read_as_installed(tmp_path: Path) -> None:
+    """pip creates its `--target` directory before anything that can fail, so a pip
+    that died on a proxy left an empty one behind. Over a previous install whose stamp
+    was still there that read `installed`, the button went grey, and the sidecar died
+    on `import objc` with nothing to connect the two."""
+    _install_into(tmp_path, version="v1")
+    site = tmp_path / install.SITE_PACKAGES
+    for marker in install.PACKAGE_MARKERS:
+        (site / marker).rmdir()
+    assert site.is_dir(), "the directory itself is still there, as pip leaves it"
+    state = install.probe(str(tmp_path), "v1")
+    assert state.packages is False
+    assert state.state == "incomplete"
+
+
+def test_half_the_packages_is_not_enough(tmp_path: Path) -> None:
+    """`numpy` missing was a real shape of this: pyobjc declared as a runtime
+    dependency and numpy only in the dev requirements. It runs until `appletd.pins`."""
+    _install_into(tmp_path, version="v1")
+    (tmp_path / install.SITE_PACKAGES / "numpy").rmdir()
+    assert install.probe(str(tmp_path), "v1").state == "incomplete"
+
+
+# ---------------------------------------------------------------------------
+# The DAT bodies as Python, not as strings
+# ---------------------------------------------------------------------------
+def _dat_bodies() -> list[tuple[str, str, str]]:
+    """`(builder, constant, source)` for every generated DAT body in `tools/`.
+
+    A module-level triple-quoted uppercase constant IS a DAT body - that is the one
+    convention every builder follows. `%(name)s` placeholders become `None` so the
+    body parses; `%(resolver)s` is the exception and gets the real thing, because it
+    is a block of Python spliced in and its imports count.
+    """
+    import re
+
+    from appletd.td_layout import PACKAGE_ROOT_SOURCE
+
+    tools = Path(__file__).resolve().parents[2] / "tools"
+    out = []
+    for path in sorted(tools.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for block in re.finditer(r"^([A-Z][A-Z0-9_]*)\s*=\s*('''|\"\"\")(.*?)\2",
+                                 source, re.S | re.M):
+            body = block.group(3).replace("%(resolver)s", PACKAGE_ROOT_SOURCE)
+            # An IDENTIFIER, not `None`: half of these placeholders sit after a dot
+            # (`comp.par.%(parameter)s`), and `None` there is a syntax error rather
+            # than a finding.
+            body = re.sub(r"%\(\w+\)[rsd]", "_placeholder", body).replace("%%", "%")
+            out.append((path.name, block.group(1), body))
+    return out
+
+
+# Every DAT body a builder writes opens by saying which builder wrote it, and that
+# line is what separates the Python from the shell, the GLSL and the plain prose that
+# also live in uppercase triple-quoted constants. `td_bridge.py` words it differently,
+# so it is named rather than guessed at.
+_GENERATED_MARKERS = ("# Generated by tools/", "# appletd bridge - generated by")
+
+
+def _is_python(body: str) -> bool:
+    stripped = body.lstrip()
+    return any(stripped.startswith(marker) for marker in _GENERATED_MARKERS)
+
+
+def test_every_generated_dat_body_parses() -> None:
+    """They are strings here and Python on the user's machine. A syntax error in one
+    is invisible until a cook, and then it is a red node with no line number that
+    points anywhere in this repository."""
+    broken = []
+    for builder, constant, body in _dat_bodies():
+        if not _is_python(body):
+            continue                    # shell, GLSL, or prose
+        try:
+            ast.parse(body)
+        except SyntaxError as problem:
+            broken.append("%s %s: %s" % (builder, constant, problem))
+    assert broken == [], "\n".join(broken)
+
+
+def test_no_generated_dat_uses_a_module_it_did_not_import() -> None:
+    """THE DEFECT THIS IS FOR, and it has happened twice: `flow_callbacks` called
+    `os.path.exists` with no `import os`, and the TOP Input writer template had the
+    same hole. Both cook fine until the one branch that reaches the call, and both
+    were found by a user rather than by anything here.
+
+    Dotted use of a standard-library name, checked against the body's own imports.
+    Narrow on purpose: a general undefined-name check has to model every way a DAT is
+    assembled, and would either be wrong or be turned off.
+    """
+    gaps = []
+    for builder, constant, body in _dat_bodies():
+        if not _is_python(body):
+            continue
+        tree = ast.parse(body)
+        imported = {alias.asname or alias.name.split(".")[0]
+                    for node in ast.walk(tree) if isinstance(node, ast.Import)
+                    for alias in node.names}
+        used = {node.value.id for node in ast.walk(tree)
+                if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in sys.stdlib_module_names}
+        for name in sorted(used - imported):
+            gaps.append("%s %s uses %s. and never imports it"
+                        % (builder, constant, name))
+    assert gaps == [], "\n".join(gaps)
+
+
+# ---------------------------------------------------------------------------
+# A download that hangs rather than fails
+# ---------------------------------------------------------------------------
+def test_every_download_gives_up_on_a_stalled_connection() -> None:
+    """`curl` with no limits waits for ever, and a captive portal or a stalled proxy
+    is not a broken connection - it is an open socket that never delivers. The panel
+    sat on "downloading Python (26 MB)" indefinitely with nothing to press.
+
+    `--speed-time` rather than `--max-time` on purpose: a wall clock would abort a
+    slow-but-working download on a bad hotel connection, which is the case that most
+    needs it to finish.
+    """
+    script = _script()
+    downloads = [line for line in script.split("\n") if "curl " in line
+                 and not line.strip().startswith("#")]
+    assert len(downloads) >= 4, downloads
+    for line in downloads:
+        assert "$CURL_LIMITS" in line, line
+    assert "--speed-limit" in script and "--speed-time" in script
+    assert "--connect-timeout" in script
+    assert "--max-time" not in _uncommented(script), (
+        "a wall clock would kill a slow download that was going to succeed")
+
+
+def _uncommented(script: str) -> str:
+    """The script with its comment lines dropped. The comments here explain what was
+    NOT chosen and why, so a plain substring search finds the rejected option."""
+    return "\n".join(line for line in script.split("\n")
+                      if not line.lstrip().startswith("#"))
+
+
+def test_the_stall_limits_are_a_shell_variable_not_repeated() -> None:
+    """Four downloads, one definition - the same reason every other constant in this
+    file is a constant."""
+    script = _script()
+    assert script.count("CURL_LIMITS=") == 1

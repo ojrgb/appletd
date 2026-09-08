@@ -5141,3 +5141,482 @@ AND THE INSTALL RACE, hit for the third time in a day: pulsing `Install` in the 
 call as a rebuild leaves `Installstate` reading "Update needed", because the rebuild
 re-embeds afterwards and moves the hash. Install is asynchronous. Pulse it on its own,
 confirm, then restart.
+
+**The person boxes had no producer, and shipped that way — 2026-09-08.** Found by a
+review agent, and it is the worst defect in this project so far because it was
+reported as done.
+
+`VNDetectHumanRectanglesRequest` appeared in exactly two comments and was never
+instantiated. The type existed, the 13 channel names existed, the roles in `spaces.py`
+existed, the `STREAM_CHANNELS` patterns existed, `ATTRIBUTES.md` documented them with a
+measurement, and `order_bodies`' sibling `order_humans` did not exist at all. So
+`PoseFrame` took the `humans=()` default, `pose_channel_values` substituted
+`BLANK_HUMAN`, and every `human*` channel published 0.0 for ever - plus 12 transformed
+companions from `coords` - while `sc_pose` read 1.0.
+
+EVERY TEST PASSED, and that is the lesson rather than an excuse. They assert the SHAPE
+of the channel list, which was correct: the right names in the right order with the
+right count. Nothing asserted that anything produced a value. `test_human_rects.py` now
+tests the producer - the request is built, the converter reads a box bottom-left, and
+the frame carries what the request returned - and deliberately does not re-test the
+shape, which would repeat the mistake.
+
+Verified on the fixture clip: one person found at 0.662 confidence, box
+(0.259, 0.039, 0.470, 0.952). The body-pose request finds NO skeleton in that same
+frame, which is a reason to want the boxes rather than only the joints.
+
+AND THE COMMENT I WROTE WHILE FIXING IT WAS ALSO WRONG. It said the two requests share
+Vision's image analysis, "which is why the pair costs 2.53 ms on top rather than another
+full pass". MEASURED over 35 fixture frames: body pose alone 3.91 ms, rectangles alone
+2.68 ms, both in one call 6.82 ms. 3.91 + 2.68 = 6.59, so batching them saves nothing
+at all - the marginal price of the boxes is 2.91 ms and `Streampose` pays it whether it
+wants them or not. Both the comment and `ATTRIBUTES.md` now say that.
+
+**A shared buffer could be shrunk under its reader, and that is a SIGBUS — 2026-09-08.**
+Found by a review agent, reproduced twice: map 1 MB, `ftruncate` to 4 KB on a second
+descriptor, touch offset 512 KB, and the process dies with exit 138. A signal, so
+nothing catches it and no traceback is written.
+
+`MaskWriter` opened with `O_CREAT` and no unlink, so an existing buffer kept its inode
+and a smaller `capacity_for` took the pages out from under anyone already mapped.
+
+BOTH DIRECTIONS WERE REACHABLE IN NORMAL USE, which is what makes it the worst thing
+this review turned up. A TOP whose resolution drops rebuilds the frames writer smaller
+and kills the SIDECAR - with nothing in its log, while the panel still says Running. A
+`Segquality` change from `accurate` to `fast` rebuilds the mask writer smaller and kills
+TOUCHDESIGNER, whose Script TOP reads that buffer on the main thread, with no traceback
+anywhere.
+
+GROW ONLY now. Growing is safe: a reader mapped to the old shorter length simply does
+not see the new pages, and its `(st_ino, st_size)` identity check notices and remaps. A
+file larger than the frame needs is equally safe, because the header says how much of it
+is live - so a writer opening a bigger file adopts its size as the capacity rather than
+truncating. Verified against both real scenarios: 2016x1512 down to 256x192 with a
+reader still mapped to the big length, which survives and reads 256x192 correctly.
+
+The regression test runs the reader in a SUBPROCESS. A regression is a SIGBUS, which
+would take the whole pytest session down and report as a crash rather than a failed
+assertion; out of process it comes back as "the reader died on signal 10".
+
+**Six review findings from today's own work, and one the review did not find —
+2026-09-08.**
+
+Fixed together because they are one mistake in six places: a feature touches several
+parallel lists and only some were updated.
+
+  * **`hands_angle_x`/`_y` were being deleted from the output.** This morning's fix
+    narrowed `_MERGED_CANDIDATES` in `spaces.py` after the angle got a meaningless
+    `_tx` companion; the SAME `hands_*_x` wildcard is in `td_add_screenspace.py`'s
+    `STREAM_TERMS`, which is the pattern that actually deletes. So the fix was half a
+    fix, and the half that mattered was missed. Verified after: no channel is deleted
+    without a companion, and no companioned channel is left undeleted.
+  * **The person boxes had no screenspace terms**, so `human?_bbox_*` survived beside
+    its own `_tx` twin - and, more expensively, the merged pattern stopped verifying
+    and fell back to a 556-name literal list at a recorded 4.4211 ms a frame. Now 46
+    terms, and 0.2964 ms measured on the live operator.
+  * **`Cameraflip` was not in `launch_pars`**, so changing it never said "Requires
+    Restart" and `Auto Refresh` never applied it. The picture mirrored and Vision did
+    not.
+  * **`apply_freeze` did not check `Active`**, so a freeze cancelled by its own
+    countdown still landed and locked five outputs.
+  * **`*_conf` swept up `human?_conf`**, dropping a documented channel from the output
+    AND from `housekeeping`, so there was nowhere to read it. Narrowed to
+    `h?_*_conf p?_*_conf`: exactly 80 per-joint confidences, as the comment claims.
+  * **`test_human_rects.py` skipped all five tests** where pyobjc is absent, because
+    the `importorskip` was at module scope and only one test needs Vision. A file
+    written to catch "green by absence" was green by absence.
+
+AND ONE THE REVIEW DID NOT FIND, which turned up while verifying the above. **The
+output trim's keep list is rebuilt when a TOGGLE changes, which is the wrong moment.**
+Switching a stream on fires the callback immediately, while the channels it turns on do
+not exist until the sidecar has restarted and sent a frame - about four seconds later.
+So the list was computed against the old channel set and the new stream's channels were
+missing from `out1` until something else happened to move a parameter.
+
+Demonstrated and fixed: `Streamface` off to on, touching nothing else, `f0_*` on `out1`
+went from 0 channels to 21. `start()` now schedules one re-trim three seconds after a
+launch. The delay is a heuristic and says so - nothing here can watch an OSC In CHOP's
+channel count, and a Parameter Execute only sees parameters.
+
+**The installer built a shell command by pasting strings into it — 2026-09-08.**
+
+`render_script()` wrote `ROOT="%(root)s"` and filled it with a path typed into a
+TouchDesigner parameter. Two things were wrong with that and one of them is worse than
+it sounds.
+
+A path holding a double quote closed the template's own. `/Users/x/My "Docs"/appletd`
+became the three shell words `"/Users/x/My "`, `Docs`, `"/appletd"`, which `sh` joins
+into `/Users/x/My Docs/appletd`. The script then made that directory, installed into
+it, wrote the stamp there and printed `DONE`. Exit 0. Nothing anywhere said the
+install was not where it was asked to go - the panel would go on to probe the root it
+was configured with, find nothing, and say `missing` about a directory that had just
+been reported as installed.
+
+And `$(...)` or a backtick in the same position is not a path at all. `Sidecarpython`
+is free text, reaches the same script, and would have been run as whoever is running
+TouchDesigner.
+
+Now `sh_quote()` single-quotes every value a user can reach, with the one character
+that cannot appear inside single quotes closed and reopened. The constants that are
+spliced INSIDE a longer quoted word - `$ROOT/%(site_packages)s` is half of a path and
+cannot carry quotes of its own - go through `_plain()`, which refuses at render time
+if they ever grow a metacharacter. Eight awkward roots and eight awkward interpreter
+paths now go through a real `/bin/sh` in the suite and come back byte-identical, and
+`$(exit 9)` in a path exits 4 like every other missing interpreter rather than 9.
+
+Three more from the same read of that script:
+
+  * **`set -eu` and no trap.** Every failure the script expects says FAIL and exits.
+    Every other one - curl on a 404, pip blocked by a proxy, a full disk - exited
+    silently, so the last line was the STEP in progress. The panel shows the last
+    line. A dead install and a working one looked the same, forever. An EXIT trap now
+    names the step and the code, and stays quiet when something already explained
+    itself.
+  * **`ERR=/tmp/appletd_import_err`**, a predictable name in a world-writable
+    directory, opened for writing. `mktemp` under `$TMPDIR` instead, removed on exit.
+    Same for the install log, which was `/tmp/appletd_install.log` opened `"w"` - and
+    which was also being baked into the `.tox` as an absolute path from my machine.
+    It resolves in the generated module now.
+  * **`MODEL_WEIGHT_MIN_BYTES` was 40,000,000 against a real 49,419,072.** A download
+    that stopped four fifths of the way through passed the shell's check and
+    `model_present()`, and the first sign was Core ML refusing to load it. The file
+    comes from a pinned URL, so its size is a constant: exact now, on both sides, and
+    a bad copy is simply re-downloaded.
+
+**And a fourth, which is the one that would have cost the most support.** `probe()`
+asked `isdir(site-packages)`. pip creates its `--target` before it does anything that
+can fail, so a pip that died on a proxy left the directory behind - and over a previous
+install whose stamp was still there, that read `installed`. The Install button greys
+out, and the sidecar dies on `import objc` with nothing connecting the two. It now
+looks for `objc` and `numpy` inside, which are the two `verify_interpreter` imports.
+
+**A test for the defect class rather than the defect.** Two generated DATs have now
+shipped calling `os.path` with no `import os` - `flow_callbacks`, found by Omer, and
+the TOP Input writer template before it. Both cook fine until the one branch that
+reaches the call. Every DAT body in `tools/` is now parsed, and every dotted use of a
+standard-library name is checked against that body's own imports. Deleting `import os`
+from `td_add_flow.py` fails it. It is deliberately narrower than a general
+undefined-name check: those have to model every way a DAT gets assembled, and end up
+either wrong or switched off.
+
+**Four controls that did not do what their label said — 2026-09-08.**
+
+**The About page's four buttons had already stopped working**, and this is the one to
+read. `td_build_vision.py` destroys every child of the master COMP it does not
+recognise, and `about_control` and `about_callbacks` were not in `OTHER_BUILDERS_OWN`.
+Checked in the running TouchDesigner: `about_*` children of the master, none; About
+pulses on the master, all four. So Check For Update, Apply Update, Open In Browser and
+Licence were on the panel of the .toe as saved and the .tox as exported, and pressing
+any of them did nothing whatsoever. A pulse with no Parameter Execute behind it raises
+nothing, cooks nothing and reports nothing.
+
+  * **`Depthpinson` was forced back on by every rebuild.** `on_par.val = True` on the
+    EXISTING branch, four lines under a comment explaining that existing parameters
+    keep what the user set. Turn pinning off, rebuild anything that drags `depth`
+    along, and `outdepth` goes from relative to metric with nothing said. The same
+    line also meant a fresh build read 0 while its own default said True, because
+    `appendToggle` starts at 0 and setting `default` afterwards does not move it.
+    Setting the value now happens on creation only. Every other builder was already
+    doing it that way - this was the only one out of step.
+  * **`td_rebuild.py`'s `REQUIRES` was missing six of eighteen layers**, and
+    `REQUIRES.get(name, ())` made an absent entry identical to a considered empty one.
+    That is not a table's fault, it is the `.get`: the file's own docstring says every
+    entry is written by hand and says why, and six were not written at all. Every
+    layer has an entry now, an `AssertionError` at import if one is ever dropped, and
+    `REQUIRES[name]` with no default.
+  * **And thirteen of those layers append custom parameters without pulling in
+    `pages`**, which is what "I rebuilt one layer and my parameters moved to General"
+    actually was. `td_add_pages.py` is what puts a parameter on its page and under its
+    heading; a builder run without it leaves them wherever they were appended.
+  * **`td_add_overlay.py` could not build on a first-ever chain run.** It needs the
+    "Body Pose" and "Face" pages, which exist only after `td_add_pages.py` moves
+    `Streampose` and `Streamface` onto them - and `pages` has to run AFTER `overlay`
+    or the two parameters it appends land under the sort. So it printed one FAIL,
+    returned, built no overlay at all, and `td_rebuild` reported that every builder
+    ran. A second run fixed it, which is why a checkout that had ever been built once
+    never showed it. It creates the page itself now, refusing if the name is not in
+    `td_pages.LAYOUT` so there is still one authority on which pages exist.
+  * **`par.ops` in one builder against `par.op` in ten.** Not a bug - TouchDesigner
+    resolved it to the same parameter, which is precisely why it sat there - but the
+    next reader has to go and check, and `pars()` on the live DAT says the name is
+    `op`.
+
+**`appletd/tests/test_builder_tables.py` is new**, and it is the answer to the shape
+all six of these share: a feature touches several parallel lists and only some get
+updated. It reads the tables out of the source with `ast` rather than restating them,
+and it holds every layer against `REQUIRES`, every parameter-appending builder against
+`pages`, every operator a builder places with `master_xy()` against
+`OTHER_BUILDERS_OWN`, every registered name against a builder that still exists, and
+every overlay page name against `td_pages.LAYOUT`. Removing the two About entries,
+dropping `pages` from `overlay` and putting `par.ops` back fails three of them.
+
+**Seven numbers that were wrong where being wrong was invisible — 2026-09-08.**
+
+Grouped because they share a shape: working-looking code, a comment describing
+behaviour it did not have, and no test.
+
+  * **`MaskImage.coverage` returned 0.0 for every instance mask ever made.** The two
+    masks mean different things by a byte: a single-person mask is an alpha, 0..255,
+    and an instance mask is a person INDEX, 1..4. One `>= 128` threshold served both,
+    so the only signal for "is this mask empty" said empty exactly when it was not.
+    It was also a Python generator over every pixel - MEASURED at 29.0 ms on a
+    1920x1080 mask - now 6.4 ms via `bytes.translate` for the soft mask and 0.6 ms
+    via `bytes.count` for the instance one.
+  * **`streams_started` returned what was REQUESTED.** Its own docstring says the
+    opposite, and cites DESIGN.md 6.4. `segment`, `flow` and `depth` are each dropped
+    when nothing was given to publish them to - `_retained_errors` says so - and
+    `sc_segment` read 1.0 anyway. It reports `_started` now, filled in by `start()`
+    from what it actually built.
+  * **`_reset_session_state` reset three of fifteen counters.** So after a restart,
+    every drop RATE was the sum of two sessions - wrong exactly where it is most
+    needed, which is diagnosing a stream that only misbehaves once restarted.
+    `SESSION_COUNTERS` is the list it walks; `__init__` still assigns each one by hand
+    with the comment that says what it counts, and a test binds the two by reading the
+    class with `ast`.
+  * **`_flow_writer` was never closed.** 7.2 MB of mapping released only by process
+    exit, and the teardown loop that closes the mask and depth writers simply did not
+    name it.
+  * **The two Over TOP comments described the wrong input.** The wiring is right -
+    checked against the running network: `inputConnectors[0]` is `overlay`,
+    `inputConnectors[1]` is `video_flip`. But `td_add_video.py` said "Input 1 is the
+    FOREGROUND, td_add_overlay.py connects the overlay render there" directly above
+    the line connecting the CAMERA to index 1. Anyone acting on it loses the camera
+    from the composite. Both now say it in indices, because "Input 1" reads as either
+    depending on whether you are looking at Python or at the parameter dialog.
+  * **`_refusal` measured the spread over all pins including the one just dropped.**
+    Real, and harder to reach than it looks: least squares fits an ISOLATED point
+    well, so the pin at one end of the range is usually the last a residual pass will
+    drop. A 400,000-case search found it at about 1 in 3,000 - three pins reading
+    0.491, 0.479 and 0.183, drop 0.2. The survivors are 2.4% of the frame apart and
+    the old message said "fit went non-physical - a pin ended up behind the camera".
+    Those numbers are the fixture.
+
+**And one where a comment claimed the fix it had not made.** Both
+`frame_from_observations` and `pose_frame_from_observations` counted unreadable
+observations in a loop and then RAISED - and the comment on the raise in each said it
+was placed after the loop "so one bad observation does not discard the good ones'
+work", which is precisely what raising then did. Three people in shot and one bad
+observation published none of them; two hands and one bad observation published
+neither. Both return the count now, the engine records it, and the frame goes out.
+Nothing is dropped silently, which was the actual requirement (STANDARDS.md 2).
+
+**Six guards that only ran inside TouchDesigner, and the one thing they were not
+looking at — 2026-09-08.**
+
+`_check_joint_split`, `_check_stream_patterns`, `_check_face_slots`,
+`_check_keypoint_names` and `_check_keypoints` each hold a LITERAL copy of something
+the package owns against the contract it copies. They exist because those literals sit
+inside TRIM SCOPE markers and are pasted verbatim into a generated DAT that may import
+nothing but the standard library - a second source of truth, with a silent failure
+either way. All five were called only from `main()`, which runs only inside
+TouchDesigner, which means they fired when somebody happened to rebuild and never on a
+commit. A guard that runs only where the failure is already happening is most of the
+way to not existing. `appletd/tests/test_build_guards.py` runs all of them, and a
+completeness check finds any `_check_*` a builder grows that this file does not call -
+it caught the sixth guard below within a minute of that guard being written.
+
+**And `_check_stream_patterns` could not see the thing it was for.** It built the hands
+universe from `derived_roles`, whose own docstring says it classifies only SOME of what
+`derive_chop` publishes - 24 names against 195. So it passed while
+`STREAM_CHANNELS["hands"]` missed NINE channels that carry no `h?_` or `hands_` prefix:
+`n_valid` and `both_valid` from `derive()`, `n_active`, `both_active` and `ready` from
+`temporal`, and `e_clap`, `e_apart`, `clap_count` and `apart_count` from the `together`
+latch.
+
+With `Streamhands` off, all nine stayed on the output. `trim_empty` sweeps up channels
+that fall to zero, which hides most of this - but `clap_count` and `apart_count` are
+COUNTERS. They hold their last value. So a session that had clapped, with hands then
+switched off, published a count that used to mean something and now means nothing: the
+precise "plausible wrong number" `trim_empty` exists to prevent.
+
+Both modules are pure Python, so the guard now asks them what they publish instead of
+asking a classification of them - one call to `derive()` over a zeroed contract and one
+to `temporal.channel_names()`. Removing the five derive/temporal names from the table
+now fails it.
+
+**`_check_latches` is new**, for a failure with no symptom at all. The generated
+threshold writer looks its parameter up with `getattr(comp.par, name, None)` and skips
+a miss, so a mistyped `Togetheroff` writes nothing, the Constant CHOP keeps its 0, and
+that latch engages below zero - which is never. No error, no red node, one gesture that
+simply does not work. It checks every distance and validity channel against what
+`derive` and `temporal` actually emit, and every threshold against
+`tuning.THRESHOLD_DEFAULTS`.
+
+The last four of the nine could not be caught by any single builder: `td_add_latches.py`
+decides what the latches publish and `td_add_groups.py` decides what a toggle removes,
+and neither may import the other because both execute `main()` at import. That check is
+in the test file, which can read both.
+
+Verified in the running TouchDesigner rather than only in the suite: the nine reached
+the generated DAT through the TRIM SCOPE markers, all nine match the hands patterns as
+the DAT sees them, and none of the 395 channels on `merge_streams` belonging to pose or
+face is caught by them.
+
+**Two sidecars on one buffer, a status light that reported somebody else's process,
+and a teardown that was not one — 2026-09-08.**
+
+  * **`stop()` was advisory and `start()` did not care.** SIGTERM, wait a second,
+    print if anything survived, return anyway - and `start()` then `Popen`s. The old
+    sidecar can outlive that second easily: its handler only sets a flag, and `run()`
+    blocks for the camera's ~1.5 s warm-up. Two presses of Restart inside that window
+    does it, and so does touching `Camera Flip` during warm-up, because that calls
+    `restart()` directly.
+
+    Both processes then write the SAME seqlock buffer with independent `seq`
+    counters, and no reader can tell: all four of its checks are against whichever
+    writer wrote last, so a torn image is published as coherent. On the depth buffer
+    the `aux` carries the affine fit, so a fit from one process pairs with pixels from
+    the other - the exact failure `_write_depth` exists to prevent.
+
+    SIGTERM is still what we ask with; the camera gets released properly that way.
+    SIGKILL is what we insist with a second later, and `start()` now returns 0 rather
+    than launching a second writer beside a process that survived even that.
+  * **"Running" meant "a sidecar is running somewhere on this machine".**
+    `running_pids()` is machine-wide on purpose - that is what lets Stop reach a
+    sidecar started from a terminal, and it stays. But pairing it with a launch
+    signature stored in the COMP, which persists into the `.toe`, meant a sidecar left
+    in a terminal read as Running as soon as the saved signature matched.
+    `ensure_running` then declined to start anything, the `sc_*` channels arrived on
+    the same port so uptime climbed, and the panel looked healthy while every flag on
+    it described a process that did not exist. Two TouchDesigner instances did it to
+    each other.
+
+    `Capturepid` was already being written and never read. It is read now, and there
+    is a fourth state - `Not Ours - pid N` - because the two need opposite actions:
+    ours wants a restart, theirs wants Stop.
+  * **The TOP Input teardown had no barrier.** `stop()`'s own comment says the reader
+    must be stopped "before the engine, or a frame can arrive mid-teardown", and a
+    bounded `join` does not deliver that: a reader that had not finished in a second
+    was left running while `engine.stop()` released the detectors underneath it.
+    `submit_sample_buffer` running Vision against a detector being released is a
+    segfault, not an exception. The join is still bounded, and now falls through to a
+    lock the pump holds around the one call that reaches into the engine - taking it
+    proves no frame is inside and none can enter, because the pump re-checks the stop
+    flag under the same lock.
+  * **And the generated `_apply_gating` had lost the empty-keep-list guard** that its
+    builder-side twin has carried since the day it was measured. An empty keep list
+    means every group reported disabled, and writing "" to a Select CHOP that is not
+    bypassed empties the output in silence. It was masked by the corrective second
+    pass a frame later - which is guarded on `moved`, and switching every stream off
+    moves nothing.
+
+**`Keep Layout` did not keep the layout — 2026-09-08.**
+
+Thirty master-level operators across ten builders wrote `nodeX`/`nodeY` straight from
+the table. Tidy the master network, switch the parameter on, rebuild, and everything
+moves back - the parameter promising the one thing it did not do.
+
+The rule itself was already written down and correct: `placement()` in
+`appletd/td_layout.py`, with a docstring explaining that a NEW node is always placed
+whatever the flag says. Nothing called it. The reason is worth recording, because it
+is the shape of the bug rather than an oversight: every call site was
+
+    node = comp.op(NAME) or comp.create(KIND, NAME)
+    node.nodeX, node.nodeY = master_xy(NAME)
+
+and by the second line whether the node had existed a moment ago is unknowable. To
+honour the flag you had to first rewrite the first line. So the cheap thing to write
+was the wrong thing, everywhere, thirty times.
+
+`ensure(comp, kind, name, xy, keep)` does both, so honouring it is now shorter than
+not honouring it. Seven builders had also each grown an identical private
+`_keep_layout()`; there is one.
+
+**`td_build_vision.py` is exempt and earns it.** It destroys its own operators and
+makes them again, so at placement time every node genuinely is new and `ensure()`
+cannot help. It snapshots every child's position BEFORE the destroy loop and puts them
+back at the end - and the comment that used to sit above the flag, saying "the loose
+DATs at the top level do not honour this, because this script destroys and recreates
+them and there is nothing to preserve", was true and was the bug.
+
+Verified live rather than by reading. Moved `sidecar_control`, `video_flip` and
+`about_control` to (-3000, 2500) and neighbouring spots, switched `Keep Layout` on, ran
+the full eighteen-builder chain: all three came back at exactly those coordinates, and
+the master reported "Keep Layout: 1 operator(s) put back where you had them" for the
+one it had recreated. Positions and the parameter restored afterwards; capture never
+dropped.
+
+Two tests hold it: no builder may place a master-level operator without `ensure()`, and
+`td_build_vision.py`'s exemption is checked against the snapshot-and-restore actually
+being there, in the right order, rather than taken on trust.
+
+**Also, in the same pass:**
+
+  * **`MAX_PINS` was one definition and three copies of `range(1, 9)`** - the pin
+    parameters, the launch signature, the Parameter Execute's watch list and the page
+    layout. Raising the count would have built a panel with rows nothing watched,
+    nothing placed and nothing restarted for, each failing silently and differently.
+    One definition in `td_layout.py` - not in `pins.py`, where it looks like it
+    belongs: the solver has no maximum, it fits whatever it is handed. Eight is a fact
+    about the PANEL.
+  * **`_migrate_root` blanked `/Users/Shared`.** It tests for a path under `/Users/`
+    that is not under this home, which is meant to catch a `.tox` carrying the
+    BUILDER'S home directory - and its own docstring promised "a shared location is
+    left exactly as it is". `/Users/Shared` is the directory macOS ships for exactly
+    this, and choosing it meant the setting silently emptied itself on every open. The
+    test is now the SHAPE of another user's home.
+  * **Nothing ever called `requestAccessForMediaType_`.** macOS shows the camera
+    prompt when something asks, and until it does the host application is not in
+    System Settings > Privacy & Security > Camera at all - there is no switch to turn
+    on. So a first run refused at status 0 with "grant camera access in System
+    Settings", sending somebody to a list their application was not in. It asks now,
+    waits up to 60 s for an answer, and has a different message for each of the four
+    statuses, because they need different actions.
+  * **A camera revoked mid-run was invisible.** AVFoundation just stops delivering, so
+    the age climbs and every other cause of a stalled camera looks the same. The
+    status is re-read only when nothing has arrived for a whole status interval - a
+    microsecond call in the one case where nothing else can name the cause.
+  * **No build gate for POPs.** The overlay is drawn with them and they arrived in
+    TouchDesigner 2025; on anything older every `td.choptoPOP` is an AttributeError
+    halfway through a build, leaving a half-made COMP and a traceback about a missing
+    attribute rather than a missing feature. It asks whether the operator types exist,
+    which is the actual question - `app.version` reads "099" on the build this was
+    written against and answers nothing.
+
+**An install that hung had no way out, and the retired route read as the current one
+— 2026-09-08.**
+
+`curl` was called with no limits at all. A broken connection fails; a captive portal
+or a stalled proxy does not - it is an open socket that never delivers, so the panel
+sat on "downloading Python (26 MB)" for as long as anybody was willing to watch, with
+nothing to press. Two halves to the fix:
+
+  * **`--speed-limit 1024 --speed-time 60`**, and deliberately not `--max-time`. A
+    wall clock would abort a slow-but-working download on a bad hotel connection,
+    which is exactly the case that most needs to be allowed to finish. This gives up
+    only when less than a kilobyte has moved in a minute, which no working download
+    does and no hung one survives. Plus `--connect-timeout 30` and two retries.
+
+A `Cancel Install` button was built alongside this and then REMOVED, which is worth
+recording because it did not work and the reason is not obvious. `Popen` starts
+`/bin/sh install.sh` and `curl` is a CHILD of that shell, in the same process group;
+signalling the shell alone leaves `curl` orphaned and still downloading. So Cancel
+would have written "cancelled" to the panel while 26 MB carried on arriving in the
+background - a button that reports something it has not done. Doing it properly needs
+its own process group and a `killpg`. The stall limits above cover the case it was
+written for, so there is nothing here to work around in the meantime.
+
+**And `appletd/td/bootstrap.py`, `appletd/td/hands_chop.py` and
+`tools/td_setup_snippet.py` all opened with "HOW TO USE IT".** They are the
+pre-sidecar, in-process route: Vision on a background thread inside TouchDesigner,
+which is the arrangement where a Vision call landing on a torn-down capture session is
+a native crash `except` cannot catch and that takes the application with it. Somebody
+opening the repository and reading them would have followed the instructions. Each
+now opens by saying it is superseded, what replaced it, and why - and that it is kept
+as the reference for what that path costs, since the figures in docs/BENCHMARKS.md
+came off it.
+
+**An install that succeeds while the sidecar is running changes nothing until it is
+restarted, and nothing said so — 2026-09-08.**
+
+Found while verifying the rest of today's work rather than by review. The sidecar
+imports the INSTALLED package once, at launch. So pressing Install with capture
+running rewrites the code on disk and leaves the process executing what it read
+minutes ago. `Installstate` says `Installed`, `Capturestate` says `Running`, no launch
+flag has moved so there is no `Requires Restart` - and the panel is confidently
+describing two different versions of the package at the same time.
+
+That is the exact shape the install states were built to close, one layer up: "the
+files are there" is not "the thing that is running is those files". `Installstate` now
+ends with `- restart capture to run it` whenever an install finishes with a sidecar
+still up.

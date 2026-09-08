@@ -130,12 +130,24 @@ def main():
                   if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
     from appletd.streams import FLOW_ACCURACIES
-    from appletd.td_layout import OUTPUT_ORDER, PACKAGE_ROOT_SOURCE, master_xy
+    from appletd.td_layout import (
+        OUTPUT_ORDER,
+        PACKAGE_ROOT_SOURCE,
+        ensure,
+        keep_layout,
+        master_xy,
+    )
 
     comp = op(MASTER_PATH)
     if comp is None:
         print("no COMP at %s - run tools/td_build_vision.py first" % MASTER_PATH)
         return
+
+    # ONE call, so `Keeplayout` reaches every operator this builder places.
+    # Twenty-odd of them wrote nodeX/nodeY straight from the table, so
+    # tidying the master network and switching the parameter on lasted
+    # exactly until the next rebuild.
+    keep = keep_layout(comp)
 
     print("=" * 70)
     print("flow: optical flow on %s" % comp.path)
@@ -172,14 +184,12 @@ def main():
         path.default = DEFAULT_FLOW_PATH
         path.val = DEFAULT_FLOW_PATH
 
-    callbacks = comp.op(CALLBACKS) or comp.create(td.textDAT, CALLBACKS)
-    callbacks.nodeX, callbacks.nodeY = master_xy(CALLBACKS)
+    callbacks = ensure(comp, td.textDAT, CALLBACKS, master_xy(CALLBACKS), keep)
     callbacks.text = CALLBACK_SOURCE % {"comp": comp.path,
                                         "resolver": PACKAGE_ROOT_SOURCE}
 
     existed = comp.op(SCRIPT) is not None
-    script = comp.op(SCRIPT) or comp.create(td.scriptTOP, SCRIPT)
-    script.nodeX, script.nodeY = master_xy(SCRIPT)
+    script = ensure(comp, td.scriptTOP, SCRIPT, master_xy(SCRIPT), keep)
     if not existed:
         for child in list(comp.children):
             if child.name.startswith(SCRIPT + "_callbacks") and child.valid:
@@ -202,8 +212,7 @@ def main():
     script.par.Tick.expr = "absTime.frame if op.Appletd.par.Streamflow else 0"
     script.par.Tick.readOnly = True
 
-    out = comp.op(OUT) or comp.create(td.outTOP, OUT)
-    out.nodeX, out.nodeY = master_xy(OUT)
+    out = ensure(comp, td.outTOP, OUT, master_xy(OUT), keep)
     out.inputConnectors[0].connect(script)
     # Pinned, and it matters more here than anywhere: `outflow` sorts BEFORE `outmask`
     # alphabetically, so without an explicit number it would insert itself in the

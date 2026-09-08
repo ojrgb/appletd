@@ -122,12 +122,23 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from appletd.td_layout import PACKAGE_ROOT_SOURCE, master_xy
+    from appletd.td_layout import (
+        PACKAGE_ROOT_SOURCE,
+        ensure,
+        keep_layout,
+        master_xy,
+    )
 
     comp = op(MASTER_PATH)
     if comp is None:
         print("no COMP at %s - run tools/td_build_vision.py first" % MASTER_PATH)
         return
+
+    # ONE call, so `Keeplayout` reaches every operator this builder places.
+    # Twenty-odd of them wrote nodeX/nodeY straight from the table, so
+    # tidying the master network and switching the parameter on lasted
+    # exactly until the next rebuild.
+    keep = keep_layout(comp)
 
     print("=" * 70)
     print("topinput: an image input on %s" % comp.path)
@@ -159,21 +170,18 @@ def main():
         path.val = DEFAULT_FRAMES_PATH
 
     # -- the input, and the writer ----------------------------------------
-    in_top = comp.op(IN_TOP) or comp.create(td.inTOP, IN_TOP)
-    in_top.nodeX, in_top.nodeY = master_xy(IN_TOP)
+    in_top = ensure(comp, td.inTOP, IN_TOP, master_xy(IN_TOP), keep)
     # PRESERVED, never recreated - an In TOP IS the COMP's input connector, and
     # destroying it disconnects whatever the project had wired to it.
 
     # The code goes in a DAT, not on the operator: a Script TOP has no `.text` - its
     # cook lives in whatever its `callbacks` parameter points at.
-    callbacks = comp.op(CALLBACKS) or comp.create(td.textDAT, CALLBACKS)
-    callbacks.nodeX, callbacks.nodeY = master_xy(CALLBACKS)
+    callbacks = ensure(comp, td.textDAT, CALLBACKS, master_xy(CALLBACKS), keep)
     callbacks.text = WRITER_SOURCE % {"comp": comp.path,
                                       "resolver": PACKAGE_ROOT_SOURCE}
 
     existed = comp.op(WRITER) is not None
-    writer = comp.op(WRITER) or comp.create(td.scriptTOP, WRITER)
-    writer.nodeX, writer.nodeY = master_xy(WRITER)
+    writer = ensure(comp, td.scriptTOP, WRITER, master_xy(WRITER), keep)
     if not existed:
         # Creating a Script TOP auto-docks a callbacks DAT of its own. Destroyed, or
         # two of them sit there and only one is the one being edited - the same

@@ -120,6 +120,12 @@ SKELETON_XY = {
 }
 
 
+# What this builder cannot be built without. Checked by name at the top of `main()`
+# rather than assumed - see the gate there for why it is not a version comparison.
+REQUIRED_OP_TYPES = ("choptoPOP", "deletePOP", "nullPOP", "inPOP", "outPOP",
+                     "lineMAT")
+
+
 def main():
     import td
 
@@ -128,11 +134,35 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from appletd.td_layout import master_xy
+    from appletd.td_layout import ensure, keep_layout, master_xy
+    from appletd.td_pages import LAYOUT
 
     comp = op(MASTER_PATH)
     if comp is None:
         print("no COMP at %s - run tools/td_build_vision.py first" % MASTER_PATH)
+        return
+
+    # ONE call, so `Keeplayout` reaches every operator this builder places.
+    # Twenty-odd of them wrote nodeX/nodeY straight from the table, so
+    # tidying the master network and switching the parameter on lasted
+    # exactly until the next rebuild.
+    keep = keep_layout(comp)
+
+    # THE BUILD GATE, and it asks the real question rather than reading a version
+    # string. The overlay is drawn with POPs, which arrived in TouchDesigner 2025, and
+    # on anything older every `td.choptoPOP` here is an AttributeError halfway through
+    # a build - a half-made overlay COMP and a traceback that names a missing
+    # attribute rather than a missing feature.
+    #
+    # `app.version` is "099" on the build this was written against, so it answers
+    # nothing. `app.build` is a string to parse, and a parse is a second thing to get
+    # wrong. Whether the operator type EXISTS is the actual question.
+    missing = [name for name in REQUIRED_OP_TYPES if not hasattr(td, name)]
+    if missing:
+        print("FAIL this TouchDesigner has no %s." % ", ".join(missing))
+        print("     The overlay is drawn with POPs, which need TouchDesigner 2025 "
+              "or newer. Everything else in appletd works without them - the "
+              "channels, the mask, depth and flow are all unaffected.")
         return
 
     print("=" * 70)
@@ -146,8 +176,26 @@ def main():
     for _inner, toggle, _stream, mode_name, page_name, modes in overlays:
         page = pages.get(page_name)
         if page is None:
-            print("   FAIL no %s page - run tools/td_add_pages.py first" % page_name)
-            return
+            # CREATED, not refused. "Body Pose" and "Face" do not exist until
+            # `td_add_pages.py` moves `Streampose` and `Streamface` onto them, and
+            # that has to run AFTER this one or the two parameters below are appended
+            # after the sort and land at the bottom of the page. So on a first-ever
+            # chain run this printed one FAIL, returned, and built no overlay at all -
+            # while `td_rebuild.py` reported every builder ran. A second run fixed it,
+            # which is why it was never noticed from a checkout that had already been
+            # built once.
+            #
+            # The name is still owned in one place: `td_pages.LAYOUT` is the authority
+            # on which pages exist, and `test_overlay_pages_are_real_pages` holds this
+            # table against it.
+            if page_name not in LAYOUT:
+                print("   FAIL %r is not a page in appletd/td_pages.py LAYOUT, so "
+                      "creating it here would make a page nothing ever sorts"
+                      % page_name)
+                return
+            print("   %s page did not exist yet - created" % page_name)
+            page = comp.appendCustomPage(page_name)
+            pages[page_name] = page
         if toggle not in existing:
             par = page.appendToggle(toggle, label="Show Overlay")[0]
             par.default = False
@@ -172,8 +220,7 @@ def main():
             menu.val = modes[0][0]
 
     # -- the COMP everything renders in -------------------------------------
-    group = comp.op(OVERLAY) or comp.create(td.baseCOMP, OVERLAY)
-    group.nodeX, group.nodeY = master_xy(OVERLAY)
+    group = ensure(comp, td.baseCOMP, OVERLAY, master_xy(OVERLAY), keep)
     group.color = (0.35, 0.45, 0.5)
 
     # `coords`, and the choice is the whole reason the overlay works in world units.
@@ -280,7 +327,10 @@ def main():
     out.inputConnectors[0].connect(render)
     over = comp.op("video_over")
     if over is not None:
-        # Input 1 is the FOREGROUND of the Over TOP - the overlay above the image.
+        # `inputConnectors[0]` is the FOREGROUND of an Over TOP - the overlay above
+        # the image. `tools/td_add_video.py` puts the camera on `[1]`, the
+        # background. Indices rather than "Input 1", which reads as either depending
+        # on whether you are looking at Python or at the parameter dialog.
         #
         # `group.outputConnectors[0]` and NOT `group`: a COMP is connected by its
         # output CONNECTOR, and passing the COMP itself raises "Invalid number or

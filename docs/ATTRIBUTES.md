@@ -211,9 +211,11 @@ human<i>_bbox_x, _bbox_y, _bbox_w, _bbox_h            the person rectangle
 arrives in world and pixel space.
 
 `human<i>_*` is `VNDetectHumanRectanglesRequest` — a person's bounding box without any
-joints, cheaper than the full body pose (2.53 ms against 3.75 ms at 720p) and useful on
-its own for counting or framing people. It is part of the pose stream, so `Streampose`
-turns it on.
+joints, useful on its own for counting or framing people, and it finds people the body
+pose misses. It is part of the pose stream, so `Streampose` turns it on **and pays for
+it**: measured over 35 fixture frames, the box request adds **2.91 ms** to the pose
+stream's 3.91 ms. Vision does not share its image analysis between the two requests, so
+batching them saves nothing.
 
 Joints, in channel order: `nose` `left_eye` `right_eye` `left_ear` `right_ear` `neck`
 `left_shoulder` `right_shoulder` `left_elbow` `right_elbow` `left_wrist` `right_wrist`

@@ -247,8 +247,14 @@ def solve(depth: numpy.typing.NDArray[Any], pins: tuple[Pin, ...],
             fit = _fit([readings[i] for i in indices], pins, indices, frame_range)
 
     if fit is None:
+        # THE READINGS THE FAILED FIT ACTUALLY USED, which is not all of them once one
+        # has been dropped. Passing the whole list measured the spread including the
+        # pin that was thrown away, so three pins where the survivors sat close
+        # together reported "fit went non-physical - a pin ended up behind the camera"
+        # and sent the user looking for a pin behind the camera. The cause was the
+        # spread, and the message for it exists.
         return Solve(None, None, (), dropped, (), frame_range,
-                     _refusal(readings, pins, frame_range))
+                     _refusal([readings[i] for i in indices], pins, frame_range))
     alpha, beta, residuals = fit
     note = "%d pins" % len(indices)
     if dropped is not None:

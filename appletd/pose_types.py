@@ -251,6 +251,21 @@ def blank_pose_frame(seq: int = 0, captured_at: float = 0.0,
                      humans=tuple(BLANK_HUMAN for _ in range(MAX_BODIES)))
 
 
+def order_humans(humans: Sequence[HumanRect]) -> tuple[HumanRect, ...]:
+    """Exactly MAX_BODIES rectangles, leftmost first, padded with BLANK_HUMAN.
+
+    Contract: same shape and same reason as `order_bodies` - a fixed-length list so
+              `human1_*` means the same slot every frame, and the leftmost first
+              because a rectangle has no chirality to sort by.
+    Traps: this is a DIFFERENT request's ordering from `order_bodies`. `human0` is the
+              leftmost RECTANGLE and `p0` the leftmost SKELETON, and nothing guarantees
+              they are the same person - see `HumanRect`.
+    """
+    ordered = sorted(humans, key=lambda human: human.sort_key())[:MAX_BODIES]
+    return tuple(ordered) + tuple(
+        BLANK_HUMAN for _ in range(MAX_BODIES - len(ordered)))
+
+
 def order_bodies(bodies: Sequence[Body]) -> tuple[Body, ...]:
     """Left to right by the reference joint, padded to MAX_BODIES. Pure.
 

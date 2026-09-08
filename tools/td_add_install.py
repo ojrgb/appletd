@@ -46,7 +46,11 @@ MASTER_PATH = "/project1/appletd"
 CONTROL = "install_control"
 CALLBACKS = "install_callbacks"
 ON_START = "install_start"
-LOG_PATH = "/tmp/appletd_install.log"
+# The install log lives in the per-user temp directory, RESOLVED IN THE GENERATED
+# MODULE rather than here. Two reasons, and both are real: /tmp is world-writable, so
+# a fixed name there is somebody else's symlink to plant and this opens it "w"; and
+# baking any absolute path in at build time ships MY machine's path inside the .tox.
+LOG_EXPR = 'os.path.join(tempfile.gettempdir(), "appletd_install.log")'
 
 # The states, in the order they are reached, with the colour a panel should show.
 # Kept here as documentation rather than as code: `Installstate` is a string field, and
@@ -79,10 +83,11 @@ once and TouchDesigner said it may terminate (DESIGN.md 2.8).
 
 import os
 import subprocess
+import tempfile
 
 COMP_PATH = %(comp)r
 SRC_PATH = COMP_PATH + "/src"
-LOG_PATH = %(log)r
+LOG_PATH = %(log)s
 POLL_FRAMES = 30
 
 # The running installer, and the step it last reported. MODULE globals, not operator
@@ -108,6 +113,12 @@ def _comp():
     return op(COMP_PATH)
 
 
+# Directories under /Users/ that are NOT somebody's home. macOS ships `Shared` for
+# things two accounts both reach, which is a perfectly good place to put an install -
+# and blanking it was this function telling the user their choice did not stick.
+_NOT_A_HOME = ("Shared", "Guest")
+
+
 def _migrate_root(comp):
     """Blank an `Installroot` that belongs to somebody ELSE'S home. Returns it, or None.
 
@@ -124,9 +135,20 @@ def _migrate_root(comp):
     when the project opens, so the component heals itself rather than needing a
     download.
 
-    CONSERVATIVE ON PURPOSE. Only a path under `/Users/` that is not under THIS home
-    is touched - so a deliberate `/Volumes/Work/appletd` or a shared location is left
-    exactly as it is, and so is a correct path on the machine that made it.
+    CONSERVATIVE ON PURPOSE. Only ANOTHER USER'S HOME is touched - so a deliberate
+    `/Volumes/Work/appletd` or a shared location is left exactly as it is, and so is
+    a correct path on the machine that made it.
+
+    `/Users/Shared` IS SUCH A SHARED LOCATION, and the sentence above already claimed
+    it was safe while the code blanked it: the test was `startswith("/Users/")` and
+    not under this home, which `/Users/Shared/appletd` satisfies. It is the one
+    directory macOS ships for exactly this - a path several people would reasonably
+    choose for an install two accounts share - and choosing it meant the setting
+    silently emptied itself every time the project opened.
+
+    So the test is now the SHAPE of another user's home: `/Users/<name>/...` where
+    `<name>` is neither this account nor `Shared`. Anything deeper or otherwise
+    shaped is somebody's decision, and stays.
     """
     par = getattr(comp.par, "Installroot", None)
     if par is None:
@@ -136,6 +158,11 @@ def _migrate_root(comp):
     if not root or not root.startswith("/Users/"):
         return None
     if root == home or root.startswith(home + os.sep):
+        return None
+    # The segment straight after /Users/. A home directory is exactly one level down,
+    # so `/Users/someone/...` is a home and `/Users/Shared/...` is not.
+    parts = [part for part in root.split(os.sep) if part]
+    if len(parts) < 2 or parts[1] in _NOT_A_HOME:
         return None
     par.val = ""
     return root
@@ -282,9 +309,17 @@ def install(force=False):
         handle.write(script)
 
     _step = "starting"
+    # CLOSED here, not left to the garbage collector. The child gets its own
+    # descriptor from `Popen`; ours is finished with the moment it has. Leaving it to
+    # fall out of scope worked, which is why it survived - but it left one open
+    # descriptor per install for however long a reference lived, in a process that is
+    # not restarted for days.
     log = open(LOG_PATH, "w", encoding="utf-8")
-    _process = subprocess.Popen(["/bin/sh", script_path], stdout=log,
-                                stderr=subprocess.STDOUT, cwd=root)
+    try:
+        _process = subprocess.Popen(["/bin/sh", script_path], stdout=log,
+                                    stderr=subprocess.STDOUT, cwd=root)
+    finally:
+        log.close()
     print("[appletd] install started, pid %%d, %%d modules written, log %%s"
           %% (_process.pid, written, LOG_PATH), flush=True)
     if python:
@@ -315,7 +350,25 @@ def poll():
     _process = None
     if code == 0:
         print("[appletd] install finished", flush=True)
-        state(comp)
+        result = state(comp)
+        # AND SAY IF THE RUNNING SIDECAR IS NOW OUT OF DATE. The sidecar imports the
+        # INSTALLED package once, at launch. So an install that succeeds while one is
+        # running changes the code on disk and nothing else: the process carries on
+        # executing what it read minutes ago, `Capturestate` still says Running
+        # because no LAUNCH FLAG moved, and the panel is now describing two different
+        # versions at once. That is the same "everything looks fine" gap the install
+        # states were built to close, one layer up.
+        control = comp.op("sidecar_control")
+        if result.startswith("Installed") and control is not None:
+            try:
+                still_running = bool(control.module.running_pids())
+            except Exception:                                   # noqa: BLE001
+                still_running = False
+            if still_running:
+                comp.par.Installstate = (
+                    "%%s - restart capture to run it" %% result)
+                print("[appletd] the sidecar is still running the PREVIOUS "
+                      "install; press Restart Capture", flush=True)
     else:
         # The script's own FAIL line if it produced one, because it names WHICH step -
         # "install failed" on its own is what makes somebody file an issue instead of
@@ -430,7 +483,7 @@ def main():
     # have moved elsewhere, and raises - the disagreement one table prevents.
 
     for name, source, subs in (
-            (CONTROL, CONTROL_SOURCE, {"comp": MASTER_PATH, "log": LOG_PATH,
+            (CONTROL, CONTROL_SOURCE, {"comp": MASTER_PATH, "log": LOG_EXPR,
                                        "control": CONTROL}),
             (CALLBACKS, CALLBACK_SOURCE, {"control": CONTROL}),
             (ON_START, START_SOURCE,
@@ -446,7 +499,7 @@ def main():
         if where is not None:
             dat.nodeX, dat.nodeY = where
         if name == CALLBACKS:
-            dat.par.ops = comp.path
+            dat.par.op = comp.path
             dat.par.pars = "Install Forceinstall"
             dat.par.custom = True
             dat.par.builtin = False

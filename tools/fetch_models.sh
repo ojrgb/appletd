@@ -24,11 +24,15 @@ cd "$(dirname "$0")/.."
 mkdir -p models
 HF=https://huggingface.co
 
-big_enough() { [ -f "$1" ] && [ "$(wc -c < "$1")" -gt "$2" ]; }
+# EXACT, not a floor. A floor at 81% of the real size passed a download that stopped
+# four fifths of the way through, and the first sign was Core ML refusing to load it.
+# The file comes from a pinned URL, so its size is a constant and anything else is a
+# bad copy - which this then replaces.
+right_size() { [ -f "$1" ] && [ "$(wc -c < "$1")" -eq "$2" ]; }
 
-fetch_package() {   # repo, package name, expected weight bytes
+fetch_package() {   # repo, package name, exact weight bytes
     pkg="models/$2"
-    if big_enough "$pkg/Data/com.apple.CoreML/weights/weight.bin" "$3"; then
+    if right_size "$pkg/Data/com.apple.CoreML/weights/weight.bin" "$3"; then
         echo "have $2"
         return 0
     fi
@@ -44,7 +48,7 @@ fetch_package() {   # repo, package name, expected weight bytes
 }
 
 fetch_package apple/coreml-depth-anything-v2-small \
-    DepthAnythingV2SmallF16.mlpackage 40000000
+    DepthAnythingV2SmallF16.mlpackage 49419072
 
 echo
 echo "Models are in ./models and are gitignored."
