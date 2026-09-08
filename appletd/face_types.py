@@ -1,48 +1,24 @@
-"""The face data contract: head pose and bounding box now, landmarks pending one number.
+"""The face data contract: head pose, bounding box, landmarks and key points.
 
-The third of the stream contracts, after `types.py` (hands) and `pose_types.py`
-(bodies), and the same boring shape: frozen dataclasses, tuples of strings, an
-import-time self-check, nothing imported but the standard library.
+The third stream contract, after `types.py` (hands) and `pose_types.py` (bodies), and
+the same shape: frozen dataclasses, tuples of strings, an import-time self-check,
+nothing imported but the standard library.
 
-WHY THIS ONE IS NOT JUST ANOTHER JOINT TABLE. Hands and bodies both come back as a
-`VNRecognizedPointsObservation` - a flat dict of named joints, fixed count, known in
-advance. A face does not. `VNFaceObservation.landmarks()` returns a
-`VNFaceLandmarks2D` of **12 named REGIONS** (MEASURED, DESIGN.md 2.12), each a
-`VNFaceLandmarkRegion2D` with its own `pointCount`, and **nothing in the framework
-publishes those counts before a face has been seen**. The constellation is
-selectable - 65 or 76 points, default 76 - so the TOTAL is pinned by our own
-request, but the split across regions is not.
+A face is not another joint table. Hands and bodies come back as a flat dict of named
+joints with a fixed count; `VNFaceObservation.landmarks()` returns 12 named REGIONS,
+each with its own `pointCount`, and nothing in the framework publishes those counts
+before a face has been seen. The constellation is selectable - 65 or 76 points - so
+the total is pinned by our request, but the split across regions is not.
 
-So this module shipped in two stages, and the second one is the reason the first
-was worth the trouble:
+  * `FACE_SCALARS` - found, confidence, capture quality, the three angles and the
+    bounding box. 23 channels, none of which need landmarks.
+  * `FACE_REGIONS` - the 12 regions. They OVERLAP: 87 slots over 76 distinct points,
+    so summing two regions double-counts the eleven shared ones.
+  * `FACE_KEYPOINTS` - four points per face, two of which no region publishes
+    directly and are computed instead.
 
-  * `FACE_SCALARS` - found, confidence, capture quality, roll/yaw/pitch, and the
-    bounding box. All of it comes off the observation itself, needs no landmarks,
-    and is verified against the live framework at start-up by `face.py`. 23 channels.
-  * `FACE_REGIONS` - the 12 regions, whose point counts sat at `None` for as long as
-    nobody had measured them. **MEASURED 2026-08-21** by
-    `tools/probe_face_regions.py` against a real face, and the numbers were not what
-    a reasonable guess would have produced: the regions sum to 87 slots over 76
-    distinct points, because they OVERLAP.
-  * `FACE_KEYPOINTS` - four points per face, three of which no region publishes
-    directly. Added 2026-08-24 because 348 landmark channels is the wrong answer for
-    a project that only wants to know where somebody is looking. 387 channels now.
-
-There is no guessed count anywhere in this file, and the reason to hold that line
-was borne out: a guessed count does not fail loudly - it lays a nose's points into
-an eyebrow's channels and looks entirely plausible - and the first self-check this
-module carried was written around an assumption (that the regions partition the
-constellation) that turned out to be false. To RE-measure, on another macOS or after
-a Vision update, run the probe again; it prints a paste-ready table.
-
-ANGLES ARE DEGREES HERE AND RADIANS IN VISION. Every angle in this system is
-degrees (docs/ATTRIBUTES.md), and `roll`/`yaw`/`pitch` arrive in radians. The
-conversion happens once, in `face.py`, and getting it wrong is a silent 57x - the
-numbers stay small and plausible and every downstream rotation is wrong.
-
-Thread: everything here is immutable, so any object from this module can be read
-        from any thread with no lock. Same mechanism as `types.py`.
-Ref: DESIGN.md 6.4 (the stream contract), 2.12 (the API surface, measured).
+Thread: pure data and pure functions. Safe anywhere.
+Ref: DESIGN.md 2.12, docs/ATTRIBUTES.md.
 """
 
 from __future__ import annotations
@@ -70,7 +46,7 @@ class FaceRegionSpec:
     in the channel names. `point_count` stays None until somebody MEASURES it -
     nothing here may be filled in from memory or from a blog post, because a wrong
     count silently lays one region's points into another's channels. The counts
-    below were measured on 2026-08-21; `tools/probe_face_regions.py` re-measures.
+    below were measured; `tools/probe_face_regions.py` re-measures.
     """
 
     name: str
@@ -78,12 +54,12 @@ class FaceRegionSpec:
     point_count: int | None = None
 
 
-# The 12 regions, VERIFIED to exist on `VNFaceLandmarks2D` 2026-08-21 (DESIGN.md
+# The 12 regions, VERIFIED to exist on `VNFaceLandmarks2D` (DESIGN.md
 # 2.12). Order is head-outward then top-down, and it will BE the channel order once
 # the counts land, so it is pinned by a test now rather than after a project
 # references it.
 FACE_REGIONS: Final[tuple[FaceRegionSpec, ...]] = (
-    # MEASURED 2026-08-21 by tools/probe_face_regions.py, against a real face on
+    # MEASURED by tools/probe_face_regions.py, against a real face on
     # this machine: pyobjc 12.2.2 / macOS 26.5.2, request revision 3, constellation
     # 76 points. Not copied from anywhere.
     FaceRegionSpec("face_contour", "faceContour", 17),
@@ -113,7 +89,7 @@ LANDMARKS_PUBLISHED: Final = all(r.point_count is not None for r in FACE_REGIONS
 CONSTELLATION_76: Final = 2
 
 # TWO totals, and conflating them is what made the first attempt at this table fail
-# its own self-check. MEASURED 2026-08-21, both:
+# its own self-check. MEASURED, both:
 #
 #   76  DISTINCT coordinates across all 12 regions - which is what "the 76-point
 #       constellation" means;
@@ -244,7 +220,17 @@ FACE_SCALARS: Final[tuple[str, ...]] = (
     # the same subject. Also UNMEASURED here, and the better candidate of the two.
     "quality",
     # DEGREES. Vision reports radians; the conversion is in face.py.
-    "roll", "yaw", "pitch",
+    #
+    # RENAMED, from `roll`/`yaw`/`pitch`. One vocabulary for every stream
+    # that has an orientation: `angle_x` is pitch (nodding), `angle_y` is yaw
+    # (turning), `angle_z` is roll (tilting), right-handed about the camera axes.
+    # The dataclass fields keep Vision's names, because they mirror Vision's API; it
+    # is the PUBLISHED channel that is ours to name.
+    #
+    # In x, y, z order - so `face_values` appends pitch, yaw, roll, in that order.
+    # The names and the values are paired by POSITION and nothing checks it at run
+    # time, which is why they are edited together and tested together.
+    "angle_x", "angle_y", "angle_z",
     # Normalised, origin BOTTOM LEFT, as Vision gives it. `bbox_y` is the BOTTOM
     # edge, not the top - the trap that DESIGN.md 7 exists for.
     "bbox_x", "bbox_y", "bbox_w", "bbox_h",
@@ -287,7 +273,7 @@ FACE_KEYPOINTS: Final[tuple[str, ...]] = (
 
 # The three regions that all carry the nose tip, and the whole of how it is found.
 #
-# MEASURED 2026-08-21 (DESIGN.md 2.12): the 12 regions cover 76 distinct points in
+# MEASURED (DESIGN.md 2.12): the 12 regions cover 76 distinct points in
 # 87 slots, and the arithmetic of the overlaps pins down exactly one point that
 # belongs to THREE regions - nine points sit in two, one sits in three, which is
 # 11 duplicate slots and 12 overlapping pairs. That point is the tip of the nose,
@@ -392,6 +378,110 @@ def face_keypoints(face: Face) -> tuple[tuple[float, float], ...]:
     )
 
 
+def face_angles(face: Face, width_px: int = 0,
+                height_px: int = 0) -> tuple[float, float, float]:
+    """(pitch, yaw, roll) in DEGREES, from the key points. Pure.
+
+    WHY NOT `observation.roll()` AND FRIENDS, which is where these used to come from:
+    Vision QUANTISES them. MEASURED on a live face at revision 3, the highest the
+    request offers - yaw arrives in 45-degree steps and roll in 30, so a head turned
+    slowly reads 0, 0, 0, then -45. That is unusable for anything continuous, and no
+    revision fixes it.
+
+    These are our own arithmetic on continuous inputs, so they cannot be quantised.
+
+    Contract: degrees. Roll is EXACT - a projection determines an in-plane rotation
+              fully. Yaw is well behaved near centre and compresses towards the
+              extremes. Pitch is APPROXIMATE and carries a population assumption -
+              see below. All three are 0.0 for a face that was not found, or when a
+              point they need is missing, which is the same convention every other
+              channel here uses.
+    Traps: the key points are normalised to the face's BOUNDING BOX, not the image
+              (DESIGN.md 2.12), so they are composed through the box before any angle
+              is taken. An angle measured in box coordinates is distorted by the
+              box's aspect and is not an angle at all.
+    Traps: NORMALISED IMAGE SPACE IS NOT SQUARE EITHER, and this one is easy to
+              miss. x and y are each normalised by their own dimension, so a 1280x720
+              frame stretches y by 16:9 against x - MEASURED on a real face, the
+              eye-line-to-mouth over eye-separation ratio read 2.09 in normalised
+              space where the anatomy is about 1.15. So the points go to PIXELS
+              before any angle, using the frame size the caller passes. With no size
+              given the angles are computed in normalised space and are consistent
+              but not geometrically true; the sidecar always passes one.
+    Ref: docs/ATTRIBUTES.md, and `appletd/derive.py` `_tilt` for the same honesty
+              about what a 2D projection can and cannot determine.
+    """
+    if not face.found:
+        return (0.0, 0.0, 0.0)
+    points = face_keypoints(face)
+    if any(point == _ABSENT_POINT for point in points):
+        return (0.0, 0.0, 0.0)
+    # Box-relative -> normalised image -> PIXELS, which is the only one of the three
+    # where an angle is an angle. See the second trap above.
+    scale_x = float(width_px) if width_px else 1.0
+    scale_y = float(height_px) if height_px else 1.0
+    eye_l, eye_r, nose, mouth = (
+        ((face.bbox_x + x * face.bbox_w) * scale_x,
+         (face.bbox_y + y * face.bbox_h) * scale_y)
+        for x, y in points)
+
+    # ROLL: the eye line, and nothing else is needed. Positive tilts the subject's
+    # right eye UP in the image.
+    across = (eye_r[0] - eye_l[0], eye_r[1] - eye_l[1])
+    separation = math.hypot(*across)
+    if separation <= 0.0:
+        return (0.0, 0.0, 0.0)
+    roll = math.degrees(math.atan2(across[1], across[0]))
+
+    # The eye midpoint, and the face's own axes: `across` along the eye line, `down`
+    # perpendicular to it. Measuring in THIS basis rather than the image's is what
+    # keeps a rolled head from leaking roll into the other two.
+    mid = ((eye_l[0] + eye_r[0]) / 2.0, (eye_l[1] + eye_r[1]) / 2.0)
+    unit_across = (across[0] / separation, across[1] / separation)
+    unit_down = (unit_across[1], -unit_across[0])
+    offset = (nose[0] - mid[0], nose[1] - mid[1])
+    along = offset[0] * unit_across[0] + offset[1] * unit_across[1]
+
+    # YAW: the nose leaves the midline as the head turns. Normalised by HALF the eye
+    # separation, so +-1 is the nose over an eye, and `asin` turns that into degrees
+    # rather than a bare ratio.
+    yaw = math.degrees(math.asin(max(-1.0, min(1.0, along / (separation / 2.0)))))
+
+    # PITCH, and this is the approximate one. The vertical face - eye line to mouth -
+    # FORESHORTENS as the head nods, so its length against the eye separation carries
+    # the signal. What it cannot give is the resting ratio for THIS face, which varies
+    # between people, so `_FACE_ASPECT_AT_REST` is a population figure and a stated
+    # guess.
+    #
+    # SIGNED AND UNCLAMPED AT REST, which is the whole shape of this expression. The
+    # obvious `acos(ratio / rest)` reads exactly 0 for every face LONGER than the
+    # constant, whatever it does - MEASURED, 700 frames of a real face all reading
+    # 0.00 - because the argument clamps at 1. Taking the DIFFERENCE from rest
+    # instead is continuous through it: negative for a longer-than-average face at
+    # rest, positive as a nod foreshortens it, and monotonic either way.
+    #
+    # So the DIRECTION and the CHANGE are trustworthy and the absolute magnitude is
+    # not. Calibrating `rest` per face, from a frame where the head is known to be
+    # level, is what would make it absolute.
+    down_face = ((mouth[0] - mid[0]) * unit_down[0] + (mouth[1] - mid[1]) * unit_down[1])
+    ratio = abs(down_face) / separation
+    shortening = (_FACE_ASPECT_AT_REST - ratio) / _FACE_ASPECT_AT_REST
+    pitch = math.degrees(math.asin(max(-1.0, min(1.0, shortening))))
+    return (pitch, yaw, roll)
+
+
+# The eye-line-to-mouth distance over the INTERPUPILLARY distance, in pixels, for a
+# face looking straight at the camera.
+#
+# MEASURED at 1.17 on one real face, and about 1.15 from published anatomy - so it is
+# a POPULATION FIGURE, not a measurement of anyone. It only sets the scale of
+# `face_angles`' pitch: too small and an upright face clamps at zero, too large and a
+# nod reads shallow. A face longer than this reads 0 until it nods enough to
+# foreshorten past it, which is the honest limit of doing this without calibrating
+# per face from a frame where the head is known to be level.
+_FACE_ASPECT_AT_REST: Final = 1.15
+
+
 def face_channel_names() -> tuple[str, ...]:
     """The complete, fixed face channel list, in publication order.
 
@@ -441,9 +531,10 @@ def face_channel_values(frame: FaceFrame, age_ms: float,
         values.append(1.0 if face.found else 0.0)
         values.append(float(face.confidence))
         values.append(float(face.quality))
-        values.append(float(face.roll_deg))
-        values.append(float(face.yaw_deg))
+        # x, y, z - pitch, yaw, roll. Paired by POSITION with FACE_SCALARS above.
         values.append(float(face.pitch_deg))
+        values.append(float(face.yaw_deg))
+        values.append(float(face.roll_deg))
         values.append(float(face.bbox_x))
         values.append(float(face.bbox_y))
         values.append(float(face.bbox_w))

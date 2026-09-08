@@ -1,34 +1,23 @@
 """Where every generated operator sits. The one place any of it is decided.
 
-WHY THIS EXISTS. Seven different scripts build the inside of `/project1/appletd`, and
-each one owns a few operators. Every one of them carried its own coordinates, and
-the results were exactly what that arrangement predicts: `tools/td_add_filter.py`
-and `tools/td_add_coords.py` both placed their group at (-400, -300), directly on
-top of each other, and nothing anywhere could notice. Inside the big groups it was
-worse - `temporal` and `latches` positioned 125 operators with a SINGLE running
-column counter, so every operator went one column further right whatever ROW it was
-on, and the two networks came out 11,590 and 9,800 units wide with their rows all
-starting somewhere different.
+Nine builders create operators inside `/project1/appletd`. Each carrying its own
+coordinates puts two groups at the same spot with nothing able to notice, so the
+coordinates are data here, in one table, and a test asserts they do not collide.
 
-So the coordinates are data, in one module, and a test asserts they do not collide.
-A builder asks this module where its node goes.
+THE GRID. A CHOP or DAT node is 130 x 90 and a base COMP is 160 x 130, so a 200-wide
+column leaves a comfortable gap beside a COMP and a 150-tall row leaves 20.
 
-THE GRID. A TouchDesigner CHOP or DAT node is 130 x 90 and a base COMP is
-160 x 130 - MEASURED, from `nodeWidth`/`nodeHeight` on a live network, not assumed.
-So a 200-wide column leaves a 40-unit gap beside a COMP and a 150-tall row leaves
-20 beside one; both are comfortable and neither wastes screen.
+NOT HERE: the positions of operators INSIDE a group. Those are generated - one row per
+concern, one column per stage - and their row constants live next to the code that
+decides what the rows are.
 
-WHAT IS NOT HERE. The positions of operators INSIDE a group. Those are generated -
-one row per concern, one column per stage, with a counter per row - and the row
-constants live at the top of the builder that generates them, next to the code that
-decides what the rows ARE. Putting them here would separate a row's name from the
-operators it holds.
+Also here: `OUTPUT_ORDER`, the COMP's output connector numbers. A COMP orders its
+outputs alphabetically by Out operator name unless `connectorder` says otherwise, so
+a rename would silently reorder what a project's wires carry.
 
-Pure stdlib. No pyobjc, no TouchDesigner - it is a table of numbers, and the same
-rule `types.py` follows.
+Pure stdlib. No pyobjc, no TouchDesigner.
 
 Thread: pure data and pure functions. Safe anywhere.
-Ref: docs/BUILD_PLAN.md step 10, DESIGN.md 6.5 (the COMP structure).
 """
 
 from __future__ import annotations
@@ -66,14 +55,14 @@ ROW_H: Final = 150
 # ---------------------------------------------------------------------------
 STREAM_NODES: Final[dict[str, tuple[int, int]]] = {
     # the data path, row 0
-    # Row 0 starts one column further left than it used to, to make room for
-    # `strip` between the OSC In CHOP and the filter.
+    # Row 0 starts a column left of the origin, to make room for `strip` between the
+    # OSC In CHOP and the filter.
     "in1": (-5 * COL_W, 0),
     "strip": (-4 * COL_W, 0),
     "filter": (-3 * COL_W, 0),
     "merge_out": (2 * COL_W, 0),
     "out1": (4 * COL_W, 0),
-    # `coords` and `screen_only` were HERE, one of each per stream, until 2026-08-24.
+    # `coords` and `screen_only` were HERE, one of each per stream, previously.
     # Both moved to the master: one coordinate group reading all three streams merged
     # instead of three near-identical ones, and one Delete CHOP instead of three.
     # BUILD_PLAN step 25. Their names stay out of this table so a stale position
@@ -100,14 +89,14 @@ MASTER_ROW_H: Final = 400
 
 MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     # The single output path, on row 0 to the right of the three stream COMPs.
-    # ONE output as of 2026-08-22: the three streams merge, the merge feeds a Select
+    # ONE output : the three streams merge, the merge feeds a Select
     # that keeps only what is being computed, and that feeds the only Out CHOP. A
     # component handed to a beginner should not open with 1,861 channels.
     #
     # A SELECT, not a Delete, and the reason is measured: for the same reduction of
     # the same 1,764 channels a Delete CHOP costs 0.6697 ms against the Select's
     # 0.0555 ms, and 3.3618 ms if the list is long. DESIGN.md 2.15.
-    # SIX STAGES as of 2026-08-24, and the order is the whole design - see
+    # SIX STAGES, and the order is the whole design - see
     # MASTER_CHAIN below for what each one is for and why it is where it is.
     "merge_streams": (COL_W, 0),
     "early_trim": (2 * COL_W, 0),
@@ -137,6 +126,28 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "sidecar_control": (-5 * COL_W, -4 * MASTER_ROW_H),
     "sidecar_callbacks": (-3 * COL_W, -4 * MASTER_ROW_H),
     "sidecar_exit": (-1 * COL_W, -4 * MASTER_ROW_H),
+    # TOP Input. Its own row above the image outputs, because it runs the other way:
+    # every other TOP here is something the sidecar produced, and these two are what
+    # TouchDesigner hands the sidecar.
+    "in_frames": (-3 * COL_W, -1 * ROW_H),
+    "frames_write": (-2 * COL_W, -1 * ROW_H),
+    "frames_callbacks": (-1 * COL_W, -1 * ROW_H),
+    # The camera passthrough, and the overlay composite that sits on top of it.
+    "video_in": (COL_W, -4 * ROW_H),
+    # WHICH PICTURE, following `Input Mode`: the camera, or the frames TouchDesigner
+    # is handing the sidecar. Before the flip, so both sources get mirrored.
+    "video_source": (2 * COL_W, -4 * ROW_H),
+    # The mirror, between the source and the composite. Only THIS image needs one:
+    # everything the sidecar returns is already mirrored by Vision's own
+    # orientation, and this is the one picture that never went through it.
+    "video_flip": (3 * COL_W, -4 * ROW_H),
+    "video_over": (4 * COL_W, -4 * ROW_H),
+    "outvideo": (5 * COL_W, -4 * ROW_H),
+    # The overlay group, below the video row it composites onto.
+    "overlay": (COL_W, -5 * ROW_H),
+    "flow_map": (COL_W, -6 * ROW_H),
+    "flow_callbacks": (0 * COL_W, -6 * ROW_H),
+    "outflow": (2 * COL_W, -6 * ROW_H),
     # Beside the teardown DAT, because it is the other half of the same job: one
     # starts the process when a project opens, the other stops it when TouchDesigner
     # quits.
@@ -171,19 +182,13 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
 # ---------------------------------------------------------------------------
 # The master's data path, in order
 #
-# SIX STAGES BUILT BY FOUR DIFFERENT BUILDERS, which is exactly why the order lives
-# here rather than in any of them. Before 2026-08-24 the chain was three nodes and
-# `tools/td_build_vision.py` wired all three; now `coords` comes from
-# `td_add_coords.py`, `screen_only` from `td_add_screenspace.py` and `early_trim`
-# from `td_add_groups.py`, and each of those runs at a different point in the chain
-# (`tools/td_rebuild.py`). A builder that guessed what sat either side of its own
-# operator would be right only for the build order it was written against - the same
-# mistake DESIGN.md 2.11 records as "a builder that repoints its CONSUMERS depends on
-# build order, and lost".
+# SIX STAGES BUILT BY FOUR DIFFERENT BUILDERS, which is why the order lives here
+# rather than in any of them: a builder that guessed what sat either side of its own
+# operator would be right only for the build order it was written against.
 #
-# So every builder creates its own stage and then calls `rewire_master_chain`, which
-# connects whatever exists in this order and ignores what does not. A partial build
-# produces a shorter but working chain rather than a broken one.
+# Every builder creates its own stage and then calls `rewire_master_chain`, which
+# connects whatever exists in this order and ignores what does not - so a partial
+# build produces a shorter but working chain rather than a broken one.
 #
 #   merge_streams   the three streams, side by side
 #   early_trim      the CHANNEL-REMOVING toggles - Fingertipsonly, Handbox,
@@ -378,32 +383,46 @@ _self_check()
 # ---------------------------------------------------------------------------
 # The resolver every generated DAT embeds
 # ---------------------------------------------------------------------------
-# WRITTEN ONCE HERE and pasted verbatim into the generated DATs, because it was
-# four copies of the same twenty lines and they drifted the moment one of them was
-# fixed.
+# Written once here and pasted verbatim into every generated DAT: it was four copies
+# of the same twenty lines, and they drifted the moment one was fixed.
 #
-# NOTHING MACHINE-SPECIFIC IS BAKED INTO IT, and that is the whole point. Until
-# 2026-08-24 each copy carried
+# NOTHING MACHINE-SPECIFIC IS BAKED IN. An earlier version preferred the checkout the
+# BUILDER ran from, which meant a shipped `.tox` named a stranger's home directory in
+# its own error messages and could not find a successful install.
 #
-#     BUILT_AT = "/Users/<whoever>/Documents/GitHub/appletd"
+# The order, and why each earns its place:
 #
-# - the checkout the BUILDER ran from - and preferred it over everything else. Two
-# consequences, both found by opening the component on somebody else's Mac, which is
-# the only place either could be found:
+#   1. `Installroot`, when set - an explicit answer wins, and it is the documented way
+#      to point the component at a checkout.
+#   2. `$APPLETD_REPO`, for a developer who wants the .toe to read a working tree.
+#      Carried by the environment rather than the file, so it cannot ship.
+#   3. `~/Library/Application Support/appletd`, where Install writes. Expanded at CALL
+#      time, so it is the home of whoever opened the file.
+# THE OUTPUT CONNECTOR NUMBERS, pinned rather than inferred.
 #
-#   * a shipped `.tox` named a stranger's home directory in its own error messages;
-#   * and it could not find a SUCCESSFUL install, because a blank `Installroot` was
-#     appended as "" and never expanded to where Install actually writes.
+# A COMP orders its output connectors by the ALPHABETICAL NAME of the Out operators
+# inside it, so renaming one would silently reorder what a project's wires carry.
+# `connectorder` overrides that with an explicit number, making the order a decision
+# here rather than an accident of spelling.
 #
-# THE ORDER, and why each entry earns its place:
-#
-#   1. `Installroot`, when set. An explicit answer wins; it is also the documented
-#      way to point the component at a checkout.
-#   2. `$APPLETD_REPO`, for a developer who wants the .toe to read a working tree
-#      rather than an install - the case BUILT_AT existed to serve. Opt-in, and
-#      carried by the environment rather than by the file, so it cannot ship.
-#   3. `~/Library/Application Support/appletd`, where Install puts it. Expanded at
-#      CALL time, so it is the home of whoever opened the file.
+# It fixes the ORDER but does not reserve a SLOT: destroy `outdepth` and `outmask`
+# reports index 1 while its `connectorder` still reads 2. `Hide Unused Outputs`
+# removes any output and prints what the connectors became, because that renumbering
+# cannot be prevented - only made visible.
+OUTPUT_ORDER: dict[str, int] = {
+    "out1": 0,          # the merged CHOP - hands, pose and face
+    "outdepth": 1,      # the depth map, a TOP
+    "outmask": 2,       # the segmentation mask, a TOP
+    # LAST, and it matters: `apply_output_visibility` removes from the end inwards, so
+    # a new output has to go on the end or it renumbers the ones after it.
+    "outvideo": 3,      # what the camera sees, with any overlays composited on
+    # `outflow` sorts BEFORE `outmask` alphabetically, so without a pinned number it
+    # would insert itself in the middle and renumber two live connectors. This is the
+    # case that makes the pinning load-bearing rather than tidy.
+    "outflow": 4,       # optical flow, two float components
+}
+
+
 PACKAGE_ROOT_SOURCE = '''
 # Where the `appletd` package is, resolved on the machine that OPENS this file.
 # Generated from tools/td_paths.py - see there for why nothing is baked in.

@@ -1,39 +1,16 @@
 """Synthetic faces: a `FaceFrame` from a handful of numbers. No camera, no Vision.
 
-The face counterpart of `synth.py` and `synth_body.py`. It produces the whole face
-contract - the observation's own numbers AND all 87 landmark slots per face - from a
-bounding box and three angles.
+The face counterpart of `synth.py` and `synth_body.py`. Produces the whole face
+contract - the observation's numbers and all 87 landmark slots - from a bounding box
+and three angles.
 
-WHAT THE LANDMARKS ARE, and this is the honest description: a CARICATURE, not a
-model. A neutral 76-point template laid out by hand in box-normalised coordinates,
-with the three head angles applied as the simplest transform that moves each feature
-in the right direction. It is exactly enough to prove that a landmark channel is
-wired to the right name, that it moves when the head moves, and that the
-box-relative composition in `tools/td_add_coords.py` puts a mouth where a mouth
-belongs. It is emphatically NOT enough to tune a threshold on, and any number
-measured against it is a number about this file.
-
-TWO THINGS IT DELIBERATELY DOES NOT REPRODUCE:
-
-  * **The region OVERLAP.** Vision's 12 regions share 11 points across 12 pairs -
-    measured, DESIGN.md 2.12 - so a real `f0_nose_crest_00_x` and a real
-    `f0_median_line_05_x` can be the same coordinate. Which indices pair up was not
-    recorded in a usable form, and inventing it would be a guess wearing a
-    measurement's clothes. Each region here is generated independently. A consumer
-    that relies on two regions agreeing cannot be tested against this stream.
-  * **Perspective.** Yaw compresses x and shifts it; pitch does the same to y; roll
-    rotates in BOX space rather than image space, so on a non-square box a rolled
-    face shears slightly. All three are monotonic in the right direction, which is
-    the property a wiring test needs.
-
-WHY IT IS WORTH HAVING AT ALL. The alternative for exercising 348 landmark channels
-is a camera and a person in frame, and almost nothing here needs one. It also
-closed a real gap: the face landmark coordinate transform could be verified for the
-BOX with landmarks at zero, and the multiply term - `point * bbox_w` - is only
-exercised by a non-zero point.
+The landmarks are a CARICATURE, not a model: a neutral template laid out by hand in
+box-normalised coordinates, with the head angles applied as the simplest transform
+that moves each feature the right way. Enough to prove a channel is wired to the right
+name, moves when the head moves, and composes through the box correctly. NOT enough to
+tune a threshold on - any number measured against this is a number about this file.
 
 Thread: pure functions over immutable values. Safe anywhere.
-Ref: DESIGN.md 6.4, 2.12, appletd/face_types.py.
 """
 
 from __future__ import annotations

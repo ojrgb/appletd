@@ -111,7 +111,7 @@ def _comp():
 def _migrate_root(comp):
     """Blank an `Installroot` that belongs to somebody ELSE'S home. Returns it, or None.
 
-    A .tox built before 2026-08-24 carries the BUILDER'S expanded path -
+    A .tox carries the BUILDER'S expanded path -
     `/Users/<whoever>/Library/Application Support/appletd` - because the parameter's
     default was `os.path.expanduser(...)` evaluated on the machine that ran the
     builder. On anybody else's Mac that points at a directory they do not have, and
@@ -267,7 +267,7 @@ def install(force=False):
         root=root, version=version,
         requirements=module.REQUIREMENTS,
         python=python,
-        # ALWAYS. This was `bool(comp.par.Streamdepth.eval())` until 2026-08-24, so
+        # ALWAYS. This was `bool(comp.par.Streamdepth.eval())`, so
         # the 47 MB model was fetched only if `Depth Map` happened to be ON at the
         # instant Install was pressed - a permanent consequence decided by a
         # momentary state. Turning depth on afterwards then asked the sidecar to load
@@ -426,9 +426,8 @@ def main():
     print("1. Install and Installstate on General, Forceinstall on Advanced")
 
     # ORDER IS NOT SET HERE. tools/td_add_pages.py owns every page's order from one
-    # table. This used to sort the page itself, and after the pages layer renamed
-    # `Vision` to `General` that sort raised - it was naming parameters that had moved
-    # to another page, which is exactly the disagreement one table prevents.
+    # table. A builder that sorts its own page names parameters the pages layer may
+    # have moved elsewhere, and raises - the disagreement one table prevents.
 
     for name, source, subs in (
             (CONTROL, CONTROL_SOURCE, {"comp": MASTER_PATH, "log": LOG_PATH,
@@ -465,7 +464,7 @@ def main():
             # it. It said "Installed - appletd" on a Mac where nothing was installed,
             # and greyed out the Install button that would have fixed it.
             #
-            # Reported 2026-08-24 from somebody else's MacBook. It cannot be seen on
+            # Reported from somebody else's MacBook. It cannot be seen on
             # the machine that built the file, because there the saved string happens
             # to be true.
             dat.par.create = True

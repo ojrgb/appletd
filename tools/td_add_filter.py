@@ -1,105 +1,37 @@
-#!/usr/bin/env python
-"""Add the one-euro position filter to the appletd COMP. Paste, Run Script.
+"""The one-euro position filter, one Filter CHOP per stream.
 
-    WHAT IT DOES. Smooths the 84 landmark positions - every `h{i}_{joint}_x` and
-    `_y` - upstream of everything else, so every derived distance, angle, curl,
-    velocity and bounding box inherits the smoothing from one place. Everything
-    that is not a position passes through untouched.
+    RUN IT
+        run("<repo>/tools/td_add_filter.py")
 
-    ON THE FILTER PAGE
-        Smoothing   toggle    off BYPASSES the filter - bit-exact passthrough,
-                              and it stops it computing (0.0010 ms)
-        Mincutoff   Hz        how heavily a SLOW-moving hand is smoothed
-        Beta        1/units   how far a FAST-moving hand is allowed through
+    or through the chain: tools/td_rebuild.py, layer "filter".
 
-TOUCHDESIGNER HAS A ONE-EURO FILTER BUILT IN, and this uses it. That is worth
-stating plainly because an earlier version of this file did not: it built the
-filter by hand out of a Feedback CHOP and twelve Math CHOPs, on the conclusion that
-the Filter CHOP could not work here. That conclusion was wrong, and the correction
-is measured:
+Smooths every position - `h0_index_tip_x` and the like - upstream of everything else,
+so each derived distance, angle, curl, velocity and bounding box inherits the
+smoothing from one place. Anything that is not a position passes through untouched.
 
-    MEASURED, same input, same 84 channels, mid-swipe:
+    Smoothing   toggle    off bypasses the filter: bit-exact passthrough, and it
+                          stops cooking
+    Mincutoff   Hz        how heavily a SLOW-moving hand is smoothed
+    Beta        1/units   how far a FAST-moving hand is allowed through
 
-        hand-built chain   0.6949 ms across 21 operators
-        Filter CHOP        0.0153 ms in 1 operator
+BETA'S UNITS ARE NOT THE PUBLISHED ONES. Every one-euro reference sets beta near
+0.007 while filtering PIXELS; these channels are normalised 0..1, where the same
+motion measures a thousand times smaller and 0.007 is no adaptation at all. The
+default here is scaled for normalised units.
 
-    ...a 45x reduction, and about 38% of the whole COMP's cook time. Output is
-    functionally identical - within 0.17% under motion - and on a still hand the
-    native one converges EXACTLY where the hand-built chain left a float32
-    residual of 9e-8.
+The Filter CHOP is INERT on a non-time-sliced one-sample CHOP and works normally on a
+time-sliced one, which is what the OSC In CHOP gives it (DESIGN.md 2.11).
 
-WHY THE WRONG CONCLUSION LOOKED RIGHT. The Filter CHOP was tested on `tmp_slope`,
-a Math CHOP fed by a Feedback - a NON-time-sliced, one-sample-per-frame operator -
-where all nine of its filter types returned the identical value, unchanged by
-width. That reading was correct and the generalisation drawn from it was not: the
-Filter CHOP is inert on a non-time-sliced one-sample CHOP, and works perfectly on
-a TIME-SLICED one. `oef_in` derives from the OSC In CHOP, which is time-sliced, so
-the filter has real slices to work on. DESIGN.md 2.11 carries the precise version.
+Which channels are filtered comes from `appletd/spaces.py`, not from a pattern here:
+positions, extents and angles are smoothed; confidences, counters and flags are not,
+because a smoothed confidence makes every gate that reads it lag. `scope_pattern()`
+verifies its pattern selects exactly that list before handing it over.
 
-WHAT THE NATIVE FILTER DOES NOT EXPOSE: `dcutoff`, the smoothing on the speed
-estimate that drives the adaptation. It takes `cutoff` (the minimum cutoff) and
-`speedcoeff` (beta) only. No loss in practice - 1.0 Hz is the published default and
-there was never a reason to move it - and the `Dcutoff` parameter is therefore gone
-rather than kept as a slider that does nothing.
+One filter per stream rather than one shared: each stream arrives on its own port with
+its own time-slicing, and merging them would make every stream cook when any of them
+arrived.
 
-WHY A ONE-EURO FILTER AT ALL. Landmark jitter and hand motion occupy the same
-frequency band, so a fixed cutoff must choose: smooth enough to still a resting
-hand, and a fast hand lags visibly; responsive enough to track a fast hand, and a
-resting one shimmers. The one-euro filter makes the cutoff a function of estimated
-speed, which is exactly the trade a constant cannot make. MEASURED on the
-hand-built version, and the reason it was worth having: at rest the cutoff sat at
-1.5 Hz, and a hand crossing the frame in 0.8 s lifted it to 4.35 Hz - 2.3x more
-responsive on a real gesture than at rest.
-
-**ABOUT BETA, because the published default is wrong for these units.** Every
-one-euro reference sets `beta` near 0.007, and every one of them is filtering
-PIXELS, where speeds run to hundreds of units per second. These channels are
-normalised 0..1, so the same motion measures about a thousand times smaller and
-`1.5 + 0.007 * 1.4` is no adaptation at all. Copying the published constant gives a
-filter that behaves like a fixed one and invites the conclusion that one-euro does
-not help. The default here is scaled for normalised units, and it is a GUESS -
-measuring per-joint jitter is what should set it (DESIGN.md 11).
-
-ONE OPERATOR, NOT FOUR, AND THAT IS THE WHOLE GROUP NOW. This used to be
-
-    in1 -> Select(smoothed) -> Filter -> Merge <- Select(everything else) -> out1
-
-and it is now `in1 -> Filter(scope=...) -> out1`. A CHOP's `scope` parameter names
-which channels the operator processes and passes every other one through
-BIT-EXACT - VERIFIED by lagging a scoped channel and comparing an unscoped one to
-the last bit. Two things follow, and the second matters more than the first:
-
-    MEASURED, per cook, with data flowing, BEFORE this change - the four-operator
-    form, summed over the group:
-
-        face   Select 0.1725 + Filter 0.0346 + Select 0.0105 + Merge 0.0299 = 0.2475
-        hands  0.1008 over 5 operators          pose  0.0897 over 5
-
-    The Select was the expensive one, and it was expensive for a stupid reason: its
-    `channames` carried 362 literal channel names, matched against every channel
-    every frame. What survives the change is the Filter CHOP alone. The figures
-    after it are in docs/JOURNAL.md and DESIGN.md 2.13, measured the same way.
-
-    ...and the SILENT FAILURE the old form invited is gone with it. Two Selects
-    merged back together had to partition the stream exactly, and four `sc_*`
-    channels once fell into neither list and left the COMP's output with no error
-    anywhere (DESIGN.md 2.11). There is no Select to get wrong now: a scoped
-    operator cannot drop a channel it was not asked about.
-
-Which channels get filtered is still decided by `appletd/spaces.py` rather than
-by a pattern written here - positions, extents and angles are smoothed, and
-confidences, counters and flags are not, because a smoothed confidence makes every
-gate that reads it lag behind the thing it gates. `spaces.scope_pattern()` turns
-that list into a `scope` string and VERIFIES the string selects exactly the list
-before handing it over; if no pattern can, it returns the literal names.
-
-Three groups rather than one shared filter operator, deliberately: each stream
-arrives on its own port with its own time-slicing, and merging them into one filter
-would make every stream cook when any of them arrived, and reintroduce exactly the
-cross-stream name coupling that separate ports were chosen to avoid (DESIGN.md 6.4).
-
-Ref: DESIGN.md 2.11 (the time-slicing rule), 6.4 (the streams), spaces.py (which
-channels), docs/ATTRIBUTES.md (the smoothing section), docs/BUILD_PLAN.md step 7.
+Ref: DESIGN.md 2.11, 6.4; docs/internals/filter-rationale.md for the measurements.
 """
 
 import os
@@ -128,15 +60,11 @@ MASTER_PAR = "op.Appletd.par.%s"
 
 BYPASS_CALLBACK = '''# Generated by tools/td_add_filter.py
 #
-# `Smoothing` off sets the Filter CHOP's BYPASS flag, which is a bit-exact
-# passthrough that also stops it computing - MEASURED, 0.0110 ms -> 0.0010 ms. It
-# replaced a Switch CHOP between a raw branch and a filtered one, which needed an
-# extra operator and a second path through the group, and which pulled both inputs
-# so the toggle never gated the cost.
+# `Smoothing` off sets the Filter CHOP's BYPASS flag: a bit-exact passthrough that
+# also stops it cooking.
 #
-# A DAT rather than an expression because `bypass` is an ATTRIBUTE, not a
-# parameter: nothing to bind an expression to. Same pattern as the latch bank's
-# threshold refresh.
+# A DAT rather than an expression because `bypass` is an ATTRIBUTE, not a parameter -
+# there is nothing to bind an expression to.
 STREAMS = %(streams)r
 GROUP = %(group)r
 NODE = %(node)r
@@ -172,11 +100,9 @@ def onValuesChanged(changes):
 FILTER_PARAMETERS = ("Smoothing", "Mincutoff", "Beta")
 
 # ---- layout -----------------------------------------------------------------
-# The group's position inside its stream comes from `appletd/td_layout.py`,
-# which is the ONE table for it: this script and td_add_coords.py both used to
-# place their group at (-400, -300), directly on top of each other, and nothing
-# could notice. The positions INSIDE this group are here, next to the code that
-# builds them.
+# The group's position inside its stream comes from `appletd/td_layout.py`, which is
+# the one table for it - two builders choosing their own coordinates put groups on top
+# of each other and nothing notices. Positions INSIDE this group are here.
 COL_W = 200
 ROW_H = 150
 # in1, the filter, out1 - three operators on one row, and the notes above them.
@@ -372,16 +298,11 @@ def _place(node, xy, keep, existed):
 def _clear_keeping_ports(td, group, ports):
     """Empty a group of its working operators but KEEP its In/Out CHOPs.
 
-    MEASURED, and it is the reason this function exists rather than a plain
-    "destroy every child": a group's In and Out CHOPs ARE its connectors, and
-    destroying the Out CHOP drops an external connection from a plain CHOP
-    consumer while leaving a COMP-to-COMP connection intact.
-
-    Reproduced deterministically: re-running the filter builder left `coords` (a
-    COMP) reading `filter` and silently disconnected `derive_chop` (a Script CHOP)
-    from the same output connector - so every derived attribute went to zero
-    channels, the COMP output fell from 499 to 366, and the builder reported
-    success. Keeping the ports makes a rebuild invisible to everything downstream,
+    Why not "destroy every child": a group's In and Out CHOPs ARE its connectors, and
+    destroying the Out CHOP drops an external connection from a plain CHOP consumer
+    while leaving a COMP-to-COMP connection intact - so a rebuild silently
+    disconnects some consumers and not others, and reports success. Keeping the ports
+    makes a rebuild invisible to everything downstream,
     whatever kind of operator it is.
 
     `ports` names the operators to preserve; they are re-wired by the caller, since
@@ -390,14 +311,10 @@ def _clear_keeping_ports(td, group, ports):
     kept = {}
     for child in list(group.children):
         # TRAP: `child` may ALREADY BE GONE by the time this loop reaches it.
-        # Destroying a Script CHOP also destroys the callbacks DAT docked to it, so
-        # a snapshot of `children` taken before the loop can hold a reference to an
-        # operator a previous iteration removed - and touching it raises "Invalid OP
-        # object. The node this python object referenced has likely been deleted."
-        #
-        # MEASURED, twice, and the first time it was written off as MCP flakiness:
-        # it only started happening when `tmp_motion_callbacks` moved inside this
-        # group, and it left the group half-built at 5 operators of 74.
+        # Destroying a Script CHOP also destroys the callbacks DAT docked to it, so a
+        # snapshot of `children` taken before the loop can hold an operator a previous
+        # iteration removed. Touching it raises "Invalid OP object" and leaves the
+        # group half-built.
         if not child.valid:
             continue
         if child.name in ports:
@@ -504,16 +421,12 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures, scope
     # And the thing `scope` itself can get wrong: selecting the wrong SET. Read off
     # the live operator rather than trusting the string that was written to it.
     #
-    # Both sides counted from WHAT ARRIVED, not from the contract. MEASURED 2026-08-22:
-    # adding `sc_segment` to the status channels made the contract 142 channels while
-    # the OSC In CHOP still held the previous session's 141, and this check reported
-    # 83 against 84 on a filter that was correct. A contract that has grown but has
-    # not yet been SENT is the normal state between a code change and the next Start,
-    # and it must not read as a fault - the sidecar is a separate process and its
-    # channel list arrives when it restarts (DESIGN.md 6.4).
+    # Both sides counted from WHAT ARRIVED, not from the contract. A contract that has
+    # grown but has not yet been SENT is the normal state between a code change and the
+    # next Start, and must not read as a fault - the sidecar is a separate process and
+    # its channel list arrives when it restarts (DESIGN.md 6.4).
     #
-    # What this still catches, which is the point: `scope` selecting the wrong subset
-    # of the channels that DID arrive.
+    # What this still catches: `scope` selecting the wrong subset of what did arrive.
     present = set(arrived)
     in_scope = smooth.numChans - len(present.intersection(passthrough))
     expected_in_scope = len(present.intersection(smoothed))
@@ -534,18 +447,13 @@ def _build_one(td, master, child, stream, smoothed, passthrough, failures, scope
         failures.append("%s/%s: %s" % (stream, smooth.name, smooth.errors()))
 
     # -- into the stream's output ------------------------------------------
-    # NOTHING is repointed at the filter here, and that is a deliberate change.
-    # This script used to force a named list of consumers onto the group -
-    # `derive_chop`, `sel_tx`, `sel_ty`, `sel_px`, `sel_py` - which failed two ways
-    # at once: the four `sel_*` names moved inside the `coords` group and matched
-    # nothing, and `derive_chop` does not EXIST yet when this runs in the documented
-    # build order, so it wired itself to the raw input afterwards and stayed there.
-    # Measured on the live network: `derive_chop` read `in1`, so every derived
-    # attribute was computed on UNSMOOTHED landmarks while `coords` used smoothed
-    # ones - two consumers of the same positions disagreeing about the hand.
+    # NOTHING is repointed at the filter here, deliberately. Forcing a named list of
+    # consumers onto the group depends on those consumers EXISTING when this runs, and
+    # in the documented build order some do not - they then wire themselves to the raw
+    # input and stay there, computing derived attributes on unsmoothed landmarks while
+    # `coords` uses smoothed ones.
     #
-    # Each consumer now states its own input, which is the only arrangement that
-    # cannot depend on build order.
+    # Each consumer states its own input instead, which cannot depend on build order.
     merge = child.op("merge_out")
     if merge is not None:
         _attach_once(merge, group, drop_names=(source.name, PREFIX + "out"))

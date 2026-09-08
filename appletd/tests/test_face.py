@@ -119,31 +119,24 @@ def _one(**kwargs: object) -> Face:
     return frame.faces[0]
 
 
-# ---------------------------------------------------------------------------
-# Units: the silent 57x
-# ---------------------------------------------------------------------------
-def test_angles_arrive_in_radians_and_leave_in_degrees() -> None:
+def test_the_observations_own_angles_are_ignored() -> None:
+    """They are QUANTISED - yaw in 45-degree steps, roll in 30, measured at revision
+    3 - so `face_angles` recomputes all three from the landmarks. A stub with no
+    landmarks therefore reports zero however extreme its roll claims to be, which is
+    the whole point: nothing downstream reads Vision's numbers any more."""
     face = _one(roll=math.pi / 2, yaw=-math.pi / 4, pitch=math.pi)
-    assert face.roll_deg == pytest.approx(90.0)
-    assert face.yaw_deg == pytest.approx(-45.0)
-    assert face.pitch_deg == pytest.approx(180.0)
+    assert face.roll_deg == 0.0
+    assert face.yaw_deg == 0.0
+    assert face.pitch_deg == 0.0
 
 
-def test_a_radian_value_is_not_passed_through_unconverted() -> None:
-    """The specific failure: 0.7854 rad reads as a plausible small angle if nobody
-    converts it, and every rotation downstream is 57x too small."""
-    face = _one(roll=math.pi / 4)
-    assert face.roll_deg == pytest.approx(45.0)
-    assert face.roll_deg != pytest.approx(math.pi / 4)
-
-
-@pytest.mark.parametrize("field", ["roll", "yaw", "pitch"])
-def test_a_nil_angle_reads_zero_rather_than_raising(field: str) -> None:
+def test_a_nil_angle_no_longer_reaches_any_arithmetic() -> None:
     """`float(None)` raises, and it would raise on the capture thread inside an
-    Objective-C callback. Revision 3 supplies all three, which is exactly why the
-    day it does not would otherwise be a crash."""
-    face = _one(**{field: None})
-    assert getattr(face, field + "_deg") == 0.0
+    Objective-C callback. The angles are not read off the observation at all now, so
+    a nil cannot get near a conversion."""
+    for field in ("roll", "yaw", "pitch"):
+        face = _one(**{field: None})
+        assert getattr(face, field + "_deg") == 0.0
 
 
 def test_a_nil_quality_reads_zero_rather_than_raising() -> None:

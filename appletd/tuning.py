@@ -5,8 +5,8 @@ builder that creates the TouchDesigner parameters, the tests that assert the
 generated sweeps straddle them, and prose in docs/ATTRIBUTES.md. Nothing tied
 them together, and the failure that makes is silent in the worst way.
 
-Concretely, the failure the review found: raise `Pinchon` from 0.35 to 0.45 in the
-builder alone. Every Python test still passes, because they compare against 0.35.
+Concretely: raise `Pinchon` from 0.35 to 0.45 in the builder alone. Every Python test
+still passes, because they compare against 0.35.
 TouchDesigner still reports `deadband +1`, which is the expected answer. But the
 dead-band sweep's crest sits at 0.44, which is now BELOW the engage threshold - so
 the distance never leaves the engaged region, the latch never has to hold
@@ -45,7 +45,7 @@ LATCH_THRESHOLDS: Final[dict[str, tuple[float, float]]] = {
     # differing per finger changes how far the thumb has to travel, not whether
     # the contact fires.
     #
-    # MEASURED against a real hand, 2026-08-21, and confirmed as settled. These
+    # MEASURED against a real hand, and confirmed as settled. These
     # replace a guess of 0.40 / 0.55 that came from synthetic geometry, where a
     # "contact" pose puts the fingertips exactly coincident. A real fingertip and
     # thumb in contact sit far closer than 0.40 of a hand-size apart, and 0.40

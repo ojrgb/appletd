@@ -24,7 +24,7 @@
                                                               -> housekeeping
           status                                 the sidecar's own sc_* channels
 
-    ONE OUTPUT as of 2026-08-22, not three. A project wires this component once, and
+          ONE OUTPUT, not three. A project wires this component once, and
     `trim_empty` drops the channels of every group that is not computing - so the
     list a beginner meets is the list that is actually live. `Delete Empty Channels`
     on the Vision page bypasses it.
@@ -84,15 +84,10 @@ import signal
 import subprocess
 import time
 
-# The interpreter and the package location are both RESOLVED, not baked, and this is
-# what makes a shipped .tox work on somebody else's machine. Until 2026-08-23 both were
-# absolute paths from the machine that ran the builder, so a .tox carried one person's
-# home directory and the sidecar could not start anywhere else.
-#
-# NOTHING MACHINE-SPECIFIC IS BAKED IN as of 2026-08-24. `BUILT_AT` - the checkout the
-# builder ran from - and `SIDECAR_PYTHON_DEFAULT` - the venv on that machine - are both
-# gone. See appletd/td_layout.PACKAGE_ROOT_SOURCE for the resolver and the two failures
-# that removed them.
+# The interpreter and the package location are both RESOLVED at run time, never baked
+# in, which is what makes a shipped .tox work on somebody else's machine: an absolute
+# path from the machine that built it carries one person's home directory and the
+# sidecar cannot start anywhere else. See appletd/td_layout.PACKAGE_ROOT_SOURCE.
 %(resolver)s
 
 def package_root(comp=None):
@@ -115,7 +110,7 @@ def sidecar_environment(comp=None):
 
     It never showed up here because the development interpreter is a VENV with pyobjc
     and numpy installed into it directly, so no PYTHONPATH was needed. Reported
-    2026-08-24 from a machine that had used the Install button - the first one ever to
+    from a machine that had used the Install button - the first one ever to
     run the shipped path end to end.
 
     PREPENDED to an existing PYTHONPATH rather than replacing it: somebody may have
@@ -161,16 +156,14 @@ def sidecar_python(comp=None):
                        "python", "bin", "python3")
     if os.path.exists(own):
         return own
-    # AND THEN `python3` ON PATH, which is a guess and says so by being one. It used to
-    # be the venv path from the machine that ran the builder, which is worse than a
-    # guess: it is a confident answer that is right on exactly one computer.
+    # AND THEN `python3` ON PATH, which is a guess and says so by being one. A baked
+    # venv path would be worse: a confident answer right on exactly one computer.
     return "python3"
 
 
-# Where the sidecar's stdout and stderr go. Everything it prints about itself - which
-# streams actually started, which model it compiled, why a request refused to build -
-# used to go to /dev/null, which made "why did depth not start" a question nobody could
-# answer. See `start()`.
+# Where the sidecar's stdout and stderr go: which streams started, which model it
+# compiled, why a request refused to build. Without it, "why did depth not start" is
+# unanswerable. See `start()`.
 SIDECAR_LOG = "/tmp/appletd_sidecar.log"
 # The `Camera` menu's "use whatever the engine defaults to" entry. A real token rather
 # than an empty string, because TouchDesigner refuses "" as a menu NAME at the C level -
@@ -193,8 +186,8 @@ def running_pids():
     started while developing, and exactly when you most want to stop it from
     here.
 
-    TWO-STAGE MATCH, and the second stage is not paranoia - it was written after
-    the first version SIGTERMed the shell that was grepping for the sidecar.
+    TWO-STAGE MATCH, and the second stage is not paranoia: without it this SIGTERMs
+    the shell that is grepping for the sidecar.
     `pgrep -f` matches the pattern anywhere in a full command line, so a
     terminal running `pgrep -f appletd.sidecar`, an editor with the file
     open, or a `tail` on its log all match. Killing those is unacceptable, so
@@ -254,7 +247,7 @@ def _is_sidecar_line(line):
 
     whose first token is `/Users/<name>/Library/Application` - basename `Application`,
     no "python" in it - so the check rejected a perfectly healthy sidecar. MEASURED on
-    a second Mac 2026-08-24: the panel read "Stopped" while the process ran, and Stop
+    a second Mac: the panel read "Stopped" while the process ran, and Stop
     and Restart both signalled nothing, so Restart piled up orphans. Invisible on the
     machine that wrote it, where the interpreter is a venv at a path with no spaces.
 
@@ -281,6 +274,308 @@ def _is_sidecar_line(line):
     return False
 
 
+# How long to wait after the LAST launch-flag change before restarting. A restart is a
+# 1.5 s camera warm-up, so flipping four toggles in a row has to cost ONE of them
+# rather than four.
+AUTOREFRESH_MS = 3000
+
+# The outputs a freeze holds. Everything this COMP publishes, in the order somebody
+# meets them: the merged CHOP, then the two image outputs.
+FROZEN_OUTPUTS = ("out1", "outmask", "outdepth", "outvideo", "outflow")
+
+# The outputs, IN CONNECTOR ORDER, with what feeds each. Connector order is
+# ALPHABETICAL BY OPERATOR NAME and an Out OP has no index parameter to override it,
+# so this tuple is out1, outdepth, outmask and rearranging it here changes nothing.
+OUTPUT_CHAIN = (("out1", "trim_empty"),
+                ("outdepth", "depth_fit"),
+                ("outmask", "seg_fit"),
+                ("outvideo", "video_over"),
+                ("outflow", "flow_map"))
+
+
+def _output_wanted(comp, name):
+    """Is this output carrying anything, given the stream toggles?"""
+    if name == "outflow":
+        return bool(getattr(comp.par, "Streamflow", None)
+                    and comp.par.Streamflow.eval())
+    if name == "outvideo":
+        return bool(getattr(comp.par, "Outputvideo", None)
+                    and comp.par.Outputvideo.eval())
+    if name == "outmask":
+        return bool(comp.par.Streamsegment.eval())
+    if name == "outdepth":
+        return bool(comp.par.Streamdepth.eval())
+    # The CHOP output goes only when EVERY channel stream is off - one output serves
+    # all three, so hands alone is reason enough to keep it.
+    return any(bool(getattr(comp.par, "Stream" + which).eval())
+               for which in ("hands", "pose", "face"))
+
+
+# The overlay group and its three inner COMPs. Duplicated from
+# tools/td_add_overlay.py's OVERLAYS on purpose: this runs in the DAT, where that
+# builder is not importable, and three names are cheaper than a shared module that
+# would have to be embedded to reach an install.
+# (the inner COMP, its Show Overlay toggle, the STREAM toggle it depends on).
+#
+# AN OVERLAY OF A STREAM THAT IS OFF IS NOT AN OVERLAY. Without the veto, `Show
+# Overlay` on with `Hands` off cooks a COMP whose channels are frozen, drawing a hand
+# that is no longer being tracked.
+OVERLAY_GATES = (("hands", "Handsoverlay", "Streamhands"),
+                 ("pose", "Poseoverlay", "Streampose"),
+                 ("face", "Faceoverlay", "Streamface"))
+
+
+def apply_overlay(comp=None):
+    """`allowCooking` for the overlay group and each inner COMP.
+
+    An attribute, so it cannot be bound to an expression and has to be rewritten when
+    a toggle moves - the same arrangement the attribute groups use. Off, an overlay
+    costs nothing without anything being deleted, so whatever has been built inside it
+    survives being switched off.
+    """
+    comp = comp or op(%(comp)r)
+    if comp is None:
+        return
+    group = comp.op("overlay")
+    if group is None:
+        return
+    # `Active` VETOES EVERY OVERLAY, the same way it vetoes every attribute group.
+    # With capture off there is nothing new to draw: the channels hold their last
+    # values, so a cooking overlay re-renders the same skeleton every frame and pays
+    # a render for it. Frozen, it holds the picture it already had - which is what
+    # `Freeze` means, and why this stops the COOKING and leaves the render flags
+    # alone.
+    live = getattr(comp.par, "Active", None)
+    capturing = live is None or bool(live.eval())
+    wanted = False
+    for inner, toggle, stream_toggle in OVERLAY_GATES:
+        par = getattr(comp.par, toggle, None)
+        stream = getattr(comp.par, stream_toggle, None)
+        # A missing parameter means "leave it alone" rather than an exception on a
+        # half-built network - so an absent STREAM toggle does not veto.
+        on = bool(capturing and par is not None and par.eval()
+                  and (stream is None or stream.eval()))
+        wanted = wanted or on
+        child = group.op(inner)
+        if child is not None:
+            child.allowCooking = on
+    group.allowCooking = wanted
+
+
+def apply_output_visibility(comp=None):
+    """Add or remove outputs to match what is switched on.
+
+    ANY OUTPUT, IN ANY ORDER, and the consequence is stated rather than avoided:
+    REMOVING ONE RENUMBERS THE OUTPUTS AFTER IT. `connectorder` fixes the ORDER of
+    the connectors but does not reserve a SLOT - measured - so deleting `outmask`
+    while `outvideo` exists slides the video from connector 3 to 2, and a wire drawn
+    from 3 then carries a different image.
+
+    This started out removing only from the END inwards, which kept every live
+    connector meaning what it meant. It was wrong in practice: with `Output Video`
+    on, turning depth and the mask off left both their outputs sitting there, which
+    is what the toggle exists to prevent. Omer chose removal.
+
+    So the mitigation is a PRINTED LINE rather than a restriction: every change names
+    what went and what the connectors now are, so a renumber is something you can see
+    happening instead of something you discover later.
+    """
+    import td
+    comp = comp or op(%(comp)r)
+    if comp is None or getattr(comp.par, "Hideunused", None) is None:
+        return []
+    hide = bool(comp.par.Hideunused.eval())
+    from appletd.td_layout import OUTPUT_ORDER, master_xy
+
+    removed, restored = [], []
+    for name, source in reversed(OUTPUT_CHAIN):
+        wanted = (not hide) or _output_wanted(comp, name)
+        target = comp.op(name)
+        if wanted and target is None:
+            feed = comp.op(source)
+            kind = td.outCHOP if name == "out1" else td.outTOP
+            target = comp.create(kind, name)
+            target.nodeX, target.nodeY = master_xy(name)
+            target.par.connectorder = OUTPUT_ORDER[name]
+            if feed is not None:
+                target.inputConnectors[0].connect(feed)
+            restored.append(name)
+        elif not wanted and target is not None:
+            target.destroy()
+            removed.append(name)
+    if removed or restored:
+        # The connectors AFTER the change, named. Removing an output renumbers the
+        # ones after it, and this line is what makes that visible rather than a wire
+        # that quietly started carrying something else.
+        now = ", ".join("%%d %%s" %% (c.index, c.description)
+                        for c in comp.outputConnectors)
+        print("[appletd] outputs: removed %%s, restored %%s -> now %%s"
+              %% (", ".join(removed) or "none", ", ".join(restored) or "none", now))
+    return removed
+
+
+def freeze(comp=None):
+    """Hold the current outputs and stop capturing, after `Freezetimer` seconds.
+
+    THE DELAY IS THE POINT of the parameter: a freeze you have to be at the keyboard
+    for cannot catch a pose you are making with both hands. Set it and the pulse
+    becomes "freeze in five seconds", which is long enough to get in front of the
+    camera.
+
+    Scheduled the same way the auto-refresh is, and with the same token, so pressing
+    `Freeze` twice does not arm two of them - the second press supersedes the first
+    rather than freezing twice.
+    """
+    comp = comp or op(%(comp)r)
+    if comp is None:
+        return 0
+    delay_s = 0
+    if getattr(comp.par, "Freezetimer", None) is not None:
+        delay_s = max(0, int(comp.par.Freezetimer.eval()))
+    if delay_s > 0:
+        token = int(comp.fetch("freeze_token", 0)) + 1
+        comp.store("freeze_token", token)
+        run("op(%%r).op('sidecar_control').module.apply_freeze(%%d)"
+            %% (%(comp)r, token), delayMilliSeconds=delay_s * 1000)
+        tick_countdown("freeze", token, delay_s)
+        print("[appletd] freezing in %%d second(s)" %% delay_s)
+        return 0
+    return _freeze_now(comp)
+
+
+def apply_freeze(token):
+    """The scheduled half of `freeze`. Declines if a later press superseded it."""
+    comp = op(%(comp)r)
+    if comp is None or int(comp.fetch("freeze_token", 0)) != token:
+        return 0
+    return _freeze_now(comp)
+
+
+def _freeze_now(comp):
+    """Hold the current outputs and stop capturing.
+
+    `lock` is TouchDesigner's own answer to this: a locked operator keeps the data it
+    last cooked and stops cooking. So the depth map somebody wants to keep is still
+    there, still the right resolution, while the 23 ms a frame that produced it goes
+    away.
+
+    LOCKED BEFORE `Active` GOES OFF, and the order is the whole trick. Stopping first
+    would let one more cook run with a dead stream behind it, and what got held would
+    be whatever that cook produced rather than the frame on screen.
+    """
+    held = []
+    for name in FROZEN_OUTPUTS:
+        target = comp.op(name)
+        if target is not None and not target.lock:
+            target.lock = True
+            held.append(name)
+    comp.par.Active = False
+    print("[appletd] frozen: %%s. Turn Active on to release."
+          %% (", ".join(held) or "nothing"))
+    return len(held)
+
+
+def thaw(comp=None):
+    """Release the hold. Called when `Active` goes on, which is what the user reaches
+    for anyway - so a freeze needs no second control to undo it."""
+    comp = comp or op(%(comp)r)
+    if comp is None:
+        return 0
+    released = 0
+    for name in FROZEN_OUTPUTS:
+        target = comp.op(name)
+        if target is not None and target.lock:
+            target.lock = False
+            released += 1
+    return released
+
+
+def schedule_refresh(comp=None):
+    """Arm a debounced restart. Called on every launch-flag change.
+
+    THE TOKEN IS THE DEBOUNCE, and it is why this needs no timer to cancel. Each
+    change bumps a counter and schedules a callback carrying the value it saw; that
+    callback restarts only if the counter still matches. An earlier timer still in
+    flight therefore does nothing once a later change has superseded it, and `run`
+    has no cancel to reach for.
+    """
+    comp = comp or op(%(comp)r)
+    if comp is None or getattr(comp.par, "Autorefresh", None) is None:
+        return
+    if not bool(comp.par.Autorefresh.eval()):
+        return
+    # NOTHING TO COUNT DOWN TO with capture off: `apply_refresh` declines in that
+    # case, so arming a countdown would promise a restart that never comes - and
+    # leave "Restarting in 1" on the panel for ever.
+    live = getattr(comp.par, "Active", None)
+    if live is not None and not bool(live.eval()):
+        return
+    token = int(comp.fetch("autorefresh_token", 0)) + 1
+    comp.store("autorefresh_token", token)
+    run("op(%%r).op('sidecar_control').module.apply_refresh(%%d)" %% (%(comp)r, token),
+        delayMilliSeconds=AUTOREFRESH_MS)
+    # And SAY SO while it waits. "Requires Restart" for three seconds and then a
+    # restart nobody asked for reads as the panel changing its mind; a countdown says
+    # what is about to happen and how long there is to change it again.
+    tick_countdown("autorefresh", token, AUTOREFRESH_MS // 1000)
+
+
+def tick_countdown(kind, token, remaining):
+    """Write "<kind> in N" into `Capturestate`, once a second, until N reaches 0.
+
+    ONE FUNCTION FOR BOTH, because both pending actions already work the same way:
+    a token in storage plus a `run` at the end of the wait. This walks the same token
+    down in one-second steps, so a later press supersedes a countdown exactly as it
+    supersedes the action - the stale tick sees a token that no longer matches and
+    stops writing.
+
+    IT DOES NOT RESTORE THE STATE when it finishes. The action's own `set_state` does
+    that, from the truth, a moment later - and having two writers race to describe
+    the same thing is how a status light starts lying.
+    """
+    comp = op(%(comp)r)
+    if comp is None or int(comp.fetch(kind + "_token", 0)) != token:
+        return                          # a later press owns the countdown now
+    # AND STOP IF THE ACTION CAN NO LONGER HAPPEN. Both of these need capture, and
+    # `Active` can go off mid-count - so the tick that notices puts the real state
+    # back rather than leaving its own last word on the panel.
+    live = getattr(comp.par, "Active", None)
+    if live is not None and not bool(live.eval()):
+        set_state(comp)
+        return
+    if remaining <= 0 or not hasattr(comp.par, "Capturestate"):
+        return
+    comp.par.Capturestate = "%%s in %%d" %% (LABELS.get(kind, kind), remaining)
+    run("op(%%r).op('sidecar_control').module.tick_countdown(%%r, %%d, %%d)"
+        %% (%(comp)r, kind, token, remaining - 1), delayMilliSeconds=1000)
+
+
+# What each pending action calls itself while it is counting down. Present tense and
+# not "will restart": by the time somebody reads it, it is happening.
+LABELS = {"autorefresh": "Restarting", "freeze": "Freezing"}
+
+
+def apply_refresh(token):
+    """Restart, unless something changed while this timer was in flight."""
+    comp = op(%(comp)r)
+    if comp is None or int(comp.fetch("autorefresh_token", 0)) != token:
+        return                          # a later change owns the restart now
+    # EVERY OTHER DECLINE WRITES THE STATE BACK, and that is not tidiness. The
+    # countdown deliberately leaves the last word to this function, so a decline that
+    # returns silently strands the panel on "Restarting in 1" - which is exactly what
+    # switching `Active` off during a pending refresh did.
+    if not bool(comp.par.Autorefresh.eval()) or not bool(comp.par.Active.eval()):
+        set_state(comp)
+        return
+    # ONLY when the panel and the process actually disagree. Auto-refresh exists to
+    # clear "Requires Restart", not to restart a camera every time anything is
+    # touched - and `set_state` asks pgrep rather than trusting the toggle.
+    if set_state(comp) != "Requires Restart":
+        return
+    print("[appletd] auto refresh: restarting to apply the change")
+    comp.par.Restartcapture.pulse()
+
+
 def ensure_running(comp=None):
     """Start the sidecar if `Active` is on and nothing matching is already running.
 
@@ -290,7 +585,7 @@ def ensure_running(comp=None):
 
     That second case needs it because a project load is not a value CHANGE. The
     toggle comes back holding the value it was saved with, `onValueChange` never
-    fires, and until 2026-09-03 the panel therefore said `Active` while nothing was
+    fires, and the panel therefore said `Active` while nothing was
     running - the one state the status light exists to make impossible.
 
     IDEMPOTENT, and that is what makes it safe to call from both: if a process is
@@ -301,6 +596,10 @@ def ensure_running(comp=None):
     comp = comp or op(%(comp)r)
     if comp is None or not bool(comp.par.Active.eval()):
         return "Stopped"
+    # A freeze is released by turning the capture back on, which is what somebody
+    # reaches for anyway. Done here rather than in the callback so it also covers a
+    # project opening with `Active` saved on and the outputs saved locked.
+    thaw(comp)
     if set_state(comp) == "Running":
         return "Running"
     comp.par.Capturepid = start()
@@ -327,8 +626,8 @@ def start():
     # "whatever the engine defaults to", so clearing the field is not an error.
     camera = "" if comp is None else str(comp.par.Camera.eval()).strip()
     if camera == CAMERA_DEFAULT:
-        # "(default)" means don't pass --camera at all, so engine.py's measured default
-        # decides - which is exactly what an empty text field used to mean.
+        # "(default)" means don't pass --camera at all, so engine.py's own default
+        # decides.
         camera = ""
     # The base port. Read from the COMP rather than baked in, so the OSC In CHOPs -
     # which bind it through an expression on the same parameter - and the process we
@@ -360,7 +659,14 @@ def start():
             "--port", str(port), "--parent-pid", str(os.getpid()),
             "--slots", "chirality" if assign else "off",
             "--streams", ",".join(streams)]
-    if camera:
+    # THE INPUT, and the two are exclusive. TOP Input means no capture device is
+    # opened at all, so `--camera` would be a device name nothing ever reads - and a
+    # flag that is silently ignored is how somebody spends an afternoon wondering why
+    # their camera choice does nothing.
+    if str(getattr(comp.par, "Inputmode", "camera") and
+           comp.par.Inputmode.eval()) == "top":
+        argv += ["--frames-path", str(comp.par.Framesbuffer.eval())]
+    elif camera:
         argv += ["--camera", camera]
     if "segment" in streams:
         # Both read off the COMP, so the sidecar writes where the Script TOP reads
@@ -369,6 +675,21 @@ def start():
         # like everything else here, so changing it needs a restart.
         argv += ["--mask-path", str(comp.par.Maskbuffer.eval()),
                  "--mask-quality", str(comp.par.Segquality.eval())]
+        # People separated from each other rather than from the background. The mask
+        # then carries an instance INDEX per pixel, and `Segquality` does not apply -
+        # the instance request has no quality level to set.
+        if bool(getattr(comp.par, "Multiperson", False)
+                and comp.par.Multiperson.eval()):
+            argv += ["--mask-instances"]
+    # CAMERA FLIP, and it belongs to every stream rather than any one of them:
+    # Vision mirrors the image before the request runs, so the landmarks, the mask,
+    # the depth map and the flow field all come back mirrored together.
+    if bool(getattr(comp.par, "Cameraflip", False)
+            and comp.par.Cameraflip.eval()):
+        argv += ["--flip"]
+    if "flow" in streams:
+        argv += ["--flow-path", str(comp.par.Flowbuffer.eval()),
+                 "--flow-accuracy", str(comp.par.Flowaccuracy.eval())]
     if "depth" in streams:
         argv += ["--depth-path", str(comp.par.Depthbuffer.eval())]
         # The pins, off the Depth page's rows. Built HERE rather than read from one
@@ -378,7 +699,7 @@ def start():
         pins = depth_pins(comp)
         if pins:
             argv += ["--depth-pins", pins]
-    # A LOG FILE, not /dev/null. Changed 2026-08-22 after "the depth map did not
+            # A LOG FILE, not /dev/null. Changed after "the depth map did not
     # update and I cannot tell you why" - which was unanswerable, because everything
     # the sidecar said about itself was being discarded. A separate process whose
     # output goes nowhere can only ever be diagnosed by guessing.
@@ -420,7 +741,12 @@ def start():
     # there (DESIGN.md 2.11), which a string is.
     if comp is not None:
         comp.store("launch_signature", launch_signature(comp))
+        comp.unstore("failure_reason")
         set_state(comp)
+        # AND ASK AGAIN IN A MOMENT. A process that rejects its arguments is alive
+        # now and gone in milliseconds; this is what turns that into a status.
+        run("op(%(comp)r).op('sidecar_control').module.check_started()",
+            delayMilliSeconds=1200)
     # The ports each stream lands on, printed because "which port is pose on" is
     # the first question when the pose COMP shows no channels.
     print("[appletd]   hands -> %%d   pose -> %%d   face -> %%d  (base + 0/1/2)"
@@ -590,7 +916,7 @@ def list_cameras(comp=None):
     Enumeration opens no device and starts no session, so this takes the camera from
     nothing and raises no permission prompt.
 
-    `comp` IS RESOLVED HERE, and it was not until 2026-08-24. This function read a
+    `comp` IS RESOLVED HERE, and it was not. This function read a
     bare `comp` that no scope defined, so every call raised NameError - and the
     `except Exception` below caught it, printed one line to the textport and returned
     an empty list. **The camera menu was empty on every machine**, and it looked like
@@ -648,8 +974,7 @@ def refresh_cameras(comp=None, want=None):
     # time this runs the old value is gone from the par and only the builder still has
     # it. Without this the migration below has nothing to migrate.
     current = str(want if want is not None else comp.par.Camera.eval())
-    # `CAMERA_DEFAULT` FIRST, meaning "whatever the engine defaults to" - the same
-    # thing an empty text field used to mean, kept so the old behaviour is reachable.
+    # `CAMERA_DEFAULT` FIRST, meaning "whatever the engine defaults to".
     entries = [CAMERA_DEFAULT] + names
     if current and current not in entries:
         # MIGRATION, and it earns its place: `Camera` was a text field matched as a
@@ -681,7 +1006,9 @@ def refresh_cameras(comp=None, want=None):
 # other - the mistake that launched the sidecar without `depth` while the panel said
 # otherwise.
 def launch_pars(comp):
-    names = ["Camera", "Slotassign", "Oscport", "Segquality",
+    names = ["Camera", "Inputmode", "Framesbuffer",
+             "Slotassign", "Oscport", "Segquality", "Multiperson",
+             "Flowaccuracy", "Flowbuffer",
              "Maskbuffer", "Depthbuffer", "Depthpinson", "Depthpincount"]
     names += [par_name for _n, par_name in REQUEST_TOGGLES]
     for index in range(1, 9):
@@ -695,6 +1022,52 @@ def launch_signature(comp):
                     for n in launch_pars(comp))
 
 
+def failure_reason():
+    """Why the sidecar is not running, in its own words. "" when it does not say.
+
+    THE LOG IS THE ONLY PLACE IT EXISTS. The sidecar is a separate process launched
+    with its stdout redirected to a file, so a startup failure - a bad flag, a missing
+    module, an interpreter that cannot import pyobjc - is written there and nowhere
+    else. Before this, the panel said "Stopped" and the reason sat in /tmp unread.
+
+    THE LAST UNINDENTED LINE, and the indentation is the whole trick. Both failures
+    end with a summary at column 0 - `sidecar.py: error: unrecognized arguments:
+    --flip` from argparse, `ImportError: ...` from a traceback - and both can be
+    FOLLOWED by indented continuation lines. Taking the last line outright picked up
+    "your python interpreter from there.", the tail of a wrapped numpy message, which
+    is a sentence fragment and tells nobody anything.
+
+    A heartbeat line means the process is alive and this is not a failure at all.
+    """
+    try:
+        with open(SIDECAR_LOG) as handle:
+            lines = [line.rstrip() for line in handle]
+    except OSError:
+        return ""
+    summary = [line for line in lines if line.strip() and not line[0].isspace()]
+    if not summary or summary[-1].startswith("sends "):
+        return ""
+    return summary[-1][:120]
+
+
+def check_started(comp=None):
+    """Did the sidecar survive its first second? Scheduled by `start`.
+
+    WHY IT IS DELAYED rather than checked inline: `Popen` returns the moment the
+    process exists, and a process that rejects its arguments is alive for a few
+    milliseconds after that. Checking immediately would always say "Running".
+    """
+    comp = comp or op(%(comp)r)
+    if comp is None or running_pids():
+        return
+    reason = failure_reason()
+    if reason:
+        comp.store("failure_reason", reason)
+        print("[appletd] the sidecar exited at startup: %%s" %% reason)
+        print("[appletd]   full log: %%s" %% SIDECAR_LOG)
+    set_state(comp)
+
+
 def set_state(comp=None):
     """Write `Capturestate` and its colour swatch. Returns the state.
 
@@ -705,8 +1078,8 @@ def set_state(comp=None):
                         pgrep, so this is the real thing and not the toggle's opinion.
       Requires Restart  a process IS running, but a launch flag has changed since it
                         started - so the panel and the process disagree. This is the
-                        state that used to be invisible and cost a user twenty minutes
-                        wondering why `Streamdepth` did nothing.
+                        state that is otherwise invisible - a launch flag moved and
+                        nothing says the process has not seen it.
       Running           a process is running and its launch flags still match.
 
     Called on every launch-flag change and on every button. NOT on a timer: pgrep
@@ -718,11 +1091,16 @@ def set_state(comp=None):
     if comp is None:
         return "Stopped"
     if not running_pids():
-        state = "Stopped"
+        # WITH THE REASON, when the log gave one. "Stopped" on its own is true and
+        # useless - it was the answer while a rejected launch flag sat unread in the
+        # log for twenty minutes.
+        reason = comp.fetch("failure_reason", "")
+        state = ("Stopped - %%s" %% reason) if reason else "Stopped"
     elif comp.fetch("launch_signature", None) != launch_signature(comp):
         state = "Requires Restart"
     else:
         state = "Running"
+        comp.unstore("failure_reason")
     if hasattr(comp.par, "Capturestate"):
         comp.par.Capturestate = state
     return state
@@ -740,7 +1118,7 @@ def restart():
     are DEFERRED to the end of the frame, so `restart()` spawned one process directly
     and the queued `Active` callback spawned another, and a later `Active = False`
     could resolve before the stale True and leave a process running with the toggle
-    off. MEASURED 2026-08-22: pid 31291 outlived being switched off.
+    off. MEASURED: pid 31291 outlived being switched off.
     #
     # So there is exactly ONE path that starts the process, and it is the `Active`
     # callback. When Active is already on, restart does the work directly; when it is
@@ -794,15 +1172,40 @@ def onValueChange(par, prev):
             par.owner.par.Capturepid = 0
             print("[appletd] stopped %d process(es)" % stopped)
         control.set_state(par.owner)
+        # AND THE OVERLAYS, because `Active` vetoes their cooking too and this branch
+        # returns before the generic path below would have applied it.
+        control.apply_overlay(par.owner)
+        return
+    if par.name == "Cameraflip":
+        # RESTARTS ITSELF, rather than waiting for `Auto Refresh` - which may be off,
+        # and which waits three seconds when it is on.
+        #
+        # The reason is specific to this flag: the PICTURE flips the instant it moves,
+        # because `video_flip` is an expression on a TOP, while the TRACKING only
+        # flips when the sidecar is relaunched. Between the two the overlay sits on
+        # the mirror of where the hand actually is, which reads as a broken toggle
+        # rather than as a pending restart.
+        control.set_state(par.owner)
+        if bool(par.owner.par.Active.eval()):
+            control.restart()
         return
     # ANY OTHER parameter in `pars` is a launch flag, and changing one means the
     # running process no longer matches the panel. `set_state` is what turns that into
     # "Requires Restart" on the light - which is the whole point of listing them here.
     control.set_state(par.owner)
+    # And with `Autorefresh` on, arm the debounced restart that applies it.
+    control.schedule_refresh(par.owner)
+    # A stream toggle also decides whether its output carries anything.
+    control.apply_output_visibility(par.owner)
+    # And an overlay toggle decides whether its COMP cooks.
+    control.apply_overlay(par.owner)
 
 
 def onPulse(par):
     control = op("sidecar_control").module
+    if par.name == "Freeze":
+        control.freeze(par.owner)
+        return
     if par.name == "Restartcapture":
         control.restart()
         return
@@ -818,26 +1221,19 @@ WATCH_SOURCE = '''# Generated by tools/td_build_vision.py
 #
 # Makes the COMP notice that the render or the camera changed.
 #
-# THE PROBLEM, reported 2026-08-23 on a fresh project. `Renderw`, `Renderh` and
-# `Orthowidth` are expressions over `op('render1')` and `op('cam1')`. Resizing the
-# render did not move them, and adding a `render1` that had not existed left them on
-# the 1280x720 fallback for ever.
+# THE PROBLEM. `Renderw`, `Renderh` and `Orthowidth` are expressions over
+# `op('render1')` and `op('cam1')`, and TouchDesigner builds its dependencies from
+# what an expression TOUCHED. `op('render1').width` is a plain attribute read, not a
+# parameter reference, so there is nothing to watch: resizing the render never dirties
+# the parameter and the COMP keeps its 1280x720 fallback for ever.
 #
-# WHY TouchDesigner builds its dependencies from what an expression TOUCHED, and
-# `op('render1').width` is a plain Python attribute read - not a parameter reference
-# - so there is nothing for it to watch. `op('render1')` returning None touches less
-# than that. Either way the parameter is never dirtied and the COMP never learns it
-# has stale numbers.
+# WHY IT MATTERS more than it looks: `_ty` is scaled by the render's aspect, so a
+# stale value puts every world-space y in the wrong place - and 1280x720 is often the
+# true answer anyway, so the wrong value agrees with the right one and nothing looks
+# broken.
 #
-# WHY IT MATTERS more than it looks: `_ty` is scaled by the RENDER's aspect, so a
-# stale value puts every world-space y in the wrong place - and 1280x720 is very
-# often the true answer as well, so the wrong version agrees with the right one and
-# nothing looks broken. That is the same trap that hid a broken `../render1`
-# expression for a whole session.
-#
-# This is the user's design, kept as they built it: one Parameter Execute per watched
-# operator, firing only when a parameter actually moves. No polling, no per-frame
-# Python, and nothing to remember to press.
+# One Parameter Execute per watched operator, firing only when a parameter moves. No
+# polling, no per-frame Python, nothing to remember to press.
 #
 # `force=True` deliberately. A plain `cook()` on an operator TouchDesigner does not
 # believe is dirty can do nothing at all, which is exactly the situation here - the
@@ -860,10 +1256,10 @@ SIDECAR_START_SOURCE = '''# Generated by tools/td_build_vision.py
 # Start the sidecar when a project is OPENED with `Active` already on.
 #
 # WHY THIS IS NEEDED AT ALL. Opening a file is not a value CHANGE: the toggle comes
-# back holding whatever it was saved with and `onValueChange` never fires. So a
-# project saved with capture running used to reopen with `Active` reading on, the
-# status light saying Stopped, and no process anywhere - the one state the light
-# exists to make impossible.
+# back holding whatever it was saved with and `onValueChange` never fires. Without
+# this, a project saved with capture running reopens with `Active` on, the status
+# saying Stopped, and no process anywhere - the one state the status exists to make
+# impossible.
 #
 # SCHEDULED, not called here. `onStart` runs before the network has settled, and
 # `ensure_running` reads launch flags off parameters and spawns a subprocess. Two
@@ -948,6 +1344,7 @@ COMP_NAME = "appletd"
 # Nothing complained; only `sc_depth` reading 0 said anything.
 REQUEST_TOGGLES = (("hands", "Streamhands"), ("pose", "Streampose"),
                    ("face", "Streamface"), ("segment", "Streamsegment"),
+                   ("flow", "Streamflow"),
                    ("depth", "Streamdepth"))
 
 # Mirrors the same constant inside SIDECAR_CONTROL_SOURCE - the builder needs it to
@@ -957,7 +1354,7 @@ CAMERA_DEFAULT = "__default__"
 OP_SHORTCUT = "Appletd"
 
 # Master-level operators this script must NOT destroy, and who does own each one.
-# Added 2026-08-22: without it, `td_build_vision.py` alone left the COMP with no
+# Added: without it, `td_build_vision.py` alone left the COMP with no
 # gating callback, no filter callback and no latch thresholds, so the only safe way
 # to run it was to run the whole chain after it.
 OTHER_BUILDERS_OWN = {
@@ -965,7 +1362,7 @@ OTHER_BUILDERS_OWN = {
     "groups_callbacks": "td_add_groups.py",
     "lat_threshold_callbacks": "td_add_latches.py",
     "screenspace_callbacks": "td_add_screenspace.py",
-    # THE THREE CHAIN STAGES THIS SCRIPT DOES NOT OWN, added 2026-08-24 with
+    # THE THREE CHAIN STAGES THIS SCRIPT DOES NOT OWN with
     # BUILD_PLAN step 25. `coords` moved to the master from the three streams,
     # `screen_only` came with it, and `early_trim` is new. Destroying any of them
     # here would leave a gap in `MASTER_CHAIN` that only the owning builder can
@@ -980,6 +1377,21 @@ OTHER_BUILDERS_OWN = {
     "outmask": "td_add_segmentation.py",
     "seg_callbacks": "td_add_segmentation.py",
     "seg_par_callbacks": "td_add_segmentation.py",
+    # TOP Input. `in_frames` is the COMP's image INPUT connector,
+    # so destroying it would disconnect whatever a project had wired in - the same
+    # reason `outmask` and `outdepth` are listed here.
+    "overlay": "td_add_overlay.py",
+    "flow_map": "td_add_flow.py",
+    "flow_callbacks": "td_add_flow.py",
+    "outflow": "td_add_flow.py",
+    "video_in": "td_add_video.py",
+    "video_source": "td_add_video.py",
+    "video_flip": "td_add_video.py",
+    "video_over": "td_add_video.py",
+    "outvideo": "td_add_video.py",
+    "in_frames": "td_add_topinput.py",
+    "frames_write": "td_add_topinput.py",
+    "frames_callbacks": "td_add_topinput.py",
     "depth_map": "td_add_depth.py",
     "depth_fit": "td_add_depth.py",
     "outdepth": "td_add_depth.py",
@@ -1017,7 +1429,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # docs/BUILD_PLAN.md step 21 is where this stops being a convention: TouchDesigner
 # ships its own Python 3.11 with pip, so an Install button can put pyobjc beside it
 # and this becomes a computed answer too.
-# RETIRED 2026-08-24. This was `os.path.expanduser("~/.venvs/appletd/bin/python")`,
+# RETIRED. This was `os.path.expanduser("~/.venvs/appletd/bin/python")`,
 # baked into the generated DAT as `SIDECAR_PYTHON_DEFAULT` and used as the last resort
 # - so a shipped .tox tried to launch the sidecar from a venv in somebody else's home.
 # `sidecar_python()` now ends at the install's own interpreter and then plain
@@ -1033,7 +1445,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # change meaning whenever something was plugged in.
 DEFAULT_CAMERA = "MacBook"
 
-# The page reorganisation of 2026-08-21. The Sidecar page named an implementation
+# The page reorganisation. The Sidecar page named an implementation
 # detail - a consumer of this COMP does not care that a separate process holds the
 # camera - so what was operational moved to Vision and what was diagnostic moved to
 # Advanced. These two lists are what has to be DESTROYED to finish the move, because
@@ -1069,7 +1481,7 @@ RETIRED_PARS = ("Startsidecar", "Stopsidecar", "Sidecarstatus", "Sidecarpid",
 # back. They have to be destroyed FIRST: TouchDesigner will not hold one custom
 # parameter name on two pages, so the append would fail while the old one exists.
 MOVED_PARS = ("Slotassign", "Streamhands", "Streampose", "Streamface",
-              # `Camera` became a MENU on 2026-08-22 and a parameter cannot change
+# `Camera` became a MENU and a parameter cannot change
               # style in place - so it is destroyed and re-appended, with `previous`
               # carrying the chosen device across.
               "Camera",
@@ -1168,6 +1580,7 @@ def main():
     )
     from appletd.td_layout import (
         COL_W,
+        OUTPUT_ORDER,
         PACKAGE_ROOT_SOURCE,
         master_xy,
         rewire_master_chain,
@@ -1206,26 +1619,16 @@ def main():
     # the other builders own, and they clear their own contents when they run
     # (DESIGN.md 2.11 - destroying a group orphans its consumers).
     #
-    # The OSC IN CHOPS, which is a fix rather than an optimisation: an OSC In CHOP
-    # only has the channels that have ARRIVED, so a fresh one starts empty and
-    # regains only what is being sent right now. MEASURED: rebuilding took the hands
-    # port from 141 channels to 137, because the four `sc_*` status channels come
-    # from the sidecar and no sidecar was running - and 137 is a plausible number
-    # that nothing complains about. Reusing the CHOP keeps whatever it has learned,
-    # and re-binding a port it already holds is not something to do for no reason.
+    # The OSC IN CHOPS, because an OSC In CHOP only holds the channels that have
+    # ARRIVED: a fresh one starts empty and regains only what is being sent right now.
+    # With no sidecar running that silently drops the `sc_*` status channels, leaving
+    # a plausible channel count that nothing complains about.
     #
-    # And THE OUT CHOPS, which is the same fix as `_clear_keeping_ports` in every
-    # group builder, applied one level up where it had been missed. An Out CHOP IS
-    # the COMP's output connector: destroying it disconnects whatever the PROJECT
-    # had wired to that output, and recreating it does not bring the wire back.
-    #
-    # MEASURED, on this project, by running this builder: three operators reading
-    # `vision` output 1 were silently orphaned - `select3`, `select4` and `select5`,
-    # feeding a live chain - and the only symptom was that the hands stream stopped
-    # cooking, because nothing was pulling it any more. `temporal` and `latches` kept
-    # cooking off their own clocks, so the COMP still looked busy. Nothing errored.
-    # This is precisely the failure DESIGN.md 2.11 records for group builders; the
-    # master had the same hole.
+    # And THE OUT CHOPS. An Out CHOP IS the COMP's output connector, so destroying it
+    # disconnects whatever the PROJECT had wired to that output and recreating it does
+    # not bring the wire back. The symptom is not an error: the orphaned consumers
+    # stop pulling, so the stream stops cooking while operators on their own clocks
+    # keep going and the COMP still looks busy (DESIGN.md 2.11).
     # `out1` only: `out2` and `out3` are retired below, and the merge and the delete
     # in front of out1 are cheap to rebuild because out1 itself is what external
     # wires attach to.
@@ -1263,27 +1666,18 @@ def main():
     # on a different page and TouchDesigner will not hold the same custom parameter
     # name twice. `previous` was captured above, so a tuned value survives the move.
     #
-    # WHY the Sidecar page is gone: it named an implementation detail. A consumer of
-    # this COMP does not care that a separate process holds the camera, and the page
-    # made them read about it before they could pick a stream. What was on it is
-    # operational - which camera, which streams, is it running - so it belongs on
-    # Vision beside the resolutions, and the two genuinely diagnostic parameters
-    # (the status pulse and the process id) belong on Advanced with the other
-    # internals.
+    # WHY the Sidecar page is gone: it named an implementation detail. What was on it
+    # is operational - which camera, which streams, is it running - so it belongs on
+    # General; the two genuinely diagnostic parameters belong on Advanced.
     # SNAPSHOT EVERY CUSTOM VALUE ACROSS THE DESTROY-AND-RE-APPEND PASS.
     #
-    # MEASURED 2026-08-24, and it is the answer to something that had been blamed on
-    # td_add_groups three times: running THIS builder came back with `Facekeypoints`
-    # and `Onefaceonly` switched ON and `Coordspx` switched OFF - three toggles on the
-    # ATTRIBUTES page that this script does not touch, does not name, and has no
-    # opinion about. What it does do is destroy and re-append seven parameters on the
-    # VISION page a few lines below, and values on other pages moved with them.
+    # Destroying and re-appending parameters on one page has been observed to move
+    # values on OTHER pages - toggles this script does not touch, does not name and has
+    # no opinion about. The mechanism is not established and nothing here claims one.
     #
-    # The mechanism is still NOT established and nothing here claims one. What is
-    # established is that the damage is silent - a wrong toggle is indistinguishable
-    # from a deliberate setting - and that it cost this project several rounds of
-    # blaming the wrong builder. So: read everything before, write back anything that
-    # changed after, and PRINT it.
+    # What matters is that the damage is SILENT: a wrong toggle is indistinguishable
+    # from a deliberate setting. So read everything before, write back anything that
+    # changed after, and PRINT what moved.
     #
     # `previous` already captures the MOVED_PARS values for their own round trip;
     # this is the wider net, for parameters nothing here was supposed to touch.
@@ -1315,32 +1709,56 @@ def main():
     # RESTART, beside Active. Pressing Active twice does the same thing - `start()`
     # stops first - but nobody knows that from looking at a toggle, and "restart to
     # apply" appears on nine labels on this page.
+    # Under `Active`, because it changes what `Active` does: with it on, a launch flag
+    # applies itself three seconds later instead of waiting for somebody to notice the
+    # status light. Appended like every other parameter on this page - `_retire` has
+    # already run, so this function owns the page and appends unconditionally.
+    par_autorefresh = page.appendToggle("Autorefresh", label="Auto Refresh")[0]
+    par_autorefresh.default = False
+
+    # Outputs nothing is feeding, taken off the COMP. See `apply_output_visibility`
+    # for why they only come off the END.
+    par_hide = page.appendToggle("Hideunused", label="Hide Unused Outputs")[0]
+    par_hide.default = False
+
+    # How long `Freeze` waits. 0 is immediate, which is the default and what the
+    # pulse meant before this existed.
+    par_freezetimer = page.appendInt("Freezetimer", label="Freeze Timer Seconds")[0]
+    par_freezetimer.default = 0
+    par_freezetimer.normMin, par_freezetimer.normMax = 0, 30
+
+    # The camera image itself, as a TOP. Under `Auto Refresh` because it belongs to
+    # the capture block rather than to any one stream, and it is what the overlays
+    # composite onto.
+    par_video = page.appendToggle("Outputvideo", label="Output Video")[0]
+    par_video.default = False
+
     page.appendPulse("Restartcapture", label="Restart")
 
-    # THE STATUS. One read-only string, and NO colour swatch - an RGB parameter was
-    # tried and removed the same day. It did give real colour, which a Par cannot carry
-    # on its own, but the cost was three visible float fields and a meaningless label
-    # next to a word that already said the thing. TouchDesigner renders a read-only
-    # value in its own colour anyway, so the swatch bought emphasis and spent clutter.
+    # Hold what is on the outputs and stop capturing, so an effect can be built
+    # against a still frame without the camera and the model running behind it.
+    # Released by turning `Active` back on.
+    page.appendPulse("Freeze", label="Freeze  (hold outputs, stop capture)")
+
+    # THE STATUS. One read-only string, and no colour swatch: TouchDesigner renders a
+    # read-only value in its own colour anyway, and an RGB parameter costs three
+    # visible float fields to say what the word already says.
     #
-    # Three states, and the middle one is why this exists at all: `Requires Restart`
-    # means a process IS running but a launch flag has changed since it started, so the
-    # panel and the process disagree. That state was invisible, and it cost somebody
-    # twenty minutes wondering why `Streamdepth` did nothing (JOURNAL, 2026-08-22).
+    # Three states, and the middle one is why this exists: `Requires Restart` means a
+    # process IS running but a launch flag has changed since it started, so the panel
+    # and the process disagree. Without it that state is invisible.
     par_state = page.appendStr("Capturestate", label="Status")[0]
     par_state.readOnly = True
 
-    # A MENU as of 2026-08-22, and the reason the old comment gave for it being a text
-    # field is now answered rather than ignored. It said a baked list goes wrong the
-    # moment a device is unplugged - true, and the fix is that the list REFRESHES:
-    # `Refresh Camera List` re-enumerates, and a device that has gone is kept as an
-    # entry rather than silently swapped for whatever is first.
+    # A MENU rather than a text field. A baked list goes wrong the moment a device is
+    # unplugged, so the list REFRESHES: `Refresh Camera List` re-enumerates, and a
+    # device that has gone is KEPT as an entry rather than silently swapped for
+    # whatever is first.
     #
-    # The blank entry is "(default)", which is what an empty text field used to mean -
-    # whatever `engine.py`'s measured default picks. Kept reachable.
+    # The blank entry is "(default)" - whatever `engine.py` picks on its own.
     #
-    # Exact names now, not substrings. `--camera` still matches on a substring, so the
-    # old behaviour is intact for anyone driving the sidecar by hand.
+    # Exact names, not substrings. `--camera` still matches on a substring, so driving
+    # the sidecar by hand is unaffected.
     # `CAMERA_DEFAULT` and not an empty string: TouchDesigner rejects "" as a menu
     # NAME at the C level - `SystemError: error return without exception set`, with no
     # Python exception to catch. So the "use the engine's own default" entry needs a
@@ -1370,7 +1788,7 @@ def main():
     # has, reading zero, because a channel that vanishes breaks its consumers
     # silently (DESIGN.md 6.2).
     #
-    # TWO effects since 2026-08-21, and the label says so. The flag reaches the
+    # TWO effects, and the label says so. The flag reaches the
     # sidecar only on a restart, but `tools/td_add_groups.py` also binds
     # `allowCooking` on the stream's child COMP to this toggle, and THAT takes effect
     # at once. So turning a stream off stops its network processing the zeros the
@@ -1427,6 +1845,26 @@ def main():
              "31 ms, 2016x1512 - drops frames"), strict=True)]
     par_quality.default = DEFAULT_SEGMENT_QUALITY
 
+    # People separated from EACH OTHER, not just from the background. A launch flag
+    # like the quality beside it. The mask stops being 0/255 when this is on and
+    # starts carrying an instance index per pixel, so the label says so.
+    par_instances = page.appendToggle(
+        "Multiperson", label="Multi-Person  (mask carries a person index)")[0]
+    par_instances.default = False
+
+    # MIRROR THE CAMERA, before Vision sees it. A launch flag, so it restarts.
+    #
+    # FREE, and worth saying because the obvious implementation is not: it is an
+    # image ORIENTATION on the Vision request, so nothing flips a pixel in Python.
+    # Everything Vision returns is mirrored with it - MEASURED, the
+    # depth map comes back 8.2x closer to the mirror of the original than to the
+    # original - so the mask, depth and flow TOPs need NOTHING downstream. Only
+    # `video_in` does, because TouchDesigner opens the camera itself and that image
+    # never goes near Vision.
+    par_flip = page.appendToggle(
+        "Cameraflip", label="Camera Flip  (mirror X before Vision)")[0]
+    par_flip.default = False
+
     par_w = page.appendInt("Resw", label="Source Width")[0]
     par_h = page.appendInt("Resh", label="Source Height")[0]
     # `.default` always, `.val` only when the parameter is NEW. TD's append* reset
@@ -1436,7 +1874,7 @@ def main():
     par_w.default, par_h.default = DEFAULT_WIDTH, DEFAULT_HEIGHT
     # A FLOOR OF 1, because 0 here is catastrophic and invisible: `_px = x * Resw`,
     # so a zero takes every pixel coordinate in the component to zero with no error
-    # anywhere. It is reachable - two aborted builds on 2026-08-23 left both of these
+    # anywhere. It is reachable - two aborted builds left both of these
     # at 0, because a newly appended parameter reads 0 whatever its default says
     # (DESIGN.md 2.11) and the restore pass never ran.
     #
@@ -1445,10 +1883,10 @@ def main():
     par_w.clampMin = par_h.clampMin = True
     par_w.min = par_h.min = 1
     # THESE THREE DEFAULT TO AN EXPRESSION, not a number, and that is the point:
-    # `_ty` is scaled by the RENDER's aspect, so a render resized after the build
-    # used to leave the transform on last build's numbers - a wrong position with
-    # nothing to see. An expression tracks it. `is not None` rather than a bare
-    # `or`, because a render of width 0 is a real reading and should not fall back.
+    # `_ty` is scaled by the RENDER's aspect, so a fixed number leaves the transform
+    # on last build's aspect after a resize - a wrong position with nothing to see.
+    # `is not None` rather than a bare `or`, because a render of width 0 is a real
+    # reading and should not fall back.
     par_rw = page.appendInt("Renderw", label="Render Width")[0]
     par_rh = page.appendInt("Renderh", label="Render Height")[0]
     par_rw.default, par_rh.default = DEFAULT_WIDTH, DEFAULT_HEIGHT
@@ -1461,7 +1899,7 @@ def main():
     # The output shaping: what LEAVES the COMP, as opposed to what it computes.
     par_screen = page.appendToggle(
         "Screenspaceonly", label="Screen Space Only (drop raw normalised)")[0]
-    # ON since 2026-09-03, by the user. It shipped OFF because the raw normalised
+        # ON, by the user. It shipped OFF because the raw normalised
     # channels are what every existing project reads and a toggle that ships ON
     # deletes them out from under one - true, and the reason it stayed off while there
     # were projects to break. The component now ships for people who have not built
@@ -1490,16 +1928,12 @@ def main():
         "Deleteempty", label="Delete Empty Channels")[0]
     par_empty.default = True
 
-    # Two OUTPUT-ONLY toggles, asked for 2026-08-23. `tools/td_add_groups.py` owns
-    # what they mean; this only creates them, because every control on this page is
-    # created here so the page order is decided in one place.
+    # Two OUTPUT-ONLY toggles. `tools/td_add_groups.py` owns what they mean; this only
+    # creates them, because every control on this page is created here so the page
+    # order is decided in one place.
     #
-    # `Fingertipsonly` ON and `Handbox` on, since 2026-09-03. Both defaults used to
-    # PRESERVE TODAY'S OUTPUT on the argument that a new toggle changing what an
-    # existing project receives is a silent breakage. That argument protected projects
-    # built against the old shape; the flip is the deliberate one it described, taken
-    # by the user once the short list became the shape worth shipping - fifteen joints
-    # per hand instead of twenty-one, and the rest one toggle away.
+    # Both ship ON: six points per hand is the shape worth shipping, and the rest is
+    # one toggle away.
     par_tips = page.appendToggle(
         "Fingertipsonly", label="Finger Tips Only")[0]
     par_tips.default = True
@@ -1540,7 +1974,7 @@ def main():
     # arrangement `Oscport` has. Owned HERE rather than by
     # tools/td_add_segmentation.py, because `start()` above needs it to exist before
     # anything has read a mask.
-    # KEEP LAYOUT, moved here from Vision on 2026-08-22. It is a build-time
+    # KEEP LAYOUT, moved here from Vision. It is a build-time
     # preference - whether the builders may move nodes - not something anybody touches
     # while the thing is running, and it was the odd one out among the operational
     # controls.
@@ -1557,21 +1991,15 @@ def main():
     #
     # `Sidecarpython` EMPTY means "work it out" - the probe in `install.py` tries the
     # install's own interpreter, then the documented venv, then what is on PATH, and
-    # downloads one only if none of them can actually import pyobjc. Set it and it
-    # goes first. It is a path and not a menu because the answer is a path.
-    # BLANK, and that is the fix for a .tox that only installed on one machine.
+    # downloads one only if none of them can actually import pyobjc. Set it and it goes
+    # first. A path and not a menu, because the answer is a path.
     #
-    # This used to default to `install.DEFAULT_INSTALL_ROOT`, which is
-    # `os.path.expanduser("~/Library/Application Support/appletd")` - expanded on the
-    # machine that RAN THE BUILDER. So the shipped .tox carried one person's home
-    # directory, and on anybody else's Mac Install pointed at a path they do not have.
-    # Exactly the mistake this file's own header records for `BUILT_AT` and
-    # `SIDECAR_PYTHON_DEFAULT` on 2026-08-23; this parameter was missed.
-    #
-    # Blank means "work it out", which the install code ALREADY did -
-    # `comp.par.Installroot.eval() or install.DEFAULT_INSTALL_ROOT` - and that
-    # fallback is evaluated on the machine that opens the file. Same idiom as
-    # `Sidecarpython` below, and the label says so. Typing a path still overrides it.
+    # BOTH DEFAULT TO BLANK, and that is what makes a shipped .tox installable
+    # anywhere. A default of `os.path.expanduser(...)` is expanded on the machine that
+    # RAN THE BUILDER, so the .tox carries one person's home directory and Install
+    # points at a path nobody else has. Blank is resolved by
+    # `comp.par.Installroot.eval() or install.DEFAULT_INSTALL_ROOT`, on the machine
+    # that OPENS the file. Typing a path still overrides it.
     par_installroot = advanced.appendStr(
         "Installroot",
         label="Install Folder  (blank = Application Support)")[0]
@@ -1608,13 +2036,18 @@ def main():
     # One pass for every parameter this script owns: `.val` from `.default` only
     # where the parameter is NEW. A newly appended parameter reads 0 whatever its
     # default says (DESIGN.md 2.11), and `previous` is the record of what existed.
-    owned = [("Active", par_active), ("Camera", par_camera),
+    owned = [("Active", par_active), ("Autorefresh", par_autorefresh),
+             ("Hideunused", par_hide), ("Freezetimer", par_freezetimer),
+             ("Outputvideo", par_video),
+             ("Camera", par_camera),
              ("Slotassign", par_slots), ("Resw", par_w), ("Resh", par_h),
              ("Renderw", par_rw), ("Renderh", par_rh),
              ("Orthowidth", par_ortho), ("Screenspaceonly", par_screen),
              ("Keeplayout", par_keep), ("Deleteempty", par_empty),
              ("Fingertipsonly", par_tips),
-             ("Segquality", par_quality), ("Maskbuffer", par_mask),
+             ("Segquality", par_quality), ("Multiperson", par_instances),
+             ("Cameraflip", par_flip),
+             ("Maskbuffer", par_mask),
              ("Depthbuffer", par_depthbuf),
              ("Oscport", par_port),
              ("Installroot", par_installroot), ("Sidecarpython", par_sidecarpy),
@@ -1628,7 +2061,7 @@ def main():
 
     # A NEW parameter is put into EXPRESSION mode, so the render's size and the
     # camera's ortho width are read live rather than copied once at build. This
-    # replaced three one-shot `.val =` reads on 2026-08-23: they were correct at the
+    # replaced three one-shot `.val =` reads : they were correct at the
     # moment the builder ran and silently stale the moment somebody resized the
     # render, and a wrong `_ty` looks exactly like a right one.
     #
@@ -1643,7 +2076,7 @@ def main():
         # Assigning `.expr` switches the parameter into expression mode by itself.
         # `ParMode` is deliberately not named here: it is not reachable as a bare
         # global or off `td` in every context a builder runs in, and reaching for it
-        # cost two failed builds on 2026-08-23.
+        # cost two failed builds.
         parameter.expr = expression
         print("   %-11s %-56s -> %s" % (name, expression, parameter.eval()))
 
@@ -1652,7 +2085,7 @@ def main():
     # hardcoded list of three names checked against `render`/`camera` being present:
     # asking the parameter what mode it is in cannot fall out of step with the block
     # above, and a name list can. (It already did - deleting those two variables on
-    # 2026-08-23 left the list referring to them, `main()` raised here, and three
+    # left the list referring to them, `main()` raised here, and three
     # parameters were left reading 0.)
     for name, value in previous.items():
         if not hasattr(comp.par, name):
@@ -1665,12 +2098,10 @@ def main():
         parameter.val = value
 
     # EVERY `Stream*` toggle must be in the launcher's table, or it is a control that
-    # cannot reach the process it claims to control. MEASURED as a real failure on
-    # 2026-08-22: `Streamdepth` existed, was on, had its own command-line arguments and
-    # its own report line - and was absent from the one loop that turns toggles into
-    # `--streams`, so the sidecar was launched with `hands` while the panel said
-    # otherwise. The argv extras were guarded by `"depth" in streams`, so they never
-    # ran and nothing complained.
+    # cannot reach the process it claims to control. A toggle can otherwise exist, be
+    # on, have its own command-line arguments and its own report line, and still be
+    # absent from the one loop that turns toggles into `--streams` - so the sidecar
+    # launches without it while the panel says otherwise, and nothing complains.
     #
     # Checked HERE, in the builder, because this is the only place that can see both
     # the parameters and the table. It is the cheapest possible guard against adding a
@@ -1753,7 +2184,7 @@ def main():
               % (index + 1, stream, osc.par.port.eval(), child.name))
 
     # -- ONE output ---------------------------------------------------------
-    # Three streams -> one Merge -> a Delete -> one Out. Changed 2026-08-22 from
+    # Three streams -> one Merge -> a Delete -> one Out. changed from
     # three separate Out CHOPs, so that a project wires this component once and a
     # beginner meets one channel list rather than three.
     #
@@ -1777,7 +2208,7 @@ def main():
     # place that knows which groups are frozen - and it has to be rewritten whenever
     # a toggle moves, so it cannot be baked here.
     #
-    # A SELECT rather than the Delete CHOP this started as. MEASURED 2026-08-22 on
+    # A SELECT rather than the Delete CHOP this started as. MEASURED on
     # the same 1,764-channel merge, median of 30 forced cooks, same 306 channels out:
     #
     #     Delete,  35 drop patterns          0.6697 ms
@@ -1811,14 +2242,14 @@ def main():
     _at(empty, master_xy("trim_empty"), keep_layout, empty_existed)
     empty.color = (0.5, 0.32, 0.32)
     # NOT wired to the merge directly any more. Four builders own a stage of the
-    # master's data path since 2026-08-24, so the order lives in
+    # master's data path, so the order lives in
     # `appletd.td_layout.MASTER_CHAIN` and every one of them asks for the whole chain
     # to be rewired after creating its own operator. Wiring a neighbour by name here
     # would be right only for the build order this script was written against.
     rewire_master_chain(comp)
 
     # The housekeeping, which the output deliberately does NOT carry: `sc_*`, `seq`
-    # and `age_ms`. Asked for 2026-08-22 - they are diagnostics, and a beginner
+    # and `age_ms`. Asked for - they are diagnostics, and a beginner
     # reading the channel list should not have to step over them. They are one click
     # away rather than gone: this Select picks them off the merge and the Null beside
     # it is the thing to look at. Its LIST, like the trim's, is written by
@@ -1845,6 +2276,8 @@ def main():
     if out is None:
         out = comp.create(td.outCHOP, "out1")
     _at(out, master_xy("out1"), keep_layout, out_existed)
+    # The connector number, pinned - see appletd/td_layout.py OUTPUT_ORDER.
+    out.par.connectorder = OUTPUT_ORDER["out1"]
     # PRESERVED, never recreated - an Out CHOP IS the COMP's output connector, and
     # destroying it disconnects whatever the project had wired to it (DESIGN.md 2.11).
     # `rewire_master_chain` connects the whole path in MASTER_CHAIN order,
@@ -1860,15 +2293,13 @@ def main():
     # leave a project reading a dead wire.
     retired = [name for name in ("out2", "out3")
                if comp.op(name) is not None and comp.op(name).valid]
-    # GUARDED, and the guard is a bug fix. This block is a one-time migration from the
-    # three-output shape, and the capture-and-reconnect used to run unconditionally -
-    # harmless while the COMP had only CHOP outputs, and a hard error the moment it
-    # grew a TOP one: `outputConnectors[0]` is no longer necessarily the CHOP, so
-    # every TOP consumer got repointed at a CHOP output and TouchDesigner refused.
-    # MEASURED 2026-08-22, when `outdepth` was added and the whole chain stopped.
+    # GUARDED. This block is a one-time migration from the three-output shape, and
+    # running it unconditionally is harmless only while the COMP has CHOP outputs
+    # alone: once it grows a TOP one, `outputConnectors[0]` is not necessarily the
+    # CHOP, every TOP consumer is repointed at a CHOP output and TouchDesigner refuses.
     #
-    # Two lessons in one line: a migration that has already run should not keep
-    # running, and code that indexes a connector list has to say WHICH FAMILY it means.
+    # A migration that has already run must not keep running, and code that indexes a
+    # connector list has to say WHICH FAMILY it means.
     if retired:
         moved = []
         for connector in comp.outputConnectors:
@@ -1907,8 +2338,12 @@ def main():
     # Active and the two pulses, PLUS every launch flag - because a launch flag
     # changing is exactly what "Requires Restart" reports, and a parameter this DAT is
     # not watching cannot report anything. Built from the same table the launcher uses.
-    watched = ["Active", "Restartcapture", "Printstatus", "Listcameras",
-               "Camera", "Slotassign", "Oscport", "Segquality",
+    watched = ["Active", "Autorefresh", "Restartcapture", "Freeze", "Hideunused",
+               "Outputvideo", "Handsoverlay", "Poseoverlay", "Faceoverlay",
+               "Printstatus", "Listcameras",
+               "Camera", "Cameraflip", "Inputmode", "Framesbuffer",
+               "Slotassign", "Oscport", "Segquality", "Multiperson",
+               "Flowaccuracy", "Flowbuffer",
                "Maskbuffer", "Depthbuffer"]
     watched += [par_name for _n, par_name in REQUEST_TOGGLES]
     # The depth pins live on a page tools/td_add_depth.py owns, so they may not exist
@@ -1938,7 +2373,7 @@ def main():
     on_start.par.start = True
     on_start.par.create = True
 
-    # A CHOP Execute DAT called `source_size` tried this on 2026-08-23 and could not:
+    # A CHOP Execute DAT called `source_size` tried this and could not:
     # `onValueChange` fires when a channel CHANGES, and `sc_src_w` is 1280 from the
     # moment it appears and never moves again, so the callback never ran at all.
     # `reconcile_source_size()` in the launcher does it instead. Destroyed here rather
@@ -2017,7 +2452,7 @@ def main():
         print("   rewired %s" % ", ".join(rewired))
 
     # -- report ------------------------------------------------------------
-    # NOT force=True. MEASURED 2026-08-22: a forced cook of this COMP asks every
+    # NOT force=True. MEASURED: a forced cook of this COMP asks every
     # child for fresh data, a group frozen by `allowCooking` cannot answer, and its
     # Out CHOP drops to ZERO channels - so the channels VANISH from the output
     # instead of holding their last value (DESIGN.md 6.2). `hands` went from 503

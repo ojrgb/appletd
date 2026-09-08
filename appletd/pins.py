@@ -1,53 +1,26 @@
 """Turning Depth Anything's relative output into metres, with points of known distance.
 
-THE PROBLEM THIS SOLVES, and it is not a nicety. Depth Anything V2's Core ML graph
-ends in a `reduce_max`: the output is divided by the frame's own maximum, and the
-maximum inverse-depth pixel is the NEAREST thing in shot. So a hand coming toward the
-lens darkens every other pixel in the frame. That is not the model changing its mind,
-it is division - and it means nothing the model outputs is comparable between frames.
-Anything driven off it has to be scale-invariant, or pinned.
+Depth Anything V2's Core ML graph ends in a `reduce_max`: the output is divided by the
+frame's own maximum, so the nearest thing in shot sets the scale and a hand coming
+toward the lens darkens every other pixel. Nothing the model outputs is comparable
+between frames unless it is pinned.
 
-Pinning works because the corruption is AFFINE. Give it points in the room whose real
-distance you know and every frame you can solve
+Pinning works because the corruption is AFFINE. Given points whose real distance is
+known, solve
 
     1 / Z  =  alpha * d  +  beta            d = this frame's raw output
 
-for alpha and beta, then read metres anywhere as `Z = 1 / (alpha*d + beta)`. Two
-unknowns, so two pins minimum, at DIFFERENT distances.
+and read metres anywhere as `Z = 1 / (alpha*d + beta)`. Two unknowns, so two pins
+minimum, at DIFFERENT distances.
 
-RE-SOLVED EVERY FRAME, and caching it would defeat the whole thing: the quantity
-being cancelled changes every frame, so a cached alpha/beta is exactly the stale-scale
-problem the correction exists to remove, wearing the costume of a fix.
+Re-solved every frame: the quantity being cancelled changes every frame, so a cached
+alpha and beta would be the stale-scale problem this exists to remove.
 
-WHAT THIS MODULE IS NOT. It does not import Vision, Core ML, TouchDesigner or
-`maskbuf`. It is arithmetic over a numpy array and a list of pins, which is why it can
-be tested exhaustively with no model, no camera and no frameworks - and it is where
-every number that reaches a user comes from. `appletd/depth.py` owns the model,
-`appletd/sidecar.py` owns the transport.
+Imports no Vision, no Core ML, no TouchDesigner - arithmetic over a numpy array and a
+list of pins, testable exhaustively with no model and no camera.
 
-numpy IS imported at module scope here, unlike everywhere else in the package. The
-rule it breaks is real - `appletd/__init__.py` promises the core layer needs no
-numpy - so this module is deliberately NOT part of that layer: nothing in the OSC or
-CHOP path imports it, only the depth stream does, and the depth stream already needs
-numpy to read a pixel buffer at all.
-
-CAVEATS WORTH KNOWING BEFORE TRUSTING A NUMBER OFF THIS - all of them from the
-reference implementation in apple-vision-examples, kept because they are the honest
-limits rather than because they are tidy:
-
-  * A pin someone walks in front of reports their chest and poisons the solve. With
-    three or more, the worst-fitting pin is dropped when it disagrees by more than
-    `drop_m`, which is why three is the number to use and not two.
-  * The residual is the part of the drift that is NOT affine, and no amount of
-    pinning removes it. It is the number that decides whether this is good enough for
-    whatever you are driving.
-  * The camera must not move. If it does, every pin is silently wrong.
-  * Keep pins at middling distances rather than on the far wall. 0.6 m to 2 m already
-    spans most of the useful inverse-depth range, and the far wall lands in very few
-    levels once something near has set the frame maximum.
-
-Ref: design/DESIGN.md 2.22, docs/DEPTH.md,
-     apple-vision-examples/examples/depth/depth.py (where the maths came from).
+Thread: pure functions. Safe anywhere.
+Ref: docs/DEPTH.md.
 """
 
 from __future__ import annotations

@@ -4660,3 +4660,484 @@ only and never the value.
 `Depthpinsdraw` was left alone deliberately and is the user's call: it is on in the dev
 project, but switching it on changes the depth output from `mono32float` to
 `rgba32float` for everybody, which is a format change and not a preference.
+
+**`Fingertipsonly` moved to the late trim while a hand overlay is on — 2026-09-08.**
+The overlay draws a skeleton and needs all 21 joints in world space; `early_trim` sits
+before `coords`, so the toggle was deleting the joints before they could be composed.
+
+The premise for keeping it early did not survive measurement. Composing every joint
+instead of six costs **0.045 ms** (BENCHMARKS.md), not the "too expensive for the
+overlay to be free" it was assumed to be — so nothing needed a parallel gated branch.
+`removing_patterns` grew a `stage` argument instead: the early pass holds the toggle
+back while `Handsoverlay` is on, the late pass always names it. The docstring already
+promised the late pass "keeps the output correct when `early_trim` is bypassed", so
+the second enforcement point was there the whole time and simply had to be relied on.
+
+Verified by toggling: `out1` is 46 channels with zero non-tip joints in both states,
+while `overlay/in1` goes from 13 hand `_tx` channels to 43.
+
+`overlay/in1` also moved from `merge_streams` to `coords`. The old tap was upstream of
+the composition, so it carried only raw normalised `_x`/`_y` — the overlay would have
+had to redo the transform the component already does once. Found because the generated
+skeleton channel list named `_tx` channels that did not exist at that point.
+
+Two defects surfaced on the way, both of the same family — a second copy of a contract
+that nothing held to the first:
+
+**The flow callbacks DAT used `os.path` and never imported `os`.** Same defect as the
+TOP Input template, which had it fixed; the flow template was written from a copy that
+predated the fix. `test_generated_templates.py` compiles every template and cannot
+catch this — a missing import is valid Python.
+
+**`STREAM_CHANNELS['pose']` never learned about the person boxes.** `human?_*` and
+`human_n` joined the pose contract with the human rectangles and were not added, so
+switching the pose stream off would have left them on the output holding a stale
+value. Caught by the builder's own `_check_stream_patterns` guard, which refused to
+run — the guard working exactly as intended.
+
+Also found, not a code defect: the install at `~/Library/Application Support/appletd`
+is what TouchDesigner imports, and it sits ahead of the checkout on `sys.path`. It was
+9 files short and 21 files stale, so none of V2's package work was live in the dev
+project. The sidecar runs from a different interpreter, which is why hands kept working
+and why this stayed invisible.
+
+**The overlays render, and one table draws every skeleton — 2026-09-08.** Omer built
+`overlay/hands/hands_skeleton` by hand - a Select CHOP naming each segment's two
+endpoints, a Shuffle folding X and Y into two channels, `CHOP to POP` in `lines` mode,
+and a Delete removing eleven primitives. This generalises it.
+
+The Delete list was the thing worth understanding. `lines` mode joins CONSECUTIVE
+points, so 84 points give 83 primitives where the skeleton wanted 42 - every odd gap
+joins the end of one segment to the start of the next. Most are zero length, because a
+skeleton shares points, and draw nothing; the eleven that jump are real lines across
+the image. `appletd/skeletons.py` derives that list, the Select's channels and the
+CHOP to POP's scope from ONE connection table, and the generated list is identical to
+the eleven Omer arrived at independently - which is what `test_skeletons.py` pins.
+
+Pose and face come from the same generator: 18 body segments read off the 19 joints,
+and 79 face segments derived from the region table, with the eyes and both lip rings
+closed and the arcs left open.
+
+**`render1`'s geometry is `*`, and that resolves recursively.** It names
+`hands/hands_skeleton/geo1` directly, not only through its parents, so a geo cannot
+rely on an ancestor's render flag to hide it. Every renderable carries the whole
+condition - overlay on, stream on, this mode selected - rather than the mode test
+alone.
+
+**`Show Overlay` is vetoed by its stream**, at Omer's request. On with `Hands` off
+used to cook a COMP whose channels were frozen, drawing a hand that was no longer
+being tracked. The veto is on the render flags, on `allowCooking`, and on the trim
+guard, so an overlay of a dead stream holds nothing open either.
+
+Two traps on the way. A COMP has NO input connector until an operator inside it asks
+for one, so the skeleton has to be built before its parent can be wired - and the
+first version connected a stream COMP that had nothing inside it yet. And the network
+is POPs: `choptoSOP` and `choptoPOP` both answer to `.type == "chopto"` and have
+entirely different parameters, so `place()` compares `OPType` and replaces a node of
+the wrong family rather than writing parameters it does not have.
+
+**Camera Flip, and what it does NOT need — 2026-09-08.** Omer asked for a mirror
+before Vision, and asked whether it was expensive on the Python side. It is free:
+Vision takes an image orientation on the request, so `--flip` passes
+`kCGImagePropertyOrientationUpMirrored` and no pixel is touched here. Fourteen call
+sites across six detectors gained the argument; the engine resolves it once.
+
+The request that came WITH it was to put a Flip TOP after each output. Measured
+first, and it turned out to be the wrong thing for three of the four: Vision returns
+its image outputs in the oriented space, not just its coordinates. On a fixture frame
+the depth map came back 8.2x closer to the mirror of the original than to the
+original (BENCHMARKS.md), and the mask and flow go through the same handler with the
+same flag. A Flip TOP on any of those would undo the mirror rather than apply it.
+
+`video_in` is the exception and gets the only Flip TOP in the component: TouchDesigner
+opens the camera as a second client, and that image never goes near Vision.
+
+Chirality follows the mirror, and this is documented rather than corrected: a mirrored
+left hand IS a right hand and Vision reports it as one. That is right for an overlay
+drawn on a mirrored image and wrong for asking which of the user's actual hands is
+raised, so it is stated at the flag rather than silently compensated.
+
+One thing this turned up in passing: `if par:` on a TouchDesigner parameter tests the
+Par OBJECT, and a toggle holding 0 is falsy - so a diagnostic printed "-" for a
+parameter that existed and was simply off. The same trap is why the overlay's render
+expressions call `.eval()` on both sides of their `and`.
+
+**The panel now says why the sidecar stopped — 2026-09-08.** Omer turned `Camera Flip`
+on, capture went to "Stopped", and nothing said why. The reason existed the whole
+time, in `/tmp/appletd_sidecar.log`:
+
+    sidecar.py: error: unrecognized arguments: --flip
+
+THE ACTUAL CAUSE was a step I skipped rather than the flag. The package reaches the
+sidecar as `checkout -> td_embed_package.py -> DATs in the .toe -> Install -> disk`,
+and I had changed the checkout without re-embedding. Install did exactly what it
+should and wrote out yesterday's package, which is why `Install Status` read
+"Installed" while the sidecar rejected a flag the component had just learned to send.
+The version stamp was consistent too, and correctly so: it compares the install
+against the EMBEDDED package, and those two did match. Nothing compares either
+against the checkout, which only matters while developing.
+
+Three fixes, and the first is the one that generalises:
+
+**`Capturestate` carries the reason.** `start` now schedules `check_started` 1.2
+seconds later; if nothing is running by then it reads the last line of the log and
+stores it, and the status reads `Stopped - sidecar.py: error: unrecognized arguments:
+--flip`. The delay is the point - `Popen` returns while a process that rejects its
+arguments is still briefly alive, so an inline check always says "Running".
+
+The line is the last UNINDENTED one, not the last one. Taking the last outright
+picked "your python interpreter from there." out of a wrapped numpy ImportError - a
+sentence fragment. Both failure shapes put their summary at column 0 and can be
+followed by indented continuations.
+
+**`Camera Flip` restarts itself** rather than waiting for `Auto Refresh`, which may be
+off and waits three seconds when on. The reason is specific to this flag: the picture
+flips instantly, because `video_flip` is an expression on a TOP, while the tracking
+only flips on relaunch - so in between, the overlay sits on the mirror of where the
+hand actually is. That reads as a broken toggle rather than a pending restart.
+
+**`video_flip` was missing from the ownership table**, so `td_build_vision.py`
+destroyed it as an unrecognised child on the next rebuild. Registered. The same
+lesson as the embed: run `tools/td_rebuild.py`, not individual builders.
+
+**Optical flow alone was refused as "no streams enabled" — 2026-09-08.** Omer enabled
+only `Streamflow` and capture stopped. `HandEngine.__init__` guards against a session
+with no requests attached - right, because it would open the camera, deliver frames
+and run no inference while every channel read zero. But the guard was a hand-written
+chain of `is None` over hands, pose, face, segmentation and depth, and flow was never
+added to it. Its message was stale in the same way: "Enable hands, pose, or both",
+long after there were six.
+
+Now a dict of every detector, so adding a stream is one line and the message lists
+what is actually available.
+
+THE THIRD TIME a stream has been added without being added to an existing list, after
+`appletd.motion` missing from `RUNTIME_MODULES` and the person boxes missing from
+`STREAM_CHANNELS`. So this one gets a test rather than a note: `test_engine_streams.py`
+constructs an engine with each stream ALONE and asserts none is refused. Confirmed to
+fail on the old guard, for the flow case only.
+
+Worth recording that the panel found this. `Capturestate` carried
+`Stopped - appletd.engine.EngineError: no streams enabled: ...` straight to the
+parameter page, the day after it started reporting failures at all. The same fault a
+day earlier would have read "Stopped".
+
+Noticed while verifying, not yet addressed: with `Streamhands` off the `sc_*` status
+channels disappear, because they arrive on the hands port. In a flow-only project
+`Capturestate` is the only health signal.
+
+**The comment sweep, finished — 2026-09-08.** Omer's instruction, from the file that
+prompted it: the comments "make them look like slop", and reviewers of this code do
+not care what we measured on which date or what we tried first. The package had been
+done partly; `tools/` had not been touched.
+
+**357 diary lines in `tools/` to zero, and 60 in `appletd/` to zero.** What went: every
+dated measurement, every account of an earlier wrong turn, every "the M2b review
+found", every "this used to be". What stayed: the trap, the invariant, the number.
+Most of it converted rather than deleted - "MEASURED 2026-08-24: X used to cost 1.4 ms"
+becomes "X costs 1.4 ms", which is the same fact without the diary.
+
+`tools/td_add_filter.py`'s module docstring was **101 lines**, of which about seventy
+were the history of building a one-euro filter by hand before discovering TouchDesigner
+had one. It is 35, and the measurements are in `docs/internals/filter-rationale.md`.
+`docs/STANDARDS.md` now states the builder ceiling explicitly - about 25 lines, because
+a builder's docstring is also its usage - since the 5-to-12 rule was written for the
+package and the builders were quietly exempt.
+
+TWO MECHANICAL PASSES WENT WRONG AND BOTH WERE CAUGHT BY READING THE OUTPUT. A
+`"  +" -> " "` tidy rule collapsed LEADING INDENTATION on all 114 lines it touched,
+which broke one file's syntax and left 78 comment lines hanging a column out. A
+` \.` -> `.` rule ate the space in "a .tox", giving "a.tox" in four files. Both were
+repaired from the surrounding block rather than by reverting, and the lesson is the
+obvious one: a regex that edits prose must not be allowed near whitespace that carries
+meaning.
+
+**The docs, in the same pass.** README and `ATTRIBUTES.md` had no mention of the
+overlays, Camera Flip, optical flow or the person boxes, and carried counts that had
+gone stale: pose is 304 channels rather than 275, and there are nine status channels
+rather than four. Both corrected against the code rather than by hand. `HANDOFF.md` was
+a two-week-old snapshot naming retired parameters and a test count 85 short; the old one
+is archived under `internals/` for its reasoning and the new one points at the V2 queue.
+
+NOT VERIFIED: TouchDesigner was closed for the night, so no builder was run against a
+live project. The static checks all pass - 696 tests, ruff, every generated template
+renders and compiles, and every `%`-escaping in the 46 template strings is still
+balanced - but a rebuild should be the first thing tomorrow, and the package needs
+re-embedding and re-installing since its comments changed.
+
+**TOP Input mode killed the sidecar, and that is what "Stopped" meant — 2026-09-08.**
+Omer reported switching `Input Mode` to TOP Input flipping the status to Stopped while
+capture was running happily on the camera, and asked for the status to keep the camera
+until a restart. The status was not lying: with `Auto Refresh` on, the change scheduled
+a restart, the restart ran, and the new sidecar died on startup.
+
+`FrameBufferReader` opened its buffer in `__init__`, so the sidecar raised
+`FileNotFoundError: /tmp/appletd_frames.buf` before its first frame. That file is
+written by TOUCHDESIGNER, not by the sidecar - the only shared buffer in the package
+that runs that way - and it does not exist until a Script TOP has cooked at least
+once. Starting in TOP Input mode before a frame has ever been published is the normal
+case, not an error, so the open is lazy now and an absent buffer means "no frame yet"
+exactly like an empty one.
+
+Found in a minute, and only because `Capturestate` started carrying the reason
+yesterday. The note written the night before guessed at a command-line match in
+`running_pids()` and was wrong; the panel answered it directly.
+
+**And the fix would have been invisible without a second change.** A sidecar that
+waits instead of dying runs perfectly, finds nothing, and looks identical to a
+tracking failure. The status line now says `waiting for TouchDesigner to publish a
+frame to <path>` until the first one arrives, and counts them after - the same reason
+the image streams got counters when "is depth even on?" could not be answered.
+
+**The multi-person mask is coloured — 2026-09-08.** Omer: switching `Multi-Person` on
+made the mask "too low" to see. Correct - `instanceMask()` is index-encoded, 0 for
+background and 1..4 per person, so the buffer carried 1, 2, 3, 4 in a uint8 and drew
+as black.
+
+Indices stay on the wire, because they are the right thing to send: one component,
+lossless, integer arithmetic all the way. The colouring is the consumer's job, so the
+mask's Script TOP does it - red, green, blue, then white, white last because a fourth
+person has to be visible against a light background and there is no fourth primary.
+
+WHICH KIND OF MASK IT IS TRAVELS WITH THE FRAME, in the buffer's aux block, and that
+is the part worth stating. The obvious source is `Multiperson`, and it is wrong:
+that toggle is a launch flag, so between flipping it and restarting the parameter and
+the running sidecar disagree - and a consumer reading a 0/255 silhouette as indices
+would index a five-entry table with 255. The frame says what the frame is.
+
+Verified live on one person: 45,156 pixels of RGB(255, 0, 0) where before there were
+45,156 pixels of 1. The single-person path is unchanged - still a grayscale 0/255
+silhouette, checked the same way.
+
+Adding `people` to the write broke `test_sidecar_mask.py`'s stand-in, whose docstring
+promises exactly that: "if `_write_mask` ever starts reading a fifth field, this
+breaks - which is the point". The double was updated rather than the code loosened.
+
+**The face overlay draws the key points, not the landmarks — 2026-09-08.** Omer's
+item 5, and it was drawing nothing at all before. `Facekeypoints` ships ON and strips
+the 348 landmark channels at the STREAM, upstream of everything, so a Select naming
+`f0_left_eye_00_tx` matched nothing - and a Select emits no channel for a name nobody
+publishes, silently. Measured at the overlay's input: five face `_tx` channels per
+face, the four key points and the box.
+
+So the default face skeleton is the four key points - the eye line, both eyes down to
+the nose tip, the nose down to the mouth. Four segments read as a face at a glance,
+which is all a marker overlay has to do. Both eyes go to the nose rather than to a
+midpoint between them, because a Select CHOP does no arithmetic.
+
+The landmark version is kept as a second Overlay Mode for a project that has turned
+`Facekeypoints` off. This REPLACES the plan to hold that toggle back for the overlay
+the way `Fingertipsonly` is held back - which would have cost 1.21 ms and 348
+channels to draw what four points already say.
+
+TWO BUGS IN THE OVERLAY BUILDER, found by adding a second mode:
+
+**A menu's options were written only at creation.** Adding a mode to the table left the
+Face page offering one stale entry, so the new mode could not be selected at all. The
+options are rewritten every run now, and a stored value that no longer names a mode
+falls back to the default rather than leaving the panel on a dead entry that renders
+nothing. Same shape as the default-that-never-reaches-an-existing-parameter problem in
+`td_add_groups.py`.
+
+**A retired mode's COMP survived.** `face_skeleton` stayed inside the stream after the
+table stopped naming it - invisible, still cooking, and impossible to select, because
+`render1` finds it by `*` while its render expression tests a mode the menu no longer
+offers. Modes are retired now, like parameters.
+
+**`hands_angle` became `hands_angle_z`, and there is no `_x` or `_y` — 2026-09-08.**
+Omer's item 3: the per-joint angles were renamed to `angle_[xyz]` and the derived
+two-hand one was missed, so it should get "the same treatment".
+
+The rename is the whole of it, and that is the finding rather than a shortcut. `_z`
+means the same thing here as everywhere else in this vocabulary - an in-plane rotation
+about the view axis, which a projection determines exactly - and `hands_angle` was
+already exactly that.
+
+An `_x`/`_y` pair would be the tilt of the line joining the palms out of the image
+plane, and that needs a depth DIFFERENCE between the two hands. Nothing can supply
+one: `h{i}_z` is `Zreference / h{i}_size`, an apparent-size proxy the contract already
+warns is not comparable between two different hands - a child's hand at 40 cm and an
+adult's at 60 read alike - and nothing on the wire samples the depth map per hand. So
+the options were two channels of zeros, or two derived from a proxy that does not mean
+what the name says. Both are worse than one honest number, which is the same call
+`_tilt` makes about pitch and yaw.
+
+Stated in `ATTRIBUTES.md` rather than left as an absence, because "why is there no
+`hands_angle_x`" is a question somebody will ask of the channel list.
+
+**`Output Video` follows `Input Mode` — 2026-09-08.** Omer's item 7: in TOP Input mode
+the video output should be the TOP input, with `video_in` bypassed.
+
+A Switch TOP, `video_source`, between the two sources and BEFORE the flip - so
+`Camera Flip` mirrors whichever one is live rather than only the camera. `video_in`'s
+`active` gained the mode test as well, so in TOP Input mode the device is genuinely
+not opened: nothing holds a second client on a camera nobody is looking at, and no
+permission prompt appears on a machine that never wanted one. Verified by switching:
+`video_in.active` goes False with no error, and the source becomes the image input.
+
+One thing that had to move with it. `render1`'s resolution read `op('../video_in').width`,
+and a camera that is not open is 0 wide - so the overlay would have rendered 0x0 in
+exactly the mode this was added for. It reads the SWITCH now, which is whichever
+picture is live.
+
+`Output Video` was also absent from `ATTRIBUTES.md` entirely, which is why the doc had
+nothing to correct. It is in the General table now, with what it shows in each mode.
+
+**The status counts down — 2026-09-08.** Omer's item 6: a pending restart should read
+`Restarting in 3`, `2`, `1`, and a pending freeze the same.
+
+One function for both, because both pending actions already worked the same way - a
+token in operator storage plus a `run` at the end of the wait. `tick_countdown` walks
+that same token down in one-second steps, so a later press supersedes a countdown
+exactly as it supersedes the action: the stale tick finds a token that no longer
+matches and stops writing. No timer operator, nothing to cancel.
+
+It deliberately does NOT restore the state when it reaches zero. The action's own
+`set_state` does that from the truth a moment later, and two writers racing to describe
+the same thing is how a status light starts lying. Checked: a tick with `remaining 0`
+left a sentinel value untouched.
+
+Verified by pressing `Freeze` with an 8-second timer and reading `Freezing in 3` off
+the parameter mid-count, then watching it land, lock `out1` and `outvideo`, and thaw
+cleanly when `Active` went back on.
+
+WORTH RECORDING ABOUT THE TESTING, because it wasted two attempts: a parameter written
+from a script does not fire its Parameter Execute in the same frame, and the auto-
+refresh window is three seconds - shorter than a poll round trip. Driving
+`tick_countdown` directly, with a matching and then a superseded token, tests the
+properties that matter without racing the clock.
+
+**The face angles are ours now, not Vision's — 2026-09-08.** Omer's item 2. Vision
+QUANTISES `roll`, `yaw` and `pitch` on `VNFaceObservation`: measured live at revision
+3, the highest the request offers, yaw arrives in 45-degree steps and roll in 30. He
+asked to treat that as an exception rather than as our standard, and to replace them.
+
+`face_types.face_angles` computes all three from the four key points. Verified live:
+yaw and roll went from 1 distinct value across 400 frames to **673 and 600 distinct
+values with 0.001-degree gaps**. 4.31 microseconds a face, measured, against about
+8 ms for the inference itself.
+
+THREE THINGS THIS TURNED UP, in order of how much they mattered.
+
+**Normalised image space is not square.** x and y are each normalised by their own
+dimension, so a 1280x720 frame stretches y by 16:9 against x - and an angle measured
+there is not an angle. Caught by measuring the eye-line-to-mouth over eye-separation
+ratio on a real face: 2.09 in normalised space where the anatomy is about 1.15. The
+points go to PIXELS first now, using a frame size that was already being passed in.
+
+**`acos(ratio / rest)` reads exactly zero for every face longer than the constant.**
+The argument clamps at 1, so pitch was 0.00 across 700 frames of a real face and would
+have shipped that way. Taking the DIFFERENCE from rest is continuous through it:
+negative for a longer-than-average face at rest, positive as a nod foreshortens it,
+monotonic either way. The direction and the change are trustworthy; the absolute
+magnitude is not, and `ATTRIBUTES.md` says so.
+
+**Install is ASYNCHRONOUS.** Pulsing `Install` and calling `restart()` in the same
+breath starts a sidecar on the old files, and the panel reports success either way.
+That cost two rounds of "the code is right and the channels are zero" before the files
+on disk were checked. Confirm the install landed, then restart.
+
+Also removed: `_degrees_or_zero`, which nothing called once the observation's angles
+stopped being read, and the two tests that described its contract. A converter kept
+"for whoever wants the raw values back" is dead code with a story attached.
+
+**`Active` off freezes the overlays — 2026-09-08, by request.** They were gated on
+their own toggle and their stream but not on capture, so with `Active` off they kept
+cooking and re-rendering the same skeleton every frame, from channels that were holding
+their last values.
+
+`Active` is the veto now, exactly as it already is for every attribute group. It stops
+the COOKING and leaves the render flags alone, so the overlay HOLDS the picture it had
+rather than blanking - which is what `Freeze` means, and `Freeze` turns `Active` off.
+Verified: `overlay` and `face` go to `allowCooking=False` while the geometry inside
+stays at 16 channels and 5 primitives.
+
+The `Active` branch of `onValueChange` needed the call adding explicitly: it returns
+early, before the generic path that applies the overlay gate, so without that the veto
+only took effect the next time some other parameter moved.
+
+**The countdown could strand the status, and did — 2026-09-08.** Omer switched `Active`
+off and then `Output Video` off, and the panel sat on `Restarting in 1` for ever.
+
+My fault, and a direct consequence of yesterday's design choice: the countdown
+deliberately leaves the last word to the action's own `set_state`, "because two writers
+racing to describe the same thing is how a status light starts lying". The hole is what
+happens when the action DECLINES. `Output Video` is a launch flag, so the change armed
+a countdown; `apply_refresh` then found `Active` off and returned SILENTLY, so nothing
+ever wrote the state back and the countdown's last tick was the final word.
+
+Three fixes, and the third is the one that matters:
+
+  * `schedule_refresh` no longer arms a countdown with capture off. There is nothing
+    to count down to, so promising a restart was wrong before it was stranded.
+  * `tick_countdown` stops and restores if `Active` goes off mid-count - which the
+    first fix does not cover, because the countdown may already be running.
+  * **every decline in `apply_refresh` writes the state back.** That is the one that
+    makes the class of bug impossible rather than fixing this instance of it: any
+    future early return is now safe by default. The single exception is "a later
+    change owns the restart", where the newer countdown owns the display.
+
+Verified all three: no countdown arms with `Active` off, a countdown interrupted by
+`Active` going off returns to `Stopped`, and the stranded value cleared on rebuild.
+
+NOT A BUG, from the same screenshot: `null1` outside the COMP went into error because
+`Hide Unused Outputs` is on and `Output Video` off removes `outvideo`, which was its
+source. That is what the toggle does, and the one entry in the test list already
+flagged as "settle which outputs you want before drawing wires".
+
+**`hands_angle_x` and `hands_angle_y`, relative — 2026-09-08, by request.** Omer chose
+the middle option: publish them from the size difference rather than refuse for want of
+a real depth, the same way the face's pitch is published as relative.
+
+Decomposed exactly as the per-hand angles are - an elevation out of the image plane,
+projected onto the image axes about an in-plane axis perpendicular to the line - so
+there is one vocabulary to learn rather than two. `_z` stays exact.
+
+**ADDING THEM IMMEDIATELY PRODUCED A `hands_angle_tx`.** `_MERGED_CANDIDATES` carried
+`hands_*_x` for the merged universe, written when the only per-frame positions were
+`hands_center` and `index_center` - and it matched the new angle, so `coords` composed a
+world coordinate for a two-hand ANGLE. Silently: nothing errors, the channel simply
+appears. Narrowed to the two centres by name, which is what that table's own comment
+says it exists to do.
+
+The per-hand `h0_angle_x` escaped the same fate for a reason worth knowing: it is
+DERIVED, so it is not in the wire contract that the single-stream patterns are verified
+against, and the derived branches use an explicit allow-list of stems rather than a
+wildcard.
+
+`test_angle_companions.py` now checks the property rather than the two instances: no
+channel ending in `_angle_[xyz]` may appear in any transform branch, for any stream.
+It also records why there is NO pattern-level version of that test - a branch's pattern
+is verified against the universe it is applied to, and asserting `*_x` never matches
+`h0_angle_x` fails on a channel that pattern never sees.
+
+**`(default)` gave an empty picture — 2026-09-08.** Omer set `Camera` to `(default)`
+and `outvideo` went blank.
+
+The expression resolved `(default)` to an EMPTY device string, on a claim its own
+comment made: "an empty device lets the engine pick, which is a better answer than a
+token for the wrong camera". That was never tested and is false. An empty device opens
+nothing - MEASURED, the TOP sits at a blank 128x128 and reports no error at all, which
+is why it looked like the video path had broken rather than like a device choice.
+
+`(default)` now resolves to `DEFAULT_CAMERA_NAME`, the same substring the sidecar falls
+back to with no `--camera`, and the expression matches on a SUBSTRING like `--camera`
+always has. Both sides therefore pick the same device, which is the property that
+matters here: the overlay is drawn on this picture, so a picture from a different
+camera than the tracking is worse than no picture at all.
+
+`DEFAULT_CAMERA_NAME` moved from `engine.py` to `streams.py` to make that possible.
+The builders need it and cannot import `engine`, which imports Vision - so the
+alternative was a second copy of the string, and two defaults that could drift apart
+silently.
+
+A TEST ARTEFACT worth recording, because it looked like a second bug: setting `Camera`
+to a name that is not in its menu appeared to fall back to the default camera. A menu
+parameter REJECTS a value that is not one of its names, so the write never happened and
+the reading was the default case again. "A name not in the list" is only reachable by
+unplugging a device.
+
+AND THE INSTALL RACE, hit for the third time in a day: pulsing `Install` in the same
+call as a rebuild leaves `Installstate` reading "Update needed", because the rebuild
+re-embeds afterwards and moves the hash. Install is asynchronous. Pulse it on its own,
+confirm, then restart.

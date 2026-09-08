@@ -16,7 +16,7 @@ the whole COMP where per-channel cost is real: main-thread Python measured at
 
 **AND THEY GATE COOKING on every group that has been wrapped in a COMP.**
 `temporal` and `latches` since docs/BUILD_PLAN.md 7.2; `coords/world` and
-`coords/pixels` in all three streams since 2026-08-21, which is what `Coordstx` and
+`coords/pixels` in all three streams, which is what `Coordstx` and
 `Coordspx` now do - they were "channels only" until the coords group was split into
 two halves for them to freeze.
 
@@ -35,7 +35,7 @@ value, whether the group is frozen by `allowCooking` or not gated at all. That i
 deliberate rather than a gap: a channel that VANISHES breaks every reference to it
 with no error anywhere (DESIGN.md 6.2), which is worse than a stale number on a
 toggle somebody just turned off. Four toggles that could NOT be closed this way -
-`Landmarks`, `Triggers`, `Motion`, `Events` - were removed on 2026-08-23 rather than
+`Landmarks`, `Triggers`, `Motion`, `Events` - were removed rather than
 left on the page pretending: closing them needs an exact channel-to-group map, and
 wildcards cannot provide one because `h?_*_x` matches both the raw `h0_wrist_x` and
 the derived `h0_palm_x`. See RETIRED_PARS.
@@ -82,8 +82,8 @@ COMP_PATH = MASTER_PATH + "/hands"
 GROUPS = (
     # name          default  gated
     ("Coordstx",    True,  "native"),
-    # OFF, changed 2026-09-03 by the user, who is the ultimate approver of what this
-    # component ships as. It shipped ON from 2026-08-21 on the argument that off means
+    # OFF, changed by the user, who is the ultimate approver of what this
+    # component ships as. It shipped ON on the argument that off means
     # FROZEN - the `_px`/`_py` channels still there, holding whatever they last cooked,
     # a plausible wrong number rather than a visible failure - so a toggle that can do
     # that should not do it by default.
@@ -96,7 +96,7 @@ GROUPS = (
     ("Coordspx",    False, "native"),
     # `Lmcoordstx` and `Lmcoordspx` WERE here, one per space, gating the face's
     # landmark halves separately from its bounding box. COLLAPSED into the two above
-    # on 2026-08-24 by request: needing both `Coordstx` and `Lmcoordstx` on before a
+    # by request: needing both `Coordstx` and `Lmcoordstx` on before a
     # face landmark moved into world space is a distinction the panel was making and
     # nobody wanted. One toggle per SPACE now, and `Face Key Points` is what a project
     # that wants a face without 348 channels reaches for instead. They are in
@@ -105,7 +105,7 @@ GROUPS = (
     ("Core",        False, "derive"),
     ("Presence",    False, "derive"),
     ("Contacts",    False, "derive"),
-    # The two MASTER switches for the hands attribute layer, added 2026-08-21
+    # The two MASTER switches for the hands attribute layer
     # because the existing toggles could not express "off". See COOK_VETOED.
     ("Temporal",    False, "native"),
     ("Latches",     False, "native"),
@@ -113,7 +113,7 @@ GROUPS = (
     ("Twohands",    True,  "derive"),
     ("Gestures",    False, "derive"),
     ("Descriptor",  False, "derive"),
-    # 3D inferred from a 2D projection, added 2026-08-21. Both OFF: the numbers are
+    # 3D inferred from a 2D projection. Both OFF: the numbers are
     # honest but uncalibrated, and `Palmarea`/`Zreference` on the Tuning page are what
     # calibrate them. See docs/ATTRIBUTES.md for what each one can and cannot claim -
     # in particular that neither can tell toward from away.
@@ -159,7 +159,7 @@ COOK_GATED = {
     "pose": ("Streampose",),
     "face": ("Streamface",),
     # `Motion` was a second term here and `Triggers`/`Events` on the line below,
-    # removed 2026-08-23 with the rest of the advisory toggles. WHAT THAT COST, said
+    # removed with the rest of the advisory toggles. WHAT THAT COSTS, said
     # plainly: `Motion` on with `Presence` off was the only way to express "cook
     # temporal for its velocity half, not its presence half", and there is now no way
     # to say that - `Presence` off freezes the whole group. `Presence` ships on, so
@@ -181,17 +181,16 @@ COOK_GATED = {
     # the COMP put together. `Coordspx` ships OFF, so a project that only wants
     # world coordinates does not pay for pixel ones.
     #
-    # ONE GROUP as of 2026-08-24, not three. `coords` moved to the master and reads
+    # ONE GROUP, not three. `coords` moved to the master and reads
     # all three streams merged (BUILD_PLAN step 25), so there are four halves here
     # where there were ten - the two `dv_*` halves went with them, because a derived
     # position is just a position once the streams are merged.
     "coords/world": ("Coordstx",),
     "coords/pixels": ("Coordspx",),
-    # The face's LANDMARK halves, on the same two toggles as everything else since
-    # 2026-08-24. They cost two orders of magnitude more than the bounding box beside
-    # them - 348 channels against 24, MEASURED - which is why they are still their own
-    # COMPs and why `Facekeypoints` can freeze them on their own. What changed is only
-    # which parameter says so.
+    # The face's LANDMARK halves, on the same two toggles as everything else. They
+    # cost two orders of magnitude more than the bounding box beside them - 348
+    # channels against 24 - which is why they are still their own COMPs and why
+    # `Facekeypoints` can freeze them on their own.
     "coords/lm_world": ("Coordstx",),
     "coords/lm_pixels": ("Coordspx",),
 }
@@ -277,17 +276,17 @@ MERGE_CHOP = "merge_streams"
 # `early_trim` removes the channels a TOGGLE has asked for - `Fingertipsonly`,
 # `Handbox`, `Onefaceonly`, `Facekeypoints` - and it has to be FIRST, before `coords`.
 # What it drops is never converted into a coordinate space, which is what turns those
-# toggles from list-shorteners into savings. Before 2026-08-24 they trimmed at the
+# toggles from list-shorteners into savings. Before they trimmed at the
 # master, after the composition, which is the thing the user asked about.
 #
-# A DELETE CHOP and not a Select, because its list is PATTERNS. Measured 2026-08-24:
+# A DELETE CHOP and not a Select, because its list is PATTERNS. measured:
 # both operators cost list length x input channels, and the Delete's constant is only
 # worse when the list is literal names - with patterns it wins (BENCHMARKS.md).
 EARLY_CHOP = "early_trim"
 
-# Channels the output never carries, whatever the toggles say. Asked for by the user
-# 2026-08-22, and the reason is the same one the trim exists for: a beginner reading
-# the channel list should see the things they came for, not the housekeeping.
+# Channels the output never carries, whatever the toggles say. Same reason the trim
+# exists: somebody reading the channel list should see what they came for, not the
+# housekeeping.
 #
 # `HOUSEKEEPING` goes to a Null CHOP inside the component instead - `housekeeping`,
 # next to the output - so it is one click away rather than gone.
@@ -303,7 +302,7 @@ EARLY_CHOP = "early_trim"
 PER_JOINT_CONF = ("*_conf",)
 HOUSEKEEPING = ("sc_*", "seq", "*_seq", "age_ms", "*_age_ms")
 
-# Per-hand identity and quality scalars. Off the OUTPUT 2026-08-23 by request, and
+# Per-hand identity and quality scalars. Off the OUTPUT by request, and
 # routed to `housekeeping` rather than dropped, which is the point: DESIGN.md 6.2
 # tells people to "gate on `h<i>_conf_median`, never on `found` alone", so the
 # channel that documentation names has to stay reachable. One click inside the COMP
@@ -317,13 +316,20 @@ NEVER_ON_OUTPUT = PER_JOINT_CONF + HOUSEKEEPING + HAND_SCALARS
 # the per-joint confidences - 80 channels of them, which is a list nobody inspects.
 INSPECTABLE = HOUSEKEEPING + HAND_SCALARS
 
-# Two OUTPUT-ONLY toggles, asked for 2026-08-23. Neither gates any cooking, and that
+# Two OUTPUT-ONLY toggles, asked for. Neither gates any cooking, and that
 # is forced rather than lazy: the fifteen non-tip joints feed every curl, spread and
 # angle `derive()` computes, and the bounding boxes feed `hands_overlap`. The work
 # happens either way, so these remove second copies from the output - which is what
 # somebody reading the channel list for the first time actually wants.
 FINGERTIPS_TOGGLE = "Fingertipsonly"
 HANDBOX_TOGGLE = "Handbox"
+# The hand overlay. It draws a skeleton, so it needs all 21 joints in world space -
+# and `coords` only composes what reaches it, so `Fingertipsonly` trimming FIRST
+# would leave the overlay with five tips and no bones to draw between them.
+HANDS_OVERLAY_TOGGLE = "Handsoverlay"
+# And the stream it draws. An overlay of a stream that is off is not an overlay, so
+# it does not get to hold the joints open either.
+HANDS_STREAM_TOGGLE = "Streamhands"
 
 # The fifteen joints that are neither a fingertip nor the wrist. A LITERAL list,
 # because everything between the TRIM SCOPE markers is copied verbatim into a DAT
@@ -331,7 +337,7 @@ HANDBOX_TOGGLE = "Handbox"
 # markers holds it against `appletd.types.JOINT_NAMES`, so it cannot drift.
 #
 # THE WRIST IS KEPT. It is not an mcp, pip or dip, it is the hand's anchor, and
-# `hands_angle` is measured from it - so "fingertips only" leaves six points per
+# `hands_angle_z` is measured from it - so "fingertips only" leaves six points per
 # hand rather than five.
 NON_TIP_JOINTS = ("thumb_cmc", "thumb_mp", "thumb_ip",
                   "index_mcp", "index_pip", "index_dip",
@@ -340,7 +346,7 @@ NON_TIP_JOINTS = ("thumb_cmc", "thumb_mp", "thumb_ip",
                   "little_mcp", "little_pip", "little_dip")
 HANDBOX_CHANNELS = ("h?_bbox_*", "h?_size")
 
-# The face's abbreviated form, asked for 2026-08-24. Unlike the two above this one
+# The face's abbreviated form, asked for. Unlike the two above this one
 # DOES gate cost - see COOK_SUPPRESSED - because the 348 landmark channels are the
 # most expensive thing in the component and the four points that replace them are
 # composed in a different COMP.
@@ -365,7 +371,7 @@ KEYPOINT_CHANNELS = tuple("f?_%s_*" % point for point in FACE_KEYPOINT_NAMES)
 # the bounding box, the head angles and the key points, none of which carries one.
 FACE_LANDMARK_CHANNELS = ("f?_*_[0-9][0-9]_*",)
 
-# One face instead of two, asked for 2026-08-24. `f0` is the LEFTMOST face by
+# One face instead of two, asked for. `f0` is the LEFTMOST face by
 # bounding-box centre (docs/ATTRIBUTES.md), so this is "the face on the left" and not
 # "the face Vision happened to report first" - which matters, because two people
 # crossing over exchange slots and a project reading only `f0` will see the swap.
@@ -395,7 +401,7 @@ SECOND_FACE_CHANNELS = ("f[1-9]_*",)
 # the output in one go.
 #
 # WHY THE NETWORK IS NOT ENOUGH HERE, and this is the second half of the same
-# 2026-08-24 regression. `_trim_keep` drops a frozen group's channels by reading its
+# regression. `_trim_keep` drops a frozen group's channels by reading its
 # `out1`, which is exact and needs no channel-to-group map - except that a frozen COMP
 # holds whatever it last cooked, which for a stream that was already frozen when its
 # attribute layer was gated is only PART of what it publishes. `hands_center_tx` and
@@ -410,7 +416,10 @@ SECOND_FACE_CHANNELS = ("f[1-9]_*",)
 # but belong to the SIDECAR, not to hands, and NEVER_ON_OUTPUT drops them regardless.
 STREAM_CHANNELS = {
     "hands": ("h?_*", "hands_*", "index_*", "n_hands"),
-    "pose": ("p?_*", "pose_*"),
+    # `human?_*` is the person BOXES, which joined the pose contract with the human
+    # rectangles request - a separate prefix because they are per-PERSON and the
+    # `p?_` channels are per-joint.
+    "pose": ("p?_*", "pose_*", "human?_*", "human_n"),
     "face": ("f?_*", "face_*"),
 }
 
@@ -421,7 +430,7 @@ COMPOSED_AXES = ("x", "y", "w", "h")
 def composed_twins(raw):
     """The `_tx`/`_px`/`_tw`/... names that `coords` would build from `raw`. A list.
 
-    WHY THIS EXISTS, and it is a 2026-08-24 regression fix. `_trim_keep` drops a
+    WHY THIS EXISTS, and it is a regression fix. `_trim_keep` drops a
     frozen group's channels by reading that group's OWN `out1` - which was exactly
     right while `coords` lived inside each stream, because freezing `hands` froze its
     coordinate branches with it and both sets of names came off `hands/out1`.
@@ -447,7 +456,7 @@ def trim_input(comp):
     """The operator `trim_empty` reads, which is where its keep list comes from.
 
     NOT `merge_streams` any more, and that is the correction that made the trim work
-    again after 2026-08-24: `coords` sits between them, so the composed `_tx`/`_px`
+    again : `coords` sits between them, so the composed `_tx`/`_px`
     channels only exist downstream of the merge. A keep list built from the merge
     would name none of them, and a Select fails CLOSED - the entire coordinate output
     would vanish, silently, which is exactly the failure mode this list has.
@@ -483,7 +492,7 @@ def strip_patterns(comp, stream):
     return [pattern for toggle, pattern in _shaping(comp) if toggle in allowed]
 
 
-def removing_patterns(comp):
+def removing_patterns(comp, stage="late"):
     """The channel patterns the OUTPUT-SHAPING toggles ask to remove. Returns a list.
 
     One function, two consumers, and that is the point: `early_trim` deletes these
@@ -492,15 +501,39 @@ def removing_patterns(comp):
     and is what keeps the output correct when it is bypassed - a keep list fails
     CLOSED, so leaving them in would put them back.
 
+    `stage` is which of the two is asking, and it matters for exactly one toggle.
+    The EARLY stage holds back `Fingertipsonly` while the hand overlay is on, so the
+    joints reach `coords` and get their `_tx`/`_ty`; the LATE stage always names
+    them, so the OUTPUT carries fingertips only either way. The output contract does
+    not change - only where it is enforced.
+
     A parameter that is not there yet means "leave it alone" rather than an exception
     on a half-built network.
     """
     stripped = {toggle for toggles in STRIP_TOGGLES.values() for toggle in toggles}
+    if stage == "early" and overlay_wants_all_joints(comp):
+        stripped = stripped | {FINGERTIPS_TOGGLE}
     # Anything a STREAM strips at its own input is already gone by the time
     # `early_trim` runs, and a Delete CHOP charges for a term whether it matches or
     # not - so naming it twice is pure cost.
     return [pattern for toggle, pattern in _shaping(comp)
             if toggle not in stripped]
+
+
+def overlay_wants_all_joints(comp):
+    """True while the hand overlay needs the joints `Fingertipsonly` would remove.
+
+    MEASURED: composing all 21 joints instead of the six `Fingertipsonly` leaves
+    costs 0.045 ms in `coords/world` (0.073 -> 0.118 ms, 40 forced cooks), so the
+    overlay pays for itself out of a 16.7 ms frame and a project with the overlay
+    off pays nothing at all.
+
+    A parameter that is not there yet means "leave it alone".
+    """
+    toggle = getattr(comp.par, HANDS_OVERLAY_TOGGLE, None)
+    stream = getattr(comp.par, HANDS_STREAM_TOGGLE, None)
+    return (toggle is not None and bool(toggle.eval())
+            and (stream is None or bool(stream.eval())))
 
 
 def _shaping(comp):
@@ -528,7 +561,7 @@ def _shaping(comp):
         # MEASURED, the face filter drops from 387 channels to 39 and nothing
         # downstream ever sees them.
         #
-        # OFF removes 16 key point channels, which is NOT. MEASURED 2026-08-24: a
+        # OFF removes 16 key point channels, which is NOT. MEASURED: a
         # `strip` carrying only those cost 0.0580 ms to save less than that further
         # down - the component went 3.2008 -> 3.2969 ms. So the off direction is
         # tagged with a name no stream strips, and `early_trim` takes it at the
@@ -575,7 +608,7 @@ def apply_stream_wiring(comp, wanted):
     in the merge, so nothing downstream has ever heard of it. Every operator after
     this point costs list length x INPUT CHANNELS (DESIGN.md 2.26), so removing a
     stream at the merge is worth more than removing it anywhere later - which is what
-    `early_trim` was doing until 2026-08-24, with patterns, over the full width.
+    `early_trim` was doing, with patterns, over the full width.
 
     ON `wanted` AND NOT `cooking`: `Active` off freezes every group but must not empty
     the output - a project's references have to survive switching capture off, and a
@@ -617,7 +650,7 @@ def _apply_early_trim(comp, wanted=None):
     scope is not free and a bypassed one is (0.0003 ms, DESIGN.md 2.15).
 
     IT ALSO DROPS A SWITCHED-OFF STREAM, and that is what makes it worth its own
-    operator. MEASURED 2026-08-24 on a live camera with `Streamface` on and the other
+    operator. MEASURED on a live camera with `Streamface` on and the other
     two off: `screen_only` cost 0.4424 ms and this operator 0.2932 - 68% of the whole
     component - and almost all of it was spent scanning hands and pose channels that
     a frozen COMP was holding and the output was going to drop anyway.
@@ -637,7 +670,7 @@ def _apply_early_trim(comp, wanted=None):
     # out of `merge_streams` entirely, so its channels never reach this operator and a
     # pattern for them would be pure cost - a Delete charges for a term whether it
     # matches or not.
-    patterns = removing_patterns(comp)
+    patterns = removing_patterns(comp, "early")
     node.par.delscope = " ".join(patterns)
     node.bypass = not patterns
     return patterns
@@ -650,8 +683,8 @@ def _trim_keep(comp, wanted):
     the set of channels that group contributes - rather than from a channel-to-group
     map, which does not exist and would go stale the first time a builder added a
     channel. A frozen group still reports its channels, holding their last value,
-    which is the whole reason this trim is needed: `Coordspx` off used to leave 100
-    `_px`/`_py` channels on the output carrying a plausible wrong number.
+    which is the whole reason this trim is needed - without it, `Coordspx` off leaves
+    100 `_px`/`_py` channels on the output carrying a plausible wrong number.
 
     A KEEP list rather than the drop list this started as, because the operator is a
     Select and not a Delete CHOP - see tools/td_build_vision.py for the measurement.
@@ -892,7 +925,7 @@ def _apply_gating(comp):
             wanted[group_name] = False
     # ACTIVE IS A COOK VETO, AND NOTHING ELSE.
     #
-    # MEASURED 2026-08-24 in a fresh project: with the sidecar switched OFF, 230 of
+    # MEASURED in a fresh project: with the sidecar switched OFF, 230 of
     # 365 operators still cooked every frame and the component cost 5.8 ms. Nothing
     # was gated on `Active`, and an OSC In CHOP cooks whether or not a datagram
     # arrives - so the whole chain ran at 60 fps deriving attributes from channels
@@ -947,7 +980,7 @@ def _apply_gating(comp):
     # strip or a rewire has just changed what those are - in THIS frame, so nothing
     # downstream has recooked and the list is built from the old set.
     #
-    # MEASURED 2026-08-24: switching `Face Key Points` on wrote a 29-name keep list
+    # MEASURED: switching `Face Key Points` on wrote a 29-name keep list
     # with no key points in it. The channels were there and cooking; the list did not
     # know yet, and calling this function a second time fixed it. It is DESIGN.md
     # 2.11's opening rule - nothing crossing a frame boundary can be verified inside
@@ -1011,7 +1044,7 @@ def _apply_gating(comp, verbose=False):
 
     # ACTIVE IS A COOK VETO, AND NOTHING ELSE.
     #
-    # MEASURED 2026-08-24 in a fresh project: with the sidecar switched OFF, 230 of
+    # MEASURED in a fresh project: with the sidecar switched OFF, 230 of
     # 365 operators still cooked every frame and the component cost 5.8 ms. Nothing
     # was gated on `Active`, and an OSC In CHOP cooks whether or not a datagram
     # arrives - so the whole chain ran at 60 fps deriving attributes from channels
@@ -1035,7 +1068,7 @@ def _apply_gating(comp, verbose=False):
         out = group.op("out1")
         if not enabled and out is not None:
             # Cook it, THEN freeze it. Unconditionally, not just when it has never
-            # cooked - MEASURED 2026-08-22, and this was a silent hole: a frozen
+            # cooked - MEASURED, and this was a silent hole: a frozen
             # group's Out CHOP holds its channels only until something upstream
             # changes SHAPE. After that it is dirty, it cannot cook because it is
             # frozen, and it reports zero channels - so the channels VANISH from the
@@ -1098,7 +1131,7 @@ def _apply_trim(comp, wanted, verbose=False):
     # silence: no error, no warning, `out1` at 0 channels and every consumer
     # downstream reading nothing.
     #
-    # MEASURED on 2026-08-23, and it took four queries to find: two builder runs
+    # MEASURED, and it took four queries to find: two builder runs
     # aborted midway, which left every parameter in MOVED_PARS at 0 because those
     # are destroyed and re-appended on every build and the restore pass never ran.
     # The next build then faithfully restored the zeros, every stream read disabled,
@@ -1149,22 +1182,17 @@ def _apply_trim(comp, wanted, verbose=False):
     return report
 
 
-# Parameters this script used to create and must now DESTROY. Removing the code that
-# creates a parameter does not remove the parameter - it survives in the .toe for ever,
-# looking exactly like a working control (DESIGN.md 2.11). Same mechanism as
-# RETIRED_PARS in tools/td_build_vision.py.
+# Parameters this script no longer creates and must therefore DESTROY. Removing the
+# code that creates a parameter does not remove the parameter - it survives in the
+# .toe for ever, looking exactly like a working control (DESIGN.md 2.11). Same
+# mechanism as RETIRED_PARS in tools/td_build_vision.py.
 #
-# All four were advisory: they appeared on the Attributes page and could not do what
-# their names promised, because removing a group's channels from the output needs an
-# exact channel-to-group map and wildcards cannot provide one - `h?_*_x` matches both
-# the raw `h0_wrist_x` and the derived `h0_palm_x`.
-#
-# `Landmarks` gated nothing at all, anywhere. The other three were OR terms in
-# COOK_GATED, so each did something in combination and nothing on its own, which is
-# harder to explain to a beginner than one capability fewer. See COOK_GATED for what
-# removing `Motion` specifically cost.
+# All four were advisory: they could not do what their names promised, because
+# removing a group's channels from the output needs an exact channel-to-group map and
+# wildcards cannot provide one - `h?_*_x` matches both the raw `h0_wrist_x` and the
+# derived `h0_palm_x`. See COOK_GATED for what removing `Motion` costs.
 RETIRED_PARS = ("Landmarks", "Triggers", "Motion", "Events",
-                # Collapsed into `Coordstx` and `Coordspx` on 2026-08-24. The
+# Collapsed into `Coordstx` and `Coordspx`. The
                 # halves they gated are unchanged; the toggles are gone.
                 "Lmcoordstx", "Lmcoordspx")
 
@@ -1173,7 +1201,7 @@ RETIRED_PARS = ("Landmarks", "Triggers", "Motion", "Events",
 # ever applies to somebody building the network from scratch.
 # What each toggle COSTS, in milliseconds per frame, shown in its own label.
 #
-# MEASURED 2026-08-24 on the reference M4 Pro, and in two different ways because these
+# MEASURED on the reference M4 Pro, and in two different ways because these
 # are two different kinds of toggle:
 #
 #   NATIVE groups gate a COMP's `allowCooking`, so their cost is the sum of the
@@ -1192,7 +1220,7 @@ RETIRED_PARS = ("Landmarks", "Triggers", "Motion", "Events",
 # The number is what the toggle costs WHEN ON. Zero would be misleading for the two
 # master switches, which cost nothing themselves and gate a great deal.
 MEASURED_MS = {
-    # RE-MEASURED 2026-08-24, after `Lmcoordstx`/`Lmcoordspx` were collapsed into
+# RE-MEASURED, after `Lmcoordstx`/`Lmcoordspx` were collapsed into
     # these two: each now gates its stream's bounding-box branches AND the face's 348
     # landmark channels, so it is worth roughly what the two old toggles were worth
     # together. The figures are not added, they are measured again - the point of
@@ -1214,7 +1242,7 @@ MEASURED_MS = {
 # putting "1.18 ms" beside a switch that gives you 1.18 ms back would read as
 # exactly the opposite of what it does.
 #
-# MEASURED 2026-08-24 on the reference M4 Pro, 89 frames through tools/td_profile.py
+# MEASURED on the reference M4 Pro, 89 frames through tools/td_profile.py
 # with the synthetic face and hands senders running: the face stream cost 1.9644 ms
 # per cook with `Facekeypoints` off and 0.7872 ms with it on. See docs/BENCHMARKS.md
 # for the per-half split and for the 0.10 ms the key point branches cost when the
@@ -1246,7 +1274,7 @@ RELABELLED = {
 #
 # These two are here because `Coordstx` and `Coordspx` are names about the SUFFIX
 # they produce - `_tx`, `_px` - which is exactly backwards for somebody reading the
-# panel to find out what the component gives them. Asked for 2026-08-24, with the
+# panel to find out what the component gives them. Asked for, with the
 # collapse.
 #
 # Applied in the GROUPS loop below, so it OVERWRITES an existing label the way the
@@ -1267,17 +1295,13 @@ def _page(comp, name="Hands"):
     """
     # SNAPSHOT EVERY CUSTOM PARAMETER, AND RESTORE ANYTHING THAT MOVED.
     #
-    # MEASURED THE HARD WAY, twice on 2026-08-24. Running this function came back
-    # with `Handbox` switched off and `Facekeypoints` and `Onefaceonly` switched ON -
-    # three toggles no code here writes, none of them in a preset, all three on the
-    # same page as a parameter that had just been created or destroyed. The first fix
-    # snapshotted only around the `RETIRED_PARS` destroy loop; it happened again on a
-    # run that retired nothing, so the destroy was not the trigger.
+    # Touching a custom page has been observed to move values on it - toggles no code
+    # here writes, on the same page as a parameter that was created or destroyed. It
+    # is not the destroy alone: it happens on runs that retire nothing.
     #
-    # THE MECHANISM IS NOT ESTABLISHED and nothing here claims one. What is
-    # established is that touching a custom page can move a value on it, and that a
-    # wrong toggle is completely silent - it looks exactly like a deliberate setting,
-    # and it cost this project a session's worth of confusion twice in one day.
+    # THE MECHANISM IS NOT ESTABLISHED and nothing here claims one. What matters is
+    # that the damage is SILENT: a wrong toggle looks exactly like a deliberate
+    # setting.
     #
     # So: read everything before, write back anything that changed, and PRINT it.
     # Only values that existed before are restored, so a parameter created below
@@ -1298,7 +1322,7 @@ def _page(comp, name="Hands"):
     # existing parameter RESETS it, and a menu resets to INDEX 0, which here is
     # "Minimal" - the append-clobbers-a-value trap (DESIGN.md 2.11) wearing a
     # different costume. Writing the value straight back afterwards is not enough,
-    # and that is the 2026-08-22 fix: a Parameter Execute DAT is watching these
+    # and that is the fix: a Parameter Execute DAT is watching these
     # toggles, its callbacks are DEFERRED to the end of the frame, and when two
     # builders run in the same frame the queued reset outlives the restore. The
     # observed result was every derive group off, so `derive_chop` published 0
@@ -1331,7 +1355,7 @@ def _page(comp, name="Hands"):
             print("   relabelled %s: %r -> %r" % (name, par.label, label))
             par.label = label
 
-    # `Handbox` lives here rather than on Vision, where it was born on 2026-08-23:
+            # `Handbox` lives here rather than on Vision, where it was born :
     # it decides which attribute channels reach the output, which is exactly what
     # every other toggle on this page does. `td_build_vision.py` lists it in
     # MOVED_PARS and destroys the old one first, because TouchDesigner will not hold
@@ -1343,11 +1367,9 @@ def _page(comp, name="Hands"):
     # NOTE what is deliberately absent: an `else` that writes anything. Everything on
     # this page that already exists is left alone unless it demonstrably differs.
 
-    # The face's abbreviated form. ON since 2026-09-03: four points per face is what
-    # a project actually reaches for, and 348 landmark channels is not a default so
-    # much as a decision nobody made. It used to ship OFF to keep the output identical
-    # to the one this component produced before the key points existed, which was the
-    # right call while anything depended on that and is now just inertia.
+    # The face's abbreviated form, ON: four points per face is what a project
+    # actually reaches for, and 348 landmark channels is not a default so much as a
+    # decision nobody made.
     #
     # NOT in GROUPS, and that is the whole reason it is appended here by hand. Every
     # entry in GROUPS is a capability that can be switched on together with the rest;
@@ -1361,11 +1383,9 @@ def _page(comp, name="Hands"):
         one.val = True
     elif existing[ONEFACE_TOGGLE].default is not True:
         # A DEFAULT CHANGED IN THIS FILE HAS TO REACH A COMPONENT THAT ALREADY HAS THE
-        # PARAMETER. These two were written only at creation, so flipping the table
-        # above on 2026-09-03 moved nothing: the rebuild reported the new default and
-        # the panel still held the old one, which is the builder and the component
-        # disagreeing with no way to see it. The GROUPS loop below has always done
-        # this; these two were simply missed.
+        # PARAMETER. A parameter written only at creation ignores a changed default:
+        # the rebuild reports the new one and the panel still holds the old, which is
+        # the builder and the component disagreeing with no way to see it.
         #
         # Guarded, and only the DEFAULT - never the value. Writing to a parameter
         # somebody has tuned is how DESIGN.md 2.17 starts.
@@ -1453,7 +1473,7 @@ def main():
     # `early_trim`, created here because this script owns the toggles that fill it.
     # A Delete CHOP: its list is PATTERNS, and both operators cost list length x
     # input channels - the Delete's constant is only the worse one when the list is
-    # literal names (BENCHMARKS.md, measured 2026-08-24).
+    # literal names (BENCHMARKS.md, measured).
     from appletd.td_layout import master_xy, rewire_master_chain, rewire_stream_head, stream_xy
 
     # One `strip` per stream that has something it can remove at its own input.
@@ -1559,6 +1579,9 @@ def main():
         # the trim is a Select with a KEEP list, so nothing rewriting the list means
         # a toggle that appears to do nothing at all.
         | {FINGERTIPS_TOGGLE, HANDBOX_TOGGLE}
+        # The hand overlay moves WHERE `Fingertipsonly` is applied, so it has to
+        # rewrite both trims like any other shaping toggle - see `removing_patterns`.
+        | {HANDS_OVERLAY_TOGGLE}
         # `Facekeypoints` rewrites the trim list AND freezes two coords halves, so
         # it has to reach `_apply_gating` like any other gating toggle. It is not in
         # GROUPS, so the last term of this union does not cover it.
@@ -1618,7 +1641,7 @@ def main():
     # anything about cook counts.
     #
     # And it is checked AFTER a forced cook of the whole master, because that is what
-    # breaks it. MEASURED 2026-08-22: `master.cook(force=True)` - which
+    # breaks it. MEASURED: `master.cook(force=True)` - which
     # tools/td_build_vision.py does at its own report step - asks every child for
     # fresh data, a frozen group cannot answer, and its Out CHOP drops to ZERO
     # channels. `hands/temporal` went from 27 to 0 and `latches` from 70 to 0, and
@@ -1640,11 +1663,10 @@ def main():
         # Relative to the MASTER: `hands/temporal` is not a child of the stream.
         group = master.op(group_name)
         group_out = None if group is None else group.op("out1")
-        # Against ITS OWN stream's output. This used to compare every gated group
-        # against the HANDS stream's out1, which was correct while only hands had
-        # gated groups and reported four false failures the moment pose and face
-        # got them: 356 face channels "missing" from a hands output that never
-        # carried them.
+        # Against ITS OWN stream's output, not the hands stream's. Comparing every
+        # gated group against one stream reports false failures as soon as another
+        # stream has gated groups - face channels "missing" from a hands output that
+        # never carried them.
         stream_out = master.op(group_name.split("/")[0] + "/out1")
         if group is None or group_out is None or stream_out is None:
             continue
@@ -1669,7 +1691,7 @@ def main():
 
     print("\nEVERY TOGGLE ON THIS PAGE NOW CHANGES SOMETHING.")
     print("  `Landmarks`, `Triggers`, `Motion` and `Events` were removed on")
-    print("  2026-08-23 - they could not remove their own channels from the output,")
+    print(" - they could not remove their own channels from the output,")
     print("  because that needs an exact channel-to-group map and a wildcard cannot")
     print("  partition `h?_*_x` into the raw `h0_wrist_x` and the derived")
     print("  `h0_palm_x`. If they are ever wanted back, the sound way to get that")

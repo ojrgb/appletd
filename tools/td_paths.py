@@ -1,6 +1,6 @@
 """Where this checkout is, without anybody having to type it.
 
-WHY THIS FILE EXISTS. Until 2026-08-23 fifteen files carried
+WHY THIS FILE EXISTS. Until fifteen files carried
 
     REPO_ROOT = "/Users/omer/Documents/GitHub/appletd"
 

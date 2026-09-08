@@ -1,33 +1,24 @@
 """Camera to LandmarkFrame. The only module that touches AVFoundation or Vision.
 
-This file imports pyobjc and MUST NOT import anything from TouchDesigner - not
-`td`, not `op`, nothing. That boundary is what lets the same engine be driven by
-a Script CHOP, by a test, or by a future out-of-process transport without being
-rewritten (DESIGN.md 5). The reverse boundary is just as strict: `td/` must never
-import this module's dependencies.
+Imports pyobjc and MUST NOT import anything from TouchDesigner. That boundary is what
+lets the same engine be driven by a Script CHOP, by a test, or by another transport
+without being rewritten; the reverse is as strict, and the builders never import this.
 
-WHAT CROSSES THE THREAD BOUNDARY. Exactly one thing: an immutable
-`LandmarkFrame` of floats, ints, bools and tuples. No pyobjc object may escape
-the capture thread, ever. A `VNHumanHandPoseObservation` handed to TD's main
-thread would be released by whichever thread happened to drop the last
-reference, which is a crash that arrives weeks later on a quiet afternoon
-(DESIGN.md 4.2).
+WHAT CROSSES THE THREAD BOUNDARY: exactly one thing, an immutable `LandmarkFrame` of
+floats, ints, bools and tuples. No pyobjc object may escape the capture thread - one
+handed to TD's main thread would be released by whichever thread dropped the last
+reference, which crashes weeks later.
 
-THREADS. Two, and no more (MEASURED, DESIGN.md 2.5):
+Two threads and no more: whichever calls `start()`/`stop()`, and the GCD capture queue
+where AVFoundation delivers buffers and every line of `_CaptureDelegate` and
+`HandDetector` runs. There is no run-loop thread; `AVCaptureVideoDataOutput` delivers
+on a dispatch queue.
 
-  * whichever thread calls start()/stop() - in production TD's main thread
-  * the GCD capture queue, where AVFoundation delivers sample buffers and where
-    every line of `_CaptureDelegate` and `HandDetector` runs
+Vision costs about 3.4 ms per 720p frame and pyobjc releases the GIL for the duration,
+so this thread cannot stall TouchDesigner's. The camera's 30 fps is the limit, not
+inference.
 
-There is no run-loop thread. The spike believed AVFoundation needed one; it does
-not - `AVCaptureVideoDataOutput` delivers on a dispatch queue, and milestone 1
-measured 48 frames arriving with nothing turning a run loop, inside TD and out.
-
-PERFORMANCE. Vision costs ~3.4 ms per 720p frame (MEASURED, DESIGN.md 2.6) and
-pyobjc releases the GIL for the duration (MEASURED, DESIGN.md 2.2), so this
-thread cannot stall TD's. The camera's ~30 fps is the limit, not inference.
-
-Ref: DESIGN.md 4 (architecture), 6 (data contracts), 8 (lifecycle).
+Ref: DESIGN.md 4, 6, 8.
 """
 
 from __future__ import annotations
@@ -51,6 +42,10 @@ from libdispatch import (
 )
 
 from appletd.slots import SLOT_MODE_CHIRALITY, SlotAssigner
+from appletd.streams import (
+    DEFAULT_CAMERA_NAME as STREAMS_DEFAULT_CAMERA_NAME,
+)
+from appletd.streams import ORIENTATION_UP, orientation_for
 from appletd.types import (
     BLANK_HAND,
     CHIRALITY_LEFT,
@@ -79,9 +74,10 @@ if TYPE_CHECKING:
     from appletd.depth import DepthDetector, DepthFrame
     from appletd.face import FaceDetector
     from appletd.face_types import FaceFrame
+    from appletd.flow import FlowDetector, FlowImage
     from appletd.pose import PoseDetector
     from appletd.pose_types import PoseFrame
-    from appletd.segmentation import MaskImage, SegmentationDetector
+    from appletd.segmentation import MaskDetector, MaskImage
 
 # ---------------------------------------------------------------------------
 # Constants. Every value has a reason; see the referenced measurement.
@@ -96,7 +92,8 @@ DEFAULT_HEIGHT_PX = 720
 # Substring matched case-insensitively against localizedName(). NOT an index:
 # this machine enumerates Camo, OBS Virtual Camera and a Continuity iPhone
 # alongside the built-in camera, and index 0 moves between reboots (DESIGN.md 3).
-DEFAULT_CAMERA_NAME = "MacBook"
+# Re-exported: `appletd/streams.py` owns it, so the builders can read it too.
+DEFAULT_CAMERA_NAME = STREAMS_DEFAULT_CAMERA_NAME
 
 # QOS_CLASS_USER_INITIATED. A default-QoS queue can be scheduled onto efficiency
 # cores, which was a large part of the run-to-run variance in the spike.
@@ -104,10 +101,10 @@ QOS_CLASS_USER_INITIATED = 25
 
 # Belt, worn with the braces of a dispatch_sync barrier (see _drain_capture_queue).
 #
-# This value used to be the ONLY thing standing between stop() and a callback
-# still running. The M2b review demonstrated that it is not sufficient: with a
-# consumer slower than this, stop() returned while a delegate callback was still
-# executing, and a following start() then put two dispatch queues into the same
+# On its own this is NOT sufficient to stand between stop() and a callback still
+# running: with a consumer slower than this, stop() returns while a delegate callback
+# is still executing, and a following start() then puts two dispatch queues into the
+# same
 # HandDetector - which was measured publishing found=False for a hand that was
 # in shot, with no error and no dropped-frame count. A guessed duration cannot
 # be a barrier. dispatch_sync is one; this now only covers the window between
@@ -377,8 +374,7 @@ class HandDetector:
         # A knob that cannot be honoured is worse than no knob. MAX_HANDS is not
         # a preference, it is the width of the published channel list
         # (DESIGN.md 6.2) - asking for three hands would pay Vision's cost for a
-        # third and then drop it with nowhere to put it, which the M2b review
-        # found happening silently.
+        # third and then drop it with nowhere to put it, silently.
         if not 1 <= max_hands <= MAX_HANDS:
             raise EngineError(
                 "max_hands must be between 1 and MAX_HANDS (%d); the channel "
@@ -394,7 +390,8 @@ class HandDetector:
         self.last_inference_ms = 0.0
 
     def detect_sample_buffer(self, sample_buffer: ObjCObject, seq: int,
-                             captured_at: float) -> LandmarkFrame | None:
+                             captured_at: float,
+                             orientation: int = ORIENTATION_UP) -> LandmarkFrame | None:
         """The live path: a CMSampleBuffer straight from the camera.
 
         Contract: returns None if Vision failed or the buffer had no image, so
@@ -411,8 +408,8 @@ class HandDetector:
         height_px = int(Quartz.CVPixelBufferGetHeight(pixel_buffer))
 
         started_s = time.perf_counter()
-        ok, err = self._sequence.performRequests_onCMSampleBuffer_error_(
-            [self._request], sample_buffer, None)         # TRAP: out-param
+        ok, err = self._sequence.performRequests_onCMSampleBuffer_orientation_error_(
+            [self._request], sample_buffer, orientation, None)         # TRAP: out-param
         self.last_inference_ms = (time.perf_counter() - started_s) * 1e3
         if not ok:
             raise EngineError("Vision performRequests failed: %s" % (err,))
@@ -422,7 +419,8 @@ class HandDetector:
             width_px, height_px)
 
     def detect_pixel_buffer(self, pixel_buffer: ObjCObject, seq: int,
-                            captured_at: float) -> LandmarkFrame:
+                            captured_at: float,
+                            orientation: int = ORIENTATION_UP) -> LandmarkFrame:
         """The replay path: a CVPixelBuffer we built ourselves.
 
         Why it exists: performance claims may only come from replaying a fixed
@@ -435,8 +433,8 @@ class HandDetector:
         height_px = int(Quartz.CVPixelBufferGetHeight(pixel_buffer))
 
         started_s = time.perf_counter()
-        ok, err = self._sequence.performRequests_onCVPixelBuffer_error_(
-            [self._request], pixel_buffer, None)          # TRAP: out-param
+        ok, err = self._sequence.performRequests_onCVPixelBuffer_orientation_error_(
+            [self._request], pixel_buffer, orientation, None)          # TRAP: out-param
         self.last_inference_ms = (time.perf_counter() - started_s) * 1e3
         if not ok:
             raise EngineError("Vision performRequests failed: %s" % (err,))
@@ -453,7 +451,7 @@ def pixel_buffer_from_bgra(bgra: Any) -> ObjCObject:
 
     LIFETIME - and this correction matters, because the obvious worry is the
     wrong one. The C function does not copy, so in C the caller must outlive the
-    buffer. Through pyobjc it is safe: MEASURED in the M2b review, wrapping an
+    buffer. Through pyobjc it is safe: MEASURED, wrapping an
     array raises its refcount and the array survives `del` plus a gc pass,
     dying only when the pixel buffer is released. The cost is the other way
     round - each live buffer PINS its array, so wrapping a whole clip at once
@@ -575,11 +573,11 @@ def video_settings(width_px: int, height_px: int) -> dict[Any, Any]:
            1080p while the log claimed 720p, which is why the delegate asserts
            the delivered size instead of trusting this (DESIGN.md 3).
     Pixel format: deliberately absent, which leaves the camera in its native
-           420v. MEASURED in the M2b review: Vision does consume 420v directly
+           420v. MEASURED: Vision does consume 420v directly
            via performRequests_onCMSampleBuffer_error_, with detection identical
            to BGRA on the same clip (273/284 both).
-           What is NOT true - and the first version of this comment claimed it -
-           is that 420v is cheaper. Vision converts internally, and 420v
+           What is NOT true is that 420v is cheaper. Vision converts internally,
+           and 420v
            measured 3.94-4.16 ms against BGRA's 3.26-3.39 ms, about 20% SLOWER.
            420v is kept because it avoids a host-side conversion of a buffer
            nothing in the engine reads, and 0.6 ms sits comfortably inside a
@@ -619,8 +617,8 @@ class _CaptureDelegate(NSObject):
         # WEAK, and this is load-bearing rather than tidy.
         #
         # The engine holds the delegate strongly (self._delegate), because
-        # AVCaptureVideoDataOutput does NOT retain its delegate - measured in
-        # the M2b review, retainCount unchanged across
+        # AVCaptureVideoDataOutput does NOT retain its delegate - MEASURED,
+        # retainCount unchanged across
         # setSampleBufferDelegate_queue_ - so if we did not hold it, nothing
         # would. A strong reference back to the engine therefore closes a cycle,
         # and that cycle is NOT collectable: pyobjc's Objective-C subclass
@@ -654,9 +652,9 @@ class _CaptureDelegate(NSObject):
         # catches it (DESIGN.md 8).
         #
         # NOTE precisely what this is: a filter on callbacks that have not
-        # started yet. It is NOT a barrier on one already running - the M2b
-        # review confirmed a callback still executing after stop() returned.
-        # The barrier is dispatch_sync, in _drain_capture_queue.
+        # started yet. It is NOT a barrier on one already running: a callback can
+        # still be executing after stop() returns. The barrier is dispatch_sync, in
+        # _drain_capture_queue.
         if engine._stopping:
             return
         try:
@@ -707,20 +705,28 @@ class HandEngine:
                  on_pose: Callable[[PoseFrame], None] | None = None,
                  face_detector: FaceDetector | None = None,
                  on_face: Callable[[FaceFrame], None] | None = None,
-                 segmentation_detector: SegmentationDetector | None = None,
+                 segmentation_detector: MaskDetector | None = None,
+                 flow_detector: FlowDetector | None = None,
+                 on_flow: Callable[[FlowImage], None] | None = None,
                  on_mask: Callable[[MaskImage], None] | None = None,
                  depth_detector: DepthDetector | None = None,
-                 on_depth: Callable[[DepthFrame], None] | None = None) -> None:
+                 on_depth: Callable[[DepthFrame], None] | None = None,
+                 flip: bool = False) -> None:
         """seq_start continues an existing frame sequence rather than restarting it.
 
         Why it exists: this engine keeps `_seq` monotonic across its OWN
         stop/start, but a caller that replaces the engine object - which is what
         InProcessSource does on a TouchDesigner project reload - would otherwise
         reset the sequence to 1 while consumers still hold frames numbered in
-        the hundreds. The M3 review caught exactly that, measuring seq going
-        75 -> 2 across a reload, which silently defeats any downstream
-        `seq > last_seq` freshness test until the new engine catches up.
+        the hundreds. MEASURED: seq went 75 -> 2 across a reload, which silently
+        defeats any downstream `seq > last_seq` freshness test until the new
+        engine catches up.
         """
+        # CAMERA FLIP, resolved once. Vision mirrors the image before it does
+        # anything else, so this costs nothing per frame and every stream gets it:
+        # the landmarks, the mask, the depth map and the flow field all come back
+        # in the mirrored space (appletd/streams.py has the measurement).
+        self._orientation = orientation_for(flip)
         self._on_frame = on_frame
         # The pose stream, or nothing. Passed in rather than constructed here so
         # that this module never imports `pose.py` and a project that does not
@@ -736,6 +742,10 @@ class HandEngine:
         # never imports segmentation.py and a project that has not asked for a mask
         # never builds the request. Both or neither, for the same reason - a detector
         # with nowhere to publish would burn 2.21 ms a frame and drop the result.
+        self._flow_detector = flow_detector if on_flow is not None else None
+        self.n_flow_published = 0
+        self.n_flow_dropped = 0
+        self._on_flow = on_flow if flow_detector is not None else None
         self._seg_detector = segmentation_detector if on_mask is not None else None
         self._on_mask = on_mask if segmentation_detector is not None else None
         # DEPTH, on the same both-or-neither terms. It is the expensive one: 23.00 ms
@@ -760,16 +770,27 @@ class HandEngine:
         # not be paying. The channels do not disappear - the sidecar keeps sending
         # the blank frame's zeros (DESIGN.md 6.4).
         self._detector = HandDetector(max_hands=max_hands) if hands else None
-        if (self._detector is None and self._pose_detector is None
-                and self._face_detector is None and self._seg_detector is None
-                and self._depth_detector is None):
+        # EVERY stream, in one place. As a hand-written chain of `is None` this goes
+        # stale the moment a stream is added - and refuses a project running only the
+        # stream that was missed. A dict, so adding one is a single line, and the
+        # message lists what actually exists rather than a subset.
+        detectors = {
+            "hands": self._detector,
+            "pose": self._pose_detector,
+            "face": self._face_detector,
+            "segment": self._seg_detector,
+            "flow": self._flow_detector,
+            "depth": self._depth_detector,
+        }
+        if not any(value is not None for value in detectors.values()):
             # A camera with no requests: it would open the device, hold it, warm
             # up, deliver frames and do nothing with any of them - while every
             # channel read zero and nothing said why. Refused on the caller's
             # thread, where it can be fixed.
             raise EngineError(
                 "no streams enabled: this engine would open the camera and run "
-                "no inference at all. Enable hands, pose, or both.")
+                "no inference at all. Enable one of: %s."
+                % ", ".join(sorted(detectors)))
 
         # Which physical hand goes in which slot. Applied HERE rather than inside
         # HandDetector because the detector is also the replay path's inference
@@ -874,10 +895,9 @@ class HandEngine:
         self._seq += 1
 
         # Each stream in its own method, and NEITHER may return out of this one.
-        # The first version ran pose after the hands code's early returns, so a
-        # single failed hand inference silently took the pose stream down with it
-        # for that frame - two streams sharing a callback must not share its
-        # control flow.
+        # Running pose after the hands code's early returns lets a single failed hand
+        # inference take the pose stream down with it for that frame: two streams
+        # sharing a callback must not share its control flow.
         self._publish_hands(sample_buffer, captured_at)
         # AFTER hands, deliberately. Both requests run on this one serial queue,
         # so whichever goes second adds its inference to the other's latency, and
@@ -902,6 +922,12 @@ class HandEngine:
         # a fault. Everything a live project reads has already been published by the
         # time this runs.
         self._publish_depth(sample_buffer, captured_at)
+        # AND FLOW LAST OF ALL, for the same reason: MEASURED 16.2 ms at `low` and
+        # 30.1 at `high` (docs/BENCHMARKS.md), so it is in depth's class rather than
+        # in the streams a live project reads. After depth because depth was here
+        # first and reordering two expensive requests changes which one loses a frame
+        # when the camera cannot keep up - a change worth making deliberately if ever.
+        self._publish_flow(sample_buffer, captured_at)
 
     def _publish_hands(self, sample_buffer: ObjCObject, captured_at: float) -> None:
         """Run the hand request and publish the result. Never raises.
@@ -917,12 +943,13 @@ class HandEngine:
             return
         try:
             frame = detector.detect_sample_buffer(
-                sample_buffer, self._seq, captured_at)
+                sample_buffer, self._seq, captured_at,
+                orientation=self._orientation)
         except EngineError as exc:
             # Caught here, not left to the delegate's blanket guard, so that a
-            # failing inference COUNTS. The M2b review found five consecutive
-            # failed frames reporting n_dropped=0 while nothing was published:
-            # the error was recorded, but the drop counter a CHOP health channel
+            # failing inference COUNTS. Left to the blanket guard, five
+            # consecutive failed frames report n_dropped=0 while nothing is
+            # published: the error is recorded, but the drop counter a health channel
             # would publish read perfectly clean. Narrow except on purpose - an
             # unexpected exception type is still a bug and still goes to the
             # delegate's guard.
@@ -982,7 +1009,8 @@ class HandEngine:
         width_px, height_px = self.delivered_px or self._requested_px
         try:
             pose_frame = detector.detect_sample_buffer(
-                sample_buffer, self._seq, captured_at, width_px, height_px)
+                sample_buffer, self._seq, captured_at, width_px, height_px,
+                orientation=self._orientation)
         except EngineError as exc:
             self.n_pose_dropped += 1
             self._record_error("pose: %s" % exc)
@@ -1008,7 +1036,8 @@ class HandEngine:
         width_px, height_px = self.delivered_px or self._requested_px
         try:
             face_frame = detector.detect_sample_buffer(
-                sample_buffer, self._seq, captured_at, width_px, height_px)
+                sample_buffer, self._seq, captured_at, width_px, height_px,
+                orientation=self._orientation)
         except EngineError as exc:
             self.n_face_dropped += 1
             self._record_error("face: %s" % exc)
@@ -1034,7 +1063,9 @@ class HandEngine:
         if detector is None or publish is None:
             return
         try:
-            mask = detector.detect_sample_buffer(sample_buffer, self._seq, captured_at)
+            mask = detector.detect_sample_buffer(
+                sample_buffer, self._seq, captured_at,
+                orientation=self._orientation)
         except EngineError as exc:
             self.n_mask_dropped += 1
             self._record_error("segment: %s" % exc)
@@ -1059,6 +1090,39 @@ class HandEngine:
         self.n_mask_published += 1
         self._mark_first_frame()
 
+    def _publish_flow(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+        """Run optical flow on the buffer the other streams have already seen.
+
+        Thread: capture queue only, from `_on_sample_buffer`.
+        Never raises: a flow fault costs flow and nothing else. Its own method for the
+                  same reason the mask has one - it must not return out of the
+                  callback and take the other streams with it.
+        THE FIRST FRAME PRODUCES NOTHING, because flow is a comparison. That is not
+                  counted as empty and not recorded: a stream that starts correctly
+                  must not look like one that is failing.
+        """
+        detector, publish = self._flow_detector, self._on_flow
+        if detector is None or publish is None:
+            return
+        try:
+            field = detector.detect_sample_buffer(
+                sample_buffer, self._seq, captured_at,
+                orientation=self._orientation)
+        except EngineError as exc:
+            self.n_flow_dropped += 1
+            self._record_error("flow: %s" % exc)
+            return
+        if field is None:
+            return
+        try:
+            publish(field)
+        except (OSError, ValueError) as exc:
+            self.n_flow_dropped += 1
+            self._record_error("flow publish: %s" % exc)
+            return
+        self.n_flow_published += 1
+        self._mark_first_frame()
+
     def _publish_depth(self, sample_buffer: ObjCObject, captured_at: float) -> None:
         """Run the depth model on the buffer the other streams have already seen.
 
@@ -1072,8 +1136,9 @@ class HandEngine:
         if detector is None or publish is None:
             return
         try:
-            frame = detector.detect_sample_buffer(sample_buffer, self._seq,
-                                                  captured_at)
+            frame = detector.detect_sample_buffer(
+                sample_buffer, self._seq, captured_at,
+                orientation=self._orientation)
         except EngineError as exc:
             self.n_depth_dropped += 1
             self._record_error("depth: %s" % exc)
@@ -1139,6 +1204,53 @@ class HandEngine:
         detector = self._pose_detector
         return detector.last_inference_ms if detector is not None else 0.0
 
+    def _reset_session_state(self) -> None:
+        """Per-SESSION state, cleared by both start paths.
+
+        Three of these once survived a stop()/start() cycle, which is the
+        TouchDesigner project-reload sequence. `_seq` is deliberately NOT reset: it
+        stays monotonic, so a consumer sees a restart as a gap rather than as time
+        running backwards.
+        """
+        self.delivered_px = None
+        self.first_frame.clear()
+        self.errors.clear()
+        self.n_delivered = 0
+        self.n_published = 0
+        self.n_dropped = 0
+        # The slot assigner's memory is per-session too. Without this, the first
+        # frame of a new session would be matched against the LAST frame of the
+        # old one by the proximity fallback.
+        self._slots.reset()
+
+    def submit_sample_buffer(self, sample_buffer: ObjCObject) -> None:
+        """One frame from somewhere that is not this engine's camera.
+
+        `Input Mode = TOP Input` uses this: `appletd/frames.py` turns the pixels
+        TouchDesigner published into a `CMSampleBuffer` and hands it here, so a frame
+        from a TOP goes through the SAME orchestration as a frame from a camera -
+        one sequence number, the same streams, the same mask and depth publishing,
+        the same error recording. There is no second copy of any of that.
+
+        Thread: whichever thread reads the frame buffer, and only one of them. The
+                camera path guarantees serial delivery by using a serial queue; the
+                reader thread is the only caller here for the same reason.
+        """
+        self._on_sample_buffer(sample_buffer)
+
+    def start_frames_only(self) -> None:
+        """Ready to receive frames, without opening a camera.
+
+        The per-session state `start()` resets belongs to a SESSION, not to a
+        capture device, so it is reset here too - a TOP Input run that is stopped and
+        started again must not match its first frame against the last frame of the
+        previous run (DESIGN.md 8, the same reasoning as the camera path).
+        """
+        if self._running:
+            return
+        self._reset_session_state()
+        self._running = True
+
     def start(self) -> None:
         """Configure and start the capture session. Idempotent.
 
@@ -1154,9 +1266,8 @@ class HandEngine:
 
         # Per-SESSION state, reset here rather than only in __init__.
         #
-        # The M2b review found all three of these surviving a stop()/start()
-        # cycle, which is exactly the TD project-reload sequence DESIGN.md 8
-        # cares about:
+        # All three of these survive a stop()/start() cycle if they are not reset,
+        # which is exactly the TD project-reload sequence DESIGN.md 8 cares about:
         #   * delivered_px is only computed when it is None, so the
         #     delivered-versus-requested assertion - the trap that silently lied
         #     twice in the spike - ran once per ENGINE rather than once per
@@ -1172,17 +1283,7 @@ class HandEngine:
         # _seq is deliberately NOT reset: DESIGN.md 6.1 wants it monotonic, and a
         # consumer should see a restart as a gap in the sequence rather than as
         # time running backwards.
-        self.delivered_px = None
-        self.first_frame.clear()
-        self.errors.clear()
-        self.n_delivered = 0
-        self.n_published = 0
-        self.n_dropped = 0
-        # The slot assigner's memory is per-session too. Without this, the first
-        # frame of a new session would be matched against the LAST frame of the
-        # old one by the proximity fallback - the same class of stale-state defect
-        # the M2b review found three of in this file.
-        self._slots.reset()
+        self._reset_session_state()
 
         status = AVF.AVCaptureDevice.authorizationStatusForMediaType_(AVF.AVMediaTypeVideo)
         if status != AUTH_STATUS_AUTHORIZED:
@@ -1246,9 +1347,9 @@ class HandEngine:
         try:
             session.startRunning()
         except Exception as exc:
-            # Full shutdown, not a bare _teardown(). The M2b review found this
-            # path calling _teardown() directly, which skips flagging and skips
-            # stopRunning() - on a session that may already have begun
+            # Full shutdown, not a bare _teardown(). Calling _teardown() directly
+            # here skips flagging and skips stopRunning() - on a session that may
+            # already have begun
             # delivering - while _teardown's own contract says it assumes a
             # stopped session. Every guarantee stop() provides has to hold here
             # too, because this is precisely when the state is least known.

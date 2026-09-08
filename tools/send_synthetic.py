@@ -147,10 +147,10 @@ def send(sequence_name: str, host: str, port: int, fps: float,
     """
     sequence = SEQUENCES[sequence_name]
     # The hands PORT carries the four `sc_*` status channels as well as the hands
-    # contract (DESIGN.md 6.4), and this tool used to send only the contract - so
-    # the network saw 137 channels where a real sidecar sends 141. That mattered
-    # twice: `sc_*` is exactly the set that once fell into neither of the filter's
-    # two Selects and left the COMP's output silently, and a rebuilt OSC In CHOP
+    # contract (DESIGN.md 6.4), and both must be sent. A tool that sends only the
+    # contract leaves the network four channels short of a real sidecar, and `sc_*` is
+    # exactly the set that a channel-partitioning bug drops silently - as a rebuilt
+    # OSC In CHOP
     # only has the channels that have ARRIVED, so a synthetic session could not
     # reproduce the full contract at all.
     #

@@ -37,17 +37,20 @@ if TYPE_CHECKING:
 
 
 class StandInMask(NamedTuple):
-    """The four fields `Sidecar._write_mask` reads off a `MaskImage`.
+    """The five fields `Sidecar._write_mask` reads off a `MaskImage`.
 
     A stand-in rather than the real thing, so this file needs no pyobjc. If
-    `_write_mask` ever starts reading a fifth field, this breaks - which is the
-    point: it is a structural contract, not a mock that agrees with anything.
+    `_write_mask` ever starts reading a sixth field, this breaks - which is the
+    point: it is a structural contract, not a mock that agrees with anything. It
+    did break when `people` started travelling in the buffer's aux block.
     """
 
     width: int
     height: int
     pixels: bytes
     captured_at: float
+    # How many people the instance mask separates, 0 for a single-person mask.
+    people: int = 0
 
 
 def _mask(width: int = 256, height: int = 192, value: int = 0x40,

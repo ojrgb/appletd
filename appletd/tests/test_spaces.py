@@ -132,7 +132,7 @@ def test_head_pose_is_an_angle_smoothed_but_never_transformed() -> None:
     """There is no yaw in pixels. It still wants smoothing, like any other
     continuous physical quantity."""
     roles = channel_roles("face")
-    for name in ("f0_roll", "f0_yaw", "f0_pitch"):
+    for name in ("f0_angle_z", "f0_angle_y", "f0_angle_x"):
         assert roles[name] == ROLE_ANGLE
         assert name in smoothed_names("face")
     assert ROLE_ANGLE in SMOOTHED_ROLES
@@ -176,10 +176,13 @@ def test_a_position_branch_is_offset_and_an_extent_branch_is_not(stream: str) ->
             assert branch.offset == 0.0, branch.label
 
 
-def test_hands_and_pose_get_four_branches_and_the_face_gets_eight() -> None:
+def test_hands_get_four_branches_and_pose_and_the_face_get_eight() -> None:
     """The face is the only stream with extents, so it is the only one with eight."""
     assert len(transform_branches("hands")) == 4
-    assert len(transform_branches("pose")) == 4
+    # POSE GAINED FOUR on 2026-09-07 with the person boxes: a box has a width and a
+    # height, and an extent needs its own branch because it is SCALED and never
+    # centred. Before that the pose contract had positions only.
+    assert len(transform_branches("pose")) == 8
     assert len(transform_branches("face")) == 8
 
 
@@ -620,7 +623,7 @@ def test_the_merged_position_pattern_is_a_pattern_and_not_a_literal_list() -> No
     fallback would cost, per branch, eight times over."""
     for branch in transform_branches(STREAM_MERGED):
         if branch.suffix in ("_tx", "_ty"):
-            assert len(branch.pattern.split()) == 12, branch.pattern
+            assert len(branch.pattern.split()) == 13, branch.pattern
             assert "*" in branch.pattern
 
 

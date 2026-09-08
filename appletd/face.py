@@ -1,46 +1,32 @@
 """Face detection: `VNDetectFaceLandmarksRequest` -> `FaceFrame`.
 
-The third stream, built the same way as `pose.py`: it owns one Vision request and
-the conversion out of pyobjc, and it does NOT own the camera - `engine.py` hands it
-a sample buffer that has already been delivered, so every enabled stream sees the
-same frame and shares its `seq` (DESIGN.md 6.4).
+Owns one Vision request and the conversion out of pyobjc. It does not own the camera:
+`engine.py` hands it a sample buffer that has already been delivered, so every enabled
+stream sees the same frame and shares its `seq`.
 
-WHAT IT PUBLISHES: the observation's own numbers - confidence, capture quality,
-roll, yaw, pitch and the bounding box - and, since the region point counts were
-MEASURED on 2026-08-21, all 76 landmark points across the 12 regions, and since
-2026-08-24 the four key points computed from them. 387 channels.
+Publishes 387 channels - confidence, capture quality, the three head angles, the
+bounding box, 76 landmark points across 12 regions, and four computed key points.
 
-The points spent a day unpublished on purpose, because their split across the
-regions cannot be known before a face has been seen and this repo does not ship
-guessed constants. `face_types.py` has that argument and the measurement, and it was
-worth holding: the regions turned out to OVERLAP - 87 slots over 76 distinct
-points - which no reasonable guess would have produced.
+Two units traps, both silent if missed:
 
-THE TWO UNITS TRAPS, both silent:
+  * Vision reports the head angles in RADIANS; every angle this project publishes is
+    DEGREES. Converted once, here.
+  * they arrive as NSNumber-or-nil, and `float(None)` raises inside a capture
+    callback. Each is checked.
 
-  * `roll`/`yaw`/`pitch` are RADIANS. Every angle in this system is DEGREES
-    (docs/ATTRIBUTES.md). Converted once, here. Missed, it is a 57x error that
-    keeps every number small and plausible.
-  * they are also NSNumber-OR-NIL. `float(None)` raises, inside a capture
-    callback, where an exception unwinding into Objective-C is its own crash. Each
-    one is checked.
+Nothing from TouchDesigner, and no pyobjc object leaves the capture thread: everything
+crossing out of here is floats, strings and tuples.
 
-THE SAME BOUNDARY RULES AS engine.py: nothing from TouchDesigner, and no pyobjc
-object may escape the capture thread. Everything crossing out of here is floats,
-strings and tuples.
-
-Thread: every function runs on the GCD capture queue, called from
-        `HandEngine._on_sample_buffer`, except `FaceDetector.__init__` and
-        `verify_face_regions`, which run on the caller's thread at construction so
-        a framework mismatch is reported where it can be acted on.
-Ref: DESIGN.md 2.12 (the API surface, measured), 6.4 (the stream contract).
+Thread: the GCD capture queue, except `FaceDetector.__init__` and
+        `verify_face_regions`, which run on the caller's thread at construction.
+Ref: DESIGN.md 2.12, 6.4. docs/internals/vision-notes.md for how the region counts
+     were established.
 """
-
 from __future__ import annotations
 
-import math
 import time
 from collections.abc import Callable
+from dataclasses import replace
 
 import Vision
 
@@ -54,10 +40,12 @@ from appletd.face_types import (
     NOSE_TIP_REGIONS,
     Face,
     FaceFrame,
+    face_angles,
     face_keypoints,
     nose_tip_point,
     order_faces,
 )
+from appletd.streams import ORIENTATION_UP
 from appletd.types import Confidence, NormX, NormY
 
 
@@ -103,21 +91,6 @@ def verify_face_regions() -> None:
 #
 # This is the boundary. Above it, pyobjc objects. Below it, floats and tuples.
 # ---------------------------------------------------------------------------
-def _degrees_or_zero(value: ObjCObject) -> float:
-    """One of roll/yaw/pitch, in degrees. 0.0 when Vision returned nil.
-
-    TRAP: these are NSNumber-or-nil, and `float(None)` raises TypeError inside a
-          capture callback. Revision 3 supplies all three (MEASURED, DESIGN.md
-          2.12), so nil should not occur - which is precisely why it would go
-          unnoticed until the day it does.
-    TRAP: RADIANS in, DEGREES out. The one conversion in this file, and a 57x
-          silent error if it is skipped.
-    """
-    if value is None:
-        return 0.0
-    return math.degrees(float(value))
-
-
 def _region_points(landmarks: ObjCObject,
                    accessor: str) -> tuple[tuple[float, float], ...]:
     """One region's normalised points, or () if this Vision has no such region.
@@ -145,7 +118,8 @@ def _region_points(landmarks: ObjCObject,
     return tuple(out)
 
 
-def face_from_observation(observation: ObjCObject) -> Face:
+def face_from_observation(observation: ObjCObject, width_px: int = 0,
+                          height_px: int = 0) -> Face:
     """One VNFaceObservation -> one immutable Face.
 
     Thread: capture queue only.
@@ -154,6 +128,10 @@ def face_from_observation(observation: ObjCObject) -> Face:
               unlike a hand, every field here comes off the observation directly,
               so there is no "unreadable" case to signal - a face Vision reports is
               a face we can publish.
+    Traps: the FRAME SIZE is needed, and only for the angles. They are measured in
+              pixels because normalised image space is not square - see
+              `face_types.face_angles`. Defaulted so a test can build a Face without
+              one and get consistent, if not geometrically true, angles.
     """
     box = observation.boundingBox()
     landmarks = observation.landmarks()
@@ -163,14 +141,18 @@ def face_from_observation(observation: ObjCObject) -> Face:
             regions.append((region.name, _region_points(landmarks, region.accessor)))
 
     quality = observation.faceCaptureQuality()
-    return Face(
+    face = Face(
         confidence=Confidence(float(observation.confidence())),
         # NSNumber-or-nil as well: documented as nil when the revision cannot
         # produce it. Same treatment as the angles.
         quality=Confidence(0.0 if quality is None else float(quality)),
-        roll_deg=_degrees_or_zero(observation.roll()),
-        yaw_deg=_degrees_or_zero(observation.yaw()),
-        pitch_deg=_degrees_or_zero(observation.pitch()),
+        # ZERO HERE, filled in from the LANDMARKS below. Vision's own roll, yaw and
+        # pitch are QUANTISED - MEASURED at revision 3, yaw in 45-degree steps and
+        # roll in 30 - so `face_angles` recomputes all three from the key points,
+        # which cannot be quantised because the arithmetic is ours.
+        roll_deg=0.0,
+        yaw_deg=0.0,
+        pitch_deg=0.0,
         # CGRect origin is the BOTTOM-LEFT corner, normalised. Not the top.
         bbox_x=NormX(float(box.origin.x)),
         bbox_y=NormY(float(box.origin.y)),
@@ -179,6 +161,12 @@ def face_from_observation(observation: ObjCObject) -> Face:
         landmarks=tuple(regions),
         found=True,
     )
+    # AND NOW THE ANGLES, from the landmarks that face carries. Two passes because
+    # `face_angles` needs the box and the key points, and both come off the Face - so
+    # it is built once, measured, and replaced with the same thing plus its
+    # orientation. `dataclasses.replace` and not mutation: a Face is frozen.
+    pitch, yaw, roll = face_angles(face, width_px, height_px)
+    return replace(face, pitch_deg=pitch, yaw_deg=yaw, roll_deg=roll)
 
 
 def face_frame_from_observations(observations: list[ObjCObject], seq: int,
@@ -193,7 +181,8 @@ def face_frame_from_observations(observations: list[ObjCObject], seq: int,
               make `f0` swap between two people - the defect DESIGN.md 6.3 exists
               to fix for hands, where chirality solves it and here nothing does.
     """
-    faces = [face_from_observation(observation) for observation in observations]
+    faces = [face_from_observation(observation, width_px, height_px)
+             for observation in observations]
     return FaceFrame(seq=seq, captured_at=captured_at, width=width_px,
                      height=height_px, faces=order_faces(faces))
 
@@ -201,27 +190,14 @@ def face_frame_from_observations(observations: list[ObjCObject], seq: int,
 def region_point_report(frame: FaceFrame) -> dict[str, object]:
     """What the regions actually contain, for the FIRST found face. Pure.
 
-    The measurement that had to come after the counts, because the counts alone
-    produced an arithmetic that did not add up: the 12 regions summed to 87 points
-    on a request pinned to the 76-point constellation (MEASURED 2026-08-21). Two
-    explanations fit, and they lead to different channel contracts:
+    Returns counts per region, their sum, the distinct-coordinate count both exactly
+    and rounded, and every overlapping pair with how many points it shares.
 
-      * the regions SHARE points - `medianLine` runs down the centre of the face and
-        could plausibly repeat points that `faceContour`, `nose` and `noseCrest`
-        also carry - in which case 87 is the sum with 11 duplicates and the
-        constellation total is intact;
-      * or the regions are disjoint and the "76-point constellation" does not mean
-        what we assumed, in which case the total is 87 and the assumption goes.
-
-    Distinct COORDINATES answer it without needing `allPoints`: if the distinct
-    count is 76, the regions overlap.
-
-    Returns counts per region, the sum, the distinct-coordinate count both exactly
-    and rounded, and every overlapping pair with how many points it shares. Rounded
-    as well as exact because two regions carrying "the same" point could differ in
-    the last bit if Vision computes them separately - an almost-duplicate is a
-    different finding from a duplicate, and it should be visible rather than
-    rounded away silently.
+    The distinct count is what settles whether the regions overlap: 12 regions summing
+    to 87 points on a 76-point constellation means either 11 shared points or a
+    constellation that is not 76. Rounded as well as exact, because two regions
+    carrying "the same" point may differ in the last bit - an almost-duplicate is a
+    different finding from a duplicate.
     """
     for face in frame.faces:
         if not (face.found and face.landmarks):
@@ -321,17 +297,10 @@ def region_point_counts(frame: FaceFrame) -> dict[str, int]:
 class FaceDetector:
     """Holds the face-landmarks request and turns buffers into FaceFrames.
 
-    Thread: NOT thread-safe and does not need to be - one detector belongs to one
+    Thread: NOT thread-safe, and does not need to be - one detector belongs to one
             serial capture queue.
-    Why the LANDMARKS request rather than the cheaper rectangles one, when the
-            landmark points are not published yet: the rectangles request would
-            publish the same head pose today and would have to be swapped out the
-            moment the point counts land, changing what the stream costs and what
-            it means in the same edit. And `region_point_counts` above - the thing
-            that settles the contract - needs the landmarks.
-    Why its own VNSequenceRequestHandler: same reasoning as PoseDetector. Each
-            detector self-contained, each timed separately, and one stream's
-            failure cannot fail another's call.
+    Its own `VNSequenceRequestHandler`, like every other detector: each is timed
+            separately, and one stream's failure cannot fail another's call.
     """
 
     def __init__(self) -> None:
@@ -352,20 +321,22 @@ class FaceDetector:
 
     def detect_sample_buffer(self, sample_buffer: ObjCObject, seq: int,
                              captured_at: float, width_px: int,
-                             height_px: int) -> FaceFrame:
+                             height_px: int,
+                             orientation: int = ORIENTATION_UP) -> FaceFrame:
         """The live path: the same CMSampleBuffer the other detectors just saw."""
         return self._detect(
-            lambda: self._sequence.performRequests_onCMSampleBuffer_error_(
-                [self._request], sample_buffer, None),    # TRAP: out-param
+            lambda: self._sequence.performRequests_onCMSampleBuffer_orientation_error_(
+                [self._request], sample_buffer, orientation, None),    # TRAP: out-param
             seq, captured_at, width_px, height_px)
 
     def detect_pixel_buffer(self, pixel_buffer: ObjCObject, seq: int,
                             captured_at: float, width_px: int,
-                            height_px: int) -> FaceFrame:
+                            height_px: int,
+                            orientation: int = ORIENTATION_UP) -> FaceFrame:
         """The replay path, and the one the probe tool uses."""
         return self._detect(
-            lambda: self._sequence.performRequests_onCVPixelBuffer_error_(
-                [self._request], pixel_buffer, None),     # TRAP: out-param
+            lambda: self._sequence.performRequests_onCVPixelBuffer_orientation_error_(
+                [self._request], pixel_buffer, orientation, None),     # TRAP: out-param
             seq, captured_at, width_px, height_px)
 
     def _detect(self, perform: Callable[[], tuple[bool, ObjCObject]], seq: int,

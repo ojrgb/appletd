@@ -66,8 +66,14 @@ def test_no_landmark_channel_of_a_present_face_is_exactly_zero() -> None:
     sitting on exactly 0.0 makes "is this slot empty" unanswerable. Which is why the
     template is inset from the box edge."""
     channels = _channels(FacePose())
+    # `_angle_x` and `_angle_y` are excluded because they are ORIENTATION, not
+    # points - and a head looking straight ahead reads exactly 0.0 on both, which is
+    # the value this test forbids for a landmark. They end in `_x`/`_y` since the
+    # 2026-09-07 rename, so every suffix filter over face channels now has to say so;
+    # `spaces.py` `_FACE_ANGLES` is the production copy of this exclusion.
     landmarks = {name: value for name, value in channels.items()
                  if name.startswith("f0_") and "bbox" not in name
+                 and "_angle_" not in name
                  and name[-2:] in ("_x", "_y")}
     assert len(landmarks) == 182           # (87 slots + 4 key points) x 2 axes
     assert [n for n, v in landmarks.items() if v == 0.0] == []
@@ -172,9 +178,9 @@ def test_the_head_angles_arrive_in_degrees() -> None:
     synthetic stream that sent radians would leave that conversion untested and
     every downstream rotation 57x too small."""
     channels = _channels(FacePose(roll=30.0, yaw=-20.0, pitch=15.0))
-    assert channels["f0_roll"] == pytest.approx(30.0)
-    assert channels["f0_yaw"] == pytest.approx(-20.0)
-    assert channels["f0_pitch"] == pytest.approx(15.0)
+    assert channels["f0_angle_z"] == pytest.approx(30.0)
+    assert channels["f0_angle_y"] == pytest.approx(-20.0)
+    assert channels["f0_angle_x"] == pytest.approx(15.0)
 
 
 # ---------------------------------------------------------------------------

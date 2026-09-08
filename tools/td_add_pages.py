@@ -11,7 +11,7 @@ RUNS LAST but one, after every builder has appended whatever it appends and befo
 section dividers, sorts each page and destroys the pages nothing lives on any more.
 
 `appletd/td_pages.py` is the table. This file is the mechanism, and it is short
-because the two operations it needs turned out to be cheap - MEASURED 2026-09-03,
+because the two operations it needs turned out to be cheap - MEASURED,
 `par.page = page` moves a parameter and KEEPS ITS VALUE, and `page.name = ...` renames
 in place. So there is no snapshot and no restore here, and running it twice changes
 nothing the second time.

@@ -171,7 +171,7 @@ def test_the_angles_are_named_without_units_because_they_are_degrees() -> None:
     Vision hands over, and the channel names are where a consumer looks for the
     answer. docs/ATTRIBUTES.md: every angle in this system is degrees."""
     names = set(face_channel_names())
-    assert {"f0_roll", "f0_yaw", "f0_pitch"} <= names
+    assert {"f0_angle_z", "f0_angle_y", "f0_angle_x"} <= names
     assert not any(n.endswith(("_rad", "_radians")) for n in names)
 
 
@@ -189,9 +189,9 @@ def test_values_are_where_the_names_say_they_are() -> None:
     assert reading["face_age_ms"] == 5.0
     assert reading["f0_score"] == pytest.approx(0.9)
     assert reading["f0_quality"] == pytest.approx(0.7)
-    assert reading["f0_roll"] == pytest.approx(10.0)
-    assert reading["f0_yaw"] == pytest.approx(-20.0)
-    assert reading["f0_pitch"] == pytest.approx(30.0)
+    assert reading["f0_angle_z"] == pytest.approx(10.0)
+    assert reading["f0_angle_y"] == pytest.approx(-20.0)
+    assert reading["f0_angle_x"] == pytest.approx(30.0)
     assert reading["f0_bbox_x"] == pytest.approx(0.1)
     assert reading["f0_bbox_h"] == pytest.approx(0.4)
     assert reading["f1_found"] == 0.0

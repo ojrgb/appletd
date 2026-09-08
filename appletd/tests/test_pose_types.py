@@ -95,8 +95,8 @@ def test_the_code_index_cannot_be_mutated() -> None:
 # ---------------------------------------------------------------------------
 # The channel list
 # ---------------------------------------------------------------------------
-def test_the_channel_count_is_123() -> None:
-    assert N_POSE_CHANNELS == 123 == len(pose_channel_names())
+def test_the_channel_count_is_136() -> None:
+    assert N_POSE_CHANNELS == 136 == len(pose_channel_names())
 
 
 def test_names_and_values_stay_the_same_length() -> None:

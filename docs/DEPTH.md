@@ -258,7 +258,7 @@ that wants true metres rather than the windowed map can compute
 `Z = 1 / (alpha*d + beta)` in a GLSL TOP or an expression. What the component does not
 do is pick a colour map for you.
 
-**This was missing until 2026-08-22**, and the symptom was exactly what you would
+**Without it**, the symptom is exactly what you would
 expect: toggling `Depthpinson` changed nothing anybody could see. The solve was running
 and its numbers were being published, but the PIXELS were the raw map in both states,
 so the one observable consequence of pinning was absent.
@@ -320,7 +320,7 @@ stops poisoning the whole frame.
 | `buffer version N, this reader speaks M` | a stale buffer from an older build. The message names the file — delete it |
 | the map is there but `Depthfitpins` is 0 | no pins set, or they were refused. The sidecar prints why at startup |
 | `Depthfitresidual` is 0.000 and looks perfect | check `Depthfitchecked`. With two pins it is meaningless |
-| the sidecar log says `0.5 fps` and a huge `age` | those were the HANDS stream's numbers and read nonsense with hands off. Fixed 2026-08-22 — the line now says `sends`, only shows `age` when hands is on, and has a `depth N @ M ms` counter |
+| the sidecar log says `0.5 fps` and a huge `age` | you are reading an old build: those are the HANDS stream's numbers and mean nothing with hands off. The line now says `sends`, shows `age` only when hands is on, and carries a `depth N @ M ms` counter |
 | depth arrives but hands got choppy | expected. 23 ms of inference on a 33 ms frame interval — see §2. MEASURED live: the camera holds 30 fps but every frame arrives ~35 ms old |
 | `sc_depth` reads 0 while `Streamdepth` is on | the sidecar was launched without it. Read `/tmp/appletd_sidecar.log` — its first line lists the streams it actually started |
 

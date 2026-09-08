@@ -1,48 +1,19 @@
 """Monocular depth: Depth Anything V2 Small through Core ML -> a fp16 map.
 
-WHAT THIS OWNS. One `VNCoreMLRequest`, the model's compilation and cache, and the
-extraction of its output into plain bytes plus a per-frame affine fit. It owns neither
-the camera nor the transport: `engine.py` hands it a buffer that has already been
-delivered, `appletd/pins.py` does the arithmetic, and `appletd/maskbuf.py`
-gets the bytes to TouchDesigner. Same shape as `segmentation.py`, and the same
-boundary rules - nothing from TouchDesigner, and no pyobjc object escapes the capture
-thread.
+Owns one `VNCoreMLRequest`, the model's compilation and cache, and the extraction of
+its output into bytes plus a per-frame affine fit. It owns neither the camera nor the
+transport: `engine.py` hands it a delivered buffer, `pins.py` does the arithmetic,
+`maskbuf.py` gets the bytes across. Same boundary rules as `segmentation.py` - nothing
+from TouchDesigner, and no pyobjc object escapes the capture thread.
 
-THE MODEL IS NOT IN THIS REPO, and that is deliberate. It is 47 MB of weights from
-Apple's Hugging Face account, and a repository that ships to everybody on GitHub has no
-business carrying it: it would be in every clone, every fork and every diff. So it is
-downloaded once with `tools/fetch_models.sh` and `models/` is gitignored.
-`docs/DEPTH.md` is the first-run instructions, and `resolve_model()` below raises with
-that path in the message rather than a FileNotFoundError - somebody meeting this for
-the first time should be told what to run, not what stat() returned.
+THE MODEL IS NOT IN THIS REPO: 47 MB of weights that would be in every clone, fork and
+diff. `tools/fetch_models.sh` downloads it once and `models/` is gitignored.
 
-WHAT THE OUTPUT ACTUALLY IS, measured rather than assumed:
+The output is INVERSE depth, divided by each frame's own maximum, so it is not
+comparable between frames without pins - see `pins.py`.
 
-  * 518 x 392 in, 518 x 392 out. That is 1.32:1 against a webcam's 1.78:1, so
-    something has to give - see CROP below.
-  * The buffer is `OneComponent16Half` ('L00h'), a HALF-FLOAT image with several
-    hundred distinct values in a typical frame. Reading it as 8-bit throws that away
-    twice: once by quantising to 256 levels, and once by applying a second per-frame
-    normalisation on top of the `reduce_max` already in the graph. The reference
-    implementation this was ported from records getting that wrong and what it cost.
-  * BIGGER MEANS NEARER. The model predicts INVERSE depth, and the graph divides by
-    the frame's own maximum - so the scale is not comparable between frames and
-    nothing may be built on the raw numbers without pinning. `pins.py` is that.
-
-WHY VISION AND NOT CORE ML DIRECTLY. `VNCoreMLRequest` resizes the camera buffer to
-the model's input size on the GPU with no trip through numpy, and takes the same
-`CMSampleBuffer` the other requests are already being handed - so depth sees the SAME
-frame as the hands in it, which is the entire point of one process and one queue
-(DESIGN.md 6.4).
-
-THREADS. Everything here runs on the GCD capture queue, called from the engine's
-sample-buffer callback, except `resolve_model`, `verify_depth_support` and
-`DepthDetector.__init__`, which run on the caller's thread at construction - so a
-missing model or a framework mismatch is reported where somebody can act on it, before
-a camera is open.
-
-Ref: docs/DEPTH.md (first run and the pins), design/DESIGN.md 2.22,
-     appletd/pins.py, apple-vision-examples/examples/depth/depth.py.
+Thread: one detector, one serial capture queue. Not thread-safe.
+Ref: docs/DEPTH.md, DESIGN.md 2.22.
 """
 
 from __future__ import annotations
@@ -58,6 +29,7 @@ import Vision
 
 from appletd.engine import EngineError, ObjCObject
 from appletd.pins import Pin, Solve, solve
+from appletd.streams import ORIENTATION_UP
 
 if TYPE_CHECKING:
     import numpy.typing
@@ -319,7 +291,8 @@ class DepthDetector:
         return (0, 0)
 
     def detect_sample_buffer(self, sample_buffer: ObjCObject, seq: int,
-                             captured_at: float) -> DepthFrame | None:
+                             captured_at: float,
+                             orientation: int = ORIENTATION_UP) -> DepthFrame | None:
         """The live path: a CMSampleBuffer straight from the camera, unconverted.
 
         Contract: returns None when Core ML produced no observation, and counts it in
@@ -327,19 +300,20 @@ class DepthDetector:
                   is a different thing from an empty result.
         """
         started = time.perf_counter()
-        ok, error = self._sequence.performRequests_onCMSampleBuffer_error_(
-            [self._request], sample_buffer, None)          # TRAP: out-param
+        ok, error = self._sequence.performRequests_onCMSampleBuffer_orientation_error_(
+            [self._request], sample_buffer, orientation, None)          # TRAP: out-param
         self.last_inference_ms = (time.perf_counter() - started) * 1e3
         if not ok:
             raise EngineError("Core ML performRequests failed: %s" % (error,))
         return self._frame_from_results(seq, captured_at)
 
     def detect_pixel_buffer(self, pixel_buffer: ObjCObject, seq: int,
-                            captured_at: float) -> DepthFrame | None:
+                            captured_at: float,
+                            orientation: int = ORIENTATION_UP) -> DepthFrame | None:
         """The replay path: a CVPixelBuffer from a decoded fixture."""
         started = time.perf_counter()
-        ok, error = self._sequence.performRequests_onCVPixelBuffer_error_(
-            [self._request], pixel_buffer, None)           # TRAP: out-param
+        ok, error = self._sequence.performRequests_onCVPixelBuffer_orientation_error_(
+            [self._request], pixel_buffer, orientation, None)           # TRAP: out-param
         self.last_inference_ms = (time.perf_counter() - started) * 1e3
         if not ok:
             raise EngineError("Core ML performRequests failed: %s" % (error,))

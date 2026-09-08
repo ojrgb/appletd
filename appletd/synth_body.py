@@ -1,29 +1,16 @@
 """Synthetic bodies: a `PoseFrame` from a handful of numbers. No camera, no Vision.
 
-The pose counterpart of `synth.py`, and it exists for the same reason: the camera
-on this machine usually has another owner, a fixture with a person in it cannot be
-committed (STANDARDS.md 3), and the TouchDesigner side still has to be verifiable
-end to end. So this generates a plausible standing figure that can be driven
-along a path, and `tools/send_synthetic_pose.py` puts it on the wire in exactly
+The pose counterpart of `synth.py`. The camera usually has another owner, a fixture
+with a person in it cannot be committed, and the TouchDesigner side still has to be
+verifiable end to end - so this generates a plausible standing figure that can be
+driven along a path, and `tools/send_synthetic_pose.py` puts it on the wire in exactly
 the bytes the sidecar would send.
 
-WHAT IT IS FOR: proving the plumbing. Channel names, ports, ordering, the
-left-to-right slot rule, and whatever a project does with the numbers. What it is
-NOT for: validating anything about Vision. These joints are proportions from a
-diagram, not measurements of a person, so a threshold tuned against them is a
-guess - which is exactly the mistake the trigger thresholds recorded in
-docs/ATTRIBUTES.md were three times too loose for.
-
-THE MIRROR, and it is the one thing in here that is easy to get silently wrong.
-Vision reports a person's OWN left and right. Someone facing the camera has their
-anatomical left toward the image's +x side, so `left_shoulder` sits at a LARGER x
-than `right_shoulder`. Getting this backwards produces a skeleton that looks
-completely correct and is laterally flipped - the same defect the hand synthesiser
-shipped with until it was caught by eye (docs/JOURNAL.md), where both hands' thumbs
-pointed the same way because a left hand was never mirrored.
+FOR PROVING THE PLUMBING: channel names, ports, ordering, the left-to-right slot rule.
+NOT for validating anything about Vision - these joints are proportions, not
+measurements, and a threshold tuned against them is tuned against this file.
 
 Thread: pure functions over immutable values. Safe anywhere.
-Ref: DESIGN.md 6.4, 7 (coordinates); appletd/pose_types.py; appletd/synth.py.
 """
 
 from __future__ import annotations

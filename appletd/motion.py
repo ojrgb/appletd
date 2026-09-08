@@ -1,30 +1,16 @@
 """Pure functions of the TEMPORAL channels, where a native CHOP cannot do the job.
 
-WHY THIS EXISTS AND `derive.py` DOES NOT COVER IT. `derive.py` is a pure function
-of one frame's 137 raw channels, and that contract is worth keeping exact - it is
-what makes every formula in docs/ATTRIBUTES.md a unit test against a synthetic
-hand. Velocity is not in those 137: it is computed downstream by native CHOPs. So
-anything that is a pure function *of velocity* has nowhere to live in `derive.py`
-without muddying what its input means.
+`derive.py` is a pure function of one frame's raw channels, and keeping that contract
+exact is what makes every formula in docs/ATTRIBUTES.md a unit test. Velocity is not
+among those channels - it is computed downstream by native CHOPs - so anything that is
+a pure function OF velocity has nowhere to live there without muddying its input.
 
-WHY NOT NATIVE. Direction is `atan2(vel_y, vel_x)` and **no CHOP does atan2**. The
-Math CHOP's unary menu covers negate, absolute value, square, square root and
-reciprocal (DESIGN.md 2.11) - which between them built the whole one-euro filter -
-but not an inverse tangent. The alternatives were an Expression CHOP holding one
-hand-written expression per hand, which does not extend to the swipe sectors, or
-this: a thin Script CHOP wrapping a tested pure function, exactly as `derive.py` is
-wrapped.
+Why not native: direction is `atan2(vel_y, vel_x)` and no CHOP does atan2. The Math
+CHOP's unary menu covers negate, absolute value, square, root and reciprocal, which
+between them built the whole one-euro filter, but not an inverse tangent.
 
-STATELESS, and that is the whole reason it is allowed to be Python. The rule in
-docs/ATTRIBUTES.md is that anything with MEMORY lives in native CHOPs, where
-TouchDesigner manages the state and a project reload cannot leave it stale. This
-module has no memory: same velocity in, same direction out. The holding of `dir`
-below `Speedfloor` - which IS memory - is done in CHOPs, not here.
-
-Thread: pure, so safe anywhere. In production it runs on TouchDesigner's main
-        thread inside a Script CHOP cook, alongside `derive()`.
-Ref: docs/ATTRIBUTES.md (the Motion group), DESIGN.md 2.11 (why not native),
-     appletd/derive.py (the pattern this follows).
+Thread: pure and stateless. Safe anywhere.
+Ref: docs/ATTRIBUTES.md, DESIGN.md 2.11.
 """
 
 from __future__ import annotations
@@ -50,29 +36,17 @@ def directions(values: dict[str, float],
                params: MotionParams | None = None) -> dict[str, float]:
     """Velocity channels in, heading channels out. Pure.
 
-    Contract: reads `h{i}_vel_x`, `h{i}_vel_y` and `h{i}_speed`; a missing key
-              reads as 0.0 rather than raising, so a caller publishing a subset
-              still works. Emits, per hand:
+    Contract: reads `h{i}_vel_x`, `h{i}_vel_y` and `h{i}_speed`; a missing key reads
+              as 0.0 rather than raising. Emits per hand:
 
-                h{i}_dir        degrees, 0 = +x, counter-clockwise, matching every
-                                other angle in this system (docs/ATTRIBUTES.md)
-                h{i}_dir_x      the unit heading vector - what most consumers
-                h{i}_dir_y      actually want, and free once the angle is known
+                h{i}_dir        degrees, 0 = +x, counter-clockwise
+                h{i}_dir_x      the unit heading vector, free once the angle is known
+                h{i}_dir_y
                 h{i}_moving     1 when speed is above `speedfloor`
 
-    Why `dir_x`/`dir_y` as well as the angle: an angle has to be un-wrapped before
-    it can be interpolated or filtered, and every consumer that just wants to push
-    something in a direction would otherwise have to convert it back. The pair
-    costs two cosines and cannot wrap.
-
-    Why `moving` rather than holding `dir` here: holding a value is MEMORY, and
-    memory belongs in native CHOPs. This publishes the CONDITION and lets a CHOP do
-    the holding, which is the same division of labour as the latches - this module
-    emits the level, the network decides what to remember.
-
-    At rest `dir` is 0 rather than undefined. atan2(0, 0) is 0 in Python, which is
-    as good an answer as any and better than a NaN - and `moving` is what tells a
-    consumer to disbelieve it.
+    All three headings HOLD together below the floor. Holding only the angle once left
+    the vector following live velocity, so a stationary hand reported `dir` = 180
+    while `dir_x` read +1 - two channels disagreeing is worse than either alone.
     """
     params = params or MotionParams()
     out: dict[str, float] = {}

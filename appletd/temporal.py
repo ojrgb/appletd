@@ -1,58 +1,22 @@
 """A PROTOTYPE: the whole `temporal` group as one pure function plus explicit state.
 
-    THIS IS AN EXPERIMENT, NOT THE SHIPPING PATH. `tools/td_add_temporal.py` builds
-    74 native operators and that is still what runs. This module exists to answer
-    one question with a number instead of an argument: **would collapsing a chain of
-    native CHOPs into a single Script CHOP be faster, and by enough to matter?**
+NOT THE SHIPPING PATH. `tools/td_add_temporal.py` builds 74 native operators and that
+is what runs. This module exists to answer one question with a number rather than an
+argument: would collapsing that chain into a single Script CHOP be faster, and by
+enough to matter? The verdict is in docs/BUILD_PLAN.md step 12.
 
-    The verdict, and how it was reached, is in `docs/BUILD_PLAN.md` step 12. Read
-    that before deciding anything on the strength of this file.
+Three reasons the native version may still be right, and they survive being measured:
 
-WHY IT IS WORTH MEASURING. `temporal` is 74 operators for 27 channels, and every one
-of those operators pays TouchDesigner's per-channel-per-operator cost - MEASURED at
-about 1.2 microseconds (DESIGN.md 2.14). A Script CHOP pays that once, plus one
-Python call. From the numbers `derive_chop` gives up, the arithmetic looked like it
-should land near half.
+  1. A Trail CHOP's window is a window whatever the cook rate does. The deque here is
+     a window in COOKS, which is the same thing only while nothing cooks twice in a
+     frame or skips one.
+  2. 74 operators can be inspected in the network with a hand in front of the camera.
+  3. Native operators keep no Python state for a project reload to mishandle.
 
-WHY IT MIGHT STILL BE THE WRONG ANSWER, and this is not hedging - it is the reason
-`docs/ATTRIBUTES.md` put memory in native CHOPs in the first place, and all three
-reasons survive being measured:
+Pure: state is passed in and returned, never held in a module global.
 
-  1. **TouchDesigner does it properly.** A Trail CHOP's window is a window whatever
-     the cook rate does. The deque below is a window in COOKS, which is the same
-     thing only as long as nothing ever cooks twice in a frame or skips one.
-  2. **It is inspectable.** 74 operators can be looked at in the network with a
-     hand in front of the camera. A dict in operator storage cannot.
-  3. **No hidden Python state for a project reload to treat unpredictably.** This is
-     the one that decided it, and it turned out STRONGER than the argument for it.
-     The state does not merely reload unpredictably: with it in operator storage,
-     **the project would not save.** TouchDesigner pickles storage into the .toe, and
-     `PicklingError: Can't pickle <class 'appletd.temporal.TemporalState'>: it's
-     not the same object as appletd.temporal.TemporalState` is what a save
-     produced - because pickle compares class identity and the builders re-import this
-     module. The prototype keeps its state in its callback DAT's module globals now,
-     which are not pickled. A shipping version would have to answer this properly.
-
-WHAT IS FAITHFULLY REPRODUCED. The Schmitt debounce, exactly as
-`tools/td_add_temporal.py` builds it and `docs/ATTRIBUTES.md` specifies it:
-
-    active = all_valid_over_last_A  OR  (prev AND any_valid_over_last_D)
-
-A Trail plus an Analyze taking the MINIMUM is "valid on every one of the last A
-frames"; taking the MAXIMUM over D frames is "valid on any of the last D". Between
-them the state holds, which is what makes it a dead band rather than a comparator.
-D > A on purpose - dropping a hand mid-gesture is worse than acquiring one late.
-
-WHAT IS DELIBERATELY NOT REPRODUCED. `dir` and its unit vector come from
-`appletd.motion.directions`, which is already pure and already used by the
-native group's own Script CHOP. Re-implementing it here would measure this file
-against a copy of itself.
-
-Thread: pure functions over an explicit state object. Nothing here touches
-        TouchDesigner or pyobjc. In the prototype it runs on TD's main thread
-        inside a Script CHOP cook.
-Ref: docs/BUILD_PLAN.md step 12 (the verdict), docs/ATTRIBUTES.md (Presence and
-     Motion), DESIGN.md 2.10 (why a recurrence needs a clock), 2.14 (the cost).
+Thread: pure functions over immutable values. Safe anywhere.
+Ref: docs/BUILD_PLAN.md step 12.
 """
 
 from __future__ import annotations

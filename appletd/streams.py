@@ -1,37 +1,31 @@
-"""Which streams exist, which port each one uses, and what the sidecar reports.
+"""Which streams exist, which port each uses, and what the sidecar reports.
 
-The vocabulary shared by the sidecar, the TouchDesigner builders and the tests.
-It is here rather than in `sidecar.py` because the port numbers have to be the
-same on both sides of a UDP socket, and the two sides are written in different
-files by different tools: `tools/td_build_vision.py` imports this module for
-every stream's port, so a stream cannot be listening on one number while the
-sender uses another.
-
-Pure stdlib, no pyobjc, no TouchDesigner - the same rule `types.py` follows and
-for the same reason (DESIGN.md 5).
-
-THREE THINGS THIS MODULE ENCODES, all settled in DESIGN.md 6.4:
+The vocabulary shared by the sidecar, the TouchDesigner builders and the tests. It
+lives here rather than in `sidecar.py` because the port numbers must match on both
+sides of a UDP socket, and the two sides are written by different tools.
 
   * ONE PORT PER STREAM, computed from one base. Sharing a port would put pose
-    channels inside the hands COMP's output, because TD's OSC In CHOP puts
-    everything it receives into one CHOP and the COMP passes its whole input
-    through. A prefix Select at each COMP's input is the alternative, and prefix
-    patterns have already failed to partition these channels once
-    (docs/BUILD_PLAN.md step 3).
-  * STREAMS ARE LAUNCH FLAGS. `parse_streams` is called once, on the sidecar's
-    command line. There is no control channel into the sidecar and there is not
-    going to be one - flipping a toggle in TouchDesigner takes effect on the
-    next Start.
-  * THE STATUS CHANNELS. `sc_*`, sent on the BASE port, saying what the sidecar
-    actually started. Without them a panel showing `Streampose` on, after
-    somebody flipped it without restarting, is simply lying.
+    channels inside the hands COMP's output, because TD's OSC In CHOP puts everything
+    it receives into one CHOP.
+  * The IMAGE requests - segment, depth, flow - have NO port. `port_for` refuses them
+    by name rather than returning a plausible number; they publish through a shared
+    buffer instead.
+  * A status channel per request, so a panel showing a stream as on after somebody
+    flipped it without restarting is not left lying.
 
-Thread: pure functions over immutable values. Safe anywhere.
-Ref: DESIGN.md 6.4 (the whole scheme), 2.12 (the body-pose API surface).
+Also holds the quality and accuracy names for those requests, because both the
+sidecar's command line and the builders need them and neither can import a module that
+imports Vision.
+
+Pure stdlib. No pyobjc, no TouchDesigner.
+
+Thread: pure data and pure functions. Safe anywhere.
+Ref: DESIGN.md 6.4.
 """
 
 from __future__ import annotations
 
+import struct
 from collections.abc import Iterable, Sequence
 from typing import Final
 
@@ -74,10 +68,35 @@ REQUEST_SEGMENT: Final = "segment"
 # decision rather than a preference, and the label says so.
 REQUEST_DEPTH: Final = "depth"
 
+# OPTICAL FLOW, on the same terms again and for the same reasons - an image, its own
+# buffer, no port.
+#
+# The most BANDWIDTH-hungry of the three by a wide margin: the field comes back at FULL
+# input resolution with two float32 components, so 720p is 7.2 MB a frame against the
+# mask's 48 KB (docs/BENCHMARKS.md). It is also expensive to compute - MEASURED 16.2 ms
+# at `low` and 30.1 at `high`, against hands' 3.41 - so like depth it is off by default
+# and enabling it is a decision.
+REQUEST_FLOW: Final = "flow"
+
 # What `--streams` accepts. STREAM_NAMES plus the requests that have no port, in the
 # order they RUN on the capture queue: the cheap ones a live project reads first.
 REQUEST_NAMES: Final[tuple[str, ...]] = (*STREAM_NAMES, REQUEST_SEGMENT,
-                                         REQUEST_DEPTH)
+                                         REQUEST_DEPTH, REQUEST_FLOW)
+
+# The optical flow accuracy levels, IN COST ORDER, and here for exactly the reason the
+# segmentation qualities below are: `sidecar.py` needs them for its command line and
+# must stay importable with no pyobjc, and `tools/td_add_flow.py` needs them for a menu
+# and runs inside TouchDesigner, which CANNOT load pyobjc at all. Neither can import
+# `appletd/flow.py`, which does `import Vision` at the top.
+#
+# MEASURED at 1280x720 (docs/BENCHMARKS.md): low 16.2 ms, medium 18.9, high 30.1 -
+# against hands' 3.41 and a 33.3 ms frame, which is why the default is the cheapest.
+FLOW_ACCURACIES: Final[tuple[str, ...]] = ("low", "medium", "high", "veryhigh")
+DEFAULT_FLOW_ACCURACY: Final = "low"
+# Two components a pixel - the x and y displacement. Here rather than in
+# `flow.py` for the same boundary reason: `sidecar.py` sizes the shared buffer
+# with it and must stay importable with no pyobjc.
+FLOW_COMPONENTS: Final = 2
 
 # The segmentation quality levels, IN COST ORDER, and they live here rather than in
 # `segmentation.py` for the same reason the ports do: both sides of a boundary have
@@ -97,6 +116,93 @@ REQUEST_NAMES: Final[tuple[str, ...]] = (*STREAM_NAMES, REQUEST_SEGMENT,
 # plugin pinned a frame rate at 50 fps. Ours is `fast`.
 SEGMENT_QUALITIES: Final[tuple[str, ...]] = ("fast", "balanced", "accurate")
 DEFAULT_SEGMENT_QUALITY: Final = "fast"
+
+# THE MULTI-PERSON MASK'S COLOURS, indexed by Vision's instance number.
+#
+# `VNInstanceMaskObservation.instanceMask()` is natively index-encoded - 0 for
+# background, 1..4 per person - so the buffer carries 1, 2, 3, 4 in a uint8 and reads
+# as very nearly black. The indices are the right thing to SEND (one component,
+# lossless, and the arithmetic stays integer); turning them into something visible is
+# the consumer's job, and this is the table it uses.
+#
+# Red, green, blue, then WHITE last: a fourth person has to be visible against a light
+# background as well as a dark one, and there is no fourth primary.
+MASK_INSTANCE_COLOURS: Final[tuple[tuple[int, int, int], ...]] = (
+    (0, 0, 0),          # 0 - background
+    (255, 0, 0),        # 1
+    (0, 255, 0),        # 2
+    (0, 0, 255),        # 3
+    (255, 255, 255),    # 4 - Vision separates at most four
+)
+
+# How many people the mask separated, carried in the buffer's 32 opaque aux bytes.
+#
+# WHY IT TRAVELS WITH THE FRAME rather than being read off `Multiperson`: the toggle
+# is a LAUNCH FLAG, so between flipping it and restarting, the parameter and the
+# running sidecar disagree - and a consumer that colourised a 0/255 binary mask as
+# though it were indices would index a colour table with 255. The frame says what the
+# frame is.
+_MASK_AUX: Final = struct.Struct("<I")
+
+
+def pack_mask_aux(people: int) -> bytes:
+    """The mask's aux block: how many people it separates. 0 means a binary mask."""
+    return _MASK_AUX.pack(max(0, int(people)))
+
+
+def unpack_mask_people(aux: bytes) -> int:
+    """People separated, or 0 for a single-person 0/255 mask or an older writer.
+
+    Contract: never raises. An aux block too short - anything written before this
+              existed - reads as 0, which is the single-person path and the safe
+              answer.
+    """
+    if not aux or len(aux) < _MASK_AUX.size:
+        return 0
+    return int(_MASK_AUX.unpack_from(aux, 0)[0])
+
+# CAMERA FLIP. Vision applies an orientation to the image before it does anything
+# else, so mirroring costs NOTHING on our side: no pixel is touched in Python, and
+# the flag is one more argument on a call already being made.
+#
+# PLAIN INTS rather than `Quartz.kCGImagePropertyOrientation*`, because this module
+# is imported by the TouchDesigner builders and TouchDesigner's Python cannot load
+# pyobjc (DESIGN.md 2.7). They are EXIF orientation values and have been these
+# numbers since TIFF 6.0; `test_orientation.py` holds them against Quartz, where
+# pyobjc is available.
+# WHICH CAMERA "default" MEANS, as a SUBSTRING of the device name - the same thing
+# `--camera` takes, so a name works identically on the command line and in the panel.
+#
+# HERE rather than in `engine.py`, which is where it used to live: the TouchDesigner
+# builders need it to resolve `(default)` for their own Video Device In TOP, and they
+# cannot import `engine` because it imports Vision (DESIGN.md 2.7). If the two sides
+# disagreed, the PICTURE and the TRACKING would come from different cameras and the
+# overlay would sit on the wrong one.
+DEFAULT_CAMERA_NAME: Final = "MacBook"
+
+ORIENTATION_UP: Final = 1
+ORIENTATION_UP_MIRRORED: Final = 2
+
+
+def orientation_for(flip: bool) -> int:
+    """The EXIF orientation a `Camera Flip` setting asks Vision for.
+
+    WHAT MOVES WITH IT, and it is everything: Vision reports landmark coordinates
+    in the ORIENTED image, and returns its image outputs - the segmentation mask,
+    the depth map, the flow field - oriented too. MEASURED on a fixture
+    frame: the hand's mean x went 0.784 -> 0.228 and the depth map came back
+    mirrored, 8.2x closer to the flip of the original than to the original.
+
+    So a flipped camera needs NOTHING flipped downstream. The one thing that does
+    is TouchDesigner's own `video_in`, which opens the camera separately and never
+    goes near Vision.
+
+    CHIRALITY IS THE CATCH. A mirrored left hand is a right hand, and Vision says
+    so - `h?_chirality` reports what it sees, which is the mirrored world. That is
+    the honest answer for an overlay drawn on a mirrored image, and the wrong one
+    for asking which of the user's actual hands is raised.
+    """
+    return ORIENTATION_UP_MIRRORED if flip else ORIENTATION_UP
 
 # What runs when nobody says otherwise: exactly what ran before there was a
 # choice. A default that turned pose on would make every existing project pay
@@ -129,7 +235,7 @@ def port_for(stream: str, base_port: int = BASE_PORT) -> int:
               with no channels and no error.
     """
     if stream not in PORT_OFFSETS:
-        if stream in (REQUEST_SEGMENT, REQUEST_DEPTH):
+        if stream in (REQUEST_SEGMENT, REQUEST_DEPTH, REQUEST_FLOW):
             raise ValueError(
                 "%r has no UDP port - it publishes an IMAGE through a shared buffer, "
                 "not channels over OSC (appletd/maskbuf.py)" % (stream,))
@@ -194,7 +300,7 @@ STATUS_PREFIX: Final = "sc_"
 # so without this there is no way to tell "sidecar dead" from "stream off".
 STATUS_UPTIME: Final = STATUS_PREFIX + "uptime_s"
 
-# What the camera ACTUALLY DELIVERED, in pixels. Added 2026-08-23, and it closes a
+# What the camera ACTUALLY DELIVERED, in pixels. Added, and it closes a
 # real hole rather than adding a convenience.
 #
 # TouchDesigner converts normalised coordinates to pixels with `_px = x * Resw`, and
@@ -262,7 +368,8 @@ def _self_check() -> None:
     for name in DEFAULT_STREAMS:
         if name not in REQUEST_NAMES:
             raise RuntimeError("%r is not in REQUEST_NAMES" % (name,))
-    if set(REQUEST_NAMES) - set(STREAM_NAMES) - {REQUEST_SEGMENT, REQUEST_DEPTH}:
+    if (set(REQUEST_NAMES) - set(STREAM_NAMES)
+            - {REQUEST_SEGMENT, REQUEST_DEPTH, REQUEST_FLOW}):
         raise RuntimeError("a request without a port was added to REQUEST_NAMES "
                            "without teaching `port_for` to refuse it by name")
     if DEFAULT_SEGMENT_QUALITY not in SEGMENT_QUALITIES:

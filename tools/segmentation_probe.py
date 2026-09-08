@@ -48,7 +48,7 @@ from appletd.maskbuf import MaskReader, MaskWriter, capacity_for  # noqa: E402
 FIXTURE = os.path.join(REPO_ROOT, "fixtures", "hand_clip.mp4")
 DEFAULT_PATH = "/tmp/appletd_mask.buf"
 
-# MEASURED 2026-08-22 over the fixture. The buffer is sized for the level being
+# MEASURED over the fixture. The buffer is sized for the level being
 # written, and `accurate` is 3 MB where `fast` is 49 KB - a 60x spread, which is why
 # the capacity is chosen from the quality level rather than being one generous number.
 MASK_SIZE = {"fast": (256, 192), "balanced": (512, 384), "accurate": (2016, 1512)}

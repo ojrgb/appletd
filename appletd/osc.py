@@ -1,34 +1,18 @@
 """Minimal OSC encoding. No dependencies, no pyobjc, no TouchDesigner.
 
-Just enough OSC to send named floats to TouchDesigner's OSC In CHOP, which is
-the whole transport (DESIGN.md 2.9). Hand-rolled rather than taking a dependency
-because the encoding is about twenty lines and this is the one piece that sits
-between two processes - a version skew in a third-party OSC library would
+Just enough OSC to send named floats to TouchDesigner's OSC In CHOP, which is the whole
+transport. Hand-rolled rather than taking a dependency: the encoding is twenty lines,
+and this sits between two processes - a version skew in a third-party library would
 present as landmarks quietly arriving in the wrong channels.
-
-THE FORMAT, which is all we need of it:
 
     message   address (padded to 4)  ",f" (padded to 4)  float32 big-endian
     bundle    "#bundle" (padded)     timetag (8 bytes)   [size][message]...
 
-Everything is big-endian and every part is padded to a multiple of 4 bytes with
-NULs. Addresses start with "/".
+Big-endian throughout, every part padded to a multiple of 4 bytes with NULs, addresses
+starting with "/".
 
-VERIFIED against a real TouchDesigner OSC In CHOP: 137 named floats arrive as
-137 correctly-named channels with correct values, with no Python running in TD at
-all.
-
-TRAP, measured: a UDP socket's DEFAULT SEND BUFFER caps the datagram at 9216 bytes
-on macOS, and our face bundle is 12208. `sendto` refuses it - nothing arrives, and
-the other streams keep working, so it looks like one stream is broken rather than
-one socket option being wrong. `datagram_socket()` below is what every sender uses.
-
-TRAP, measured: OSC floats are 32-BIT. That is fine for normalised coordinates,
-confidences and ages, and NOT fine for a raw `time.monotonic()` timestamp, where
-float32 resolution at typical uptime magnitudes is 1/16 of a second. Send
-elapsed values, not absolute ones (DESIGN.md 2.9).
-
-Thread: pure functions, no state, safe anywhere.
+Thread: pure functions over bytes. Safe anywhere.
+Ref: DESIGN.md 2.9.
 """
 
 from __future__ import annotations
@@ -122,7 +106,7 @@ def encode_bundle(pairs: Iterable[tuple[str, float]]) -> bytes:
     syscalls per frame.
     Size: MEASURED per stream - hands 4188 bytes (141 channels), pose 3720 (123),
           face 12640 (387). The face bundle is the one to watch, and the limit is
-          NOT the 16 KB this note used to guess: see `datagram_socket`.
+          NOT 16 KB, which is the usual guess: see `datagram_socket`.
     """
     parts = [_BUNDLE_PREFIX_PADDED, _TIMETAG_IMMEDIATE]
     for address, value in pairs:

@@ -258,8 +258,7 @@ class RecorderDelegate(NSObject):
                 # stopRunning(), so a callback that passed the check at the top
                 # of this method and then blocked on the lock while teardown ran
                 # is stopped here instead. Without it, a late callback reopens
-                # the writer after release_writer() and truncates the clip -
-                # demonstrated in the M0 review.
+                # the writer after release_writer() and truncates the clip.
                 if self.stopping:
                     return
                 # Belt and braces for the same race, from the other side: the

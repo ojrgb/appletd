@@ -1,45 +1,31 @@
-"""What KIND of number each channel is, so the filter and the coordinate spaces
-can be built for every stream from one table instead of three.
+"""What KIND of number each channel is, so one table serves every stream.
 
-WHY THIS EXISTS. Hands got a one-euro filter and four coordinate spaces because
-hands came first, and both were built from a hand-shaped list of channel names.
-Neither is remotely hand-specific: a body's joints and a face's bounding box want
-exactly the same smoothing and exactly the same conversion into TouchDesigner's
-world and pixel spaces. What was missing was a machine-readable answer to "is this
-channel a position, an extent, an angle, or a number that must be left alone",
-which is what this module is.
+The filter and the coordinate spaces are built from this rather than from name
+patterns: a wildcard cannot partition these channels. `h?_*_x` matches both a raw
+landmark and a derived one, a Select CHOP has no exclusion syntax, and anything a
+pattern misses DISAPPEARS from the output with no error anywhere.
 
-The builders (`tools/td_add_filter.py`, `tools/td_add_coords.py`) ask this module
-rather than pattern-matching names, for the reason DESIGN.md 2.11 records twice: a
-wildcard cannot partition these channels. `h?_*_x` matches both a raw landmark and
-a derived one, `^` does not exclude in a Select CHOP, and anything a pattern misses
-DISAPPEARS from the COMP's output with no error anywhere.
+Four roles, all load-bearing:
 
-THE FOUR THINGS A CHANNEL CAN BE, and the distinctions are all load-bearing:
+  * POSITION - a point in the image, normalised, origin bottom-left. Gets the -0.5
+    offset in world space, because world space is centred.
+  * EXTENT - a width or a height. Gets NO offset: a box is 0.2 wide wherever it
+    sits, and subtracting 0.5 from a width draws as nothing.
+  * ANGLE - degrees. Smoothed like a position, never transformed: there is no such
+    thing as a yaw in pixels.
+  * SCALAR - confidences, counters, ages, flags. Neither smoothed nor transformed;
+    smoothing a confidence makes a gate lag the thing it gates.
 
-  * POSITION - a point in the image, normalised, origin bottom-left. Gets the
-    -0.5 offset when it becomes a world coordinate, because world space is centred.
-  * EXTENT - a width or a height, normalised. Gets NO offset: the box is 0.2 wide
-    whether it sits on the left or the right, and subtracting 0.5 from a width
-    produces a negative size that draws as nothing.
-  * ANGLE - degrees. Smoothed like a position and NEVER transformed into a
-    coordinate space, because there is no such thing as a yaw in pixels.
-  * SCALAR - everything else: confidences, counters, ages, flags, chirality.
-    Neither smoothed nor transformed. Smoothing a confidence would make a gate lag
-    behind the thing it gates, and `found` is a boolean.
+And one trap. Face LANDMARK points are normalised to the FACE's bounding box, not
+to the image, so they look exactly like positions and are in a different space -
+transforming them with the image rules puts every feature in one corner of the
+frame. They are ROLE_BOX_RELATIVE: smoothed, never transformed, composed through
+the box by whoever publishes them.
 
-AND ONE MORE, which is the trap this module exists to record. Face LANDMARK points
-are normalised to the FACE's bounding box, not to the image (`normalizedPoints`,
-DESIGN.md 2.12). They look exactly like positions and they are in a different
-space, so transforming them with the image rules puts every facial feature in the
-top-left corner of the frame. They are `ROLE_BOX_RELATIVE`: smoothed, never
-transformed, and they need composing through the bounding box first - which is a
-job for whoever publishes them, not for the coordinate builder.
-
-Pure stdlib. No pyobjc, no TouchDesigner - the same rule `types.py` follows.
+Pure stdlib: no pyobjc, no TouchDesigner.
 
 Thread: pure functions over immutable values. Safe anywhere.
-Ref: DESIGN.md 7 (the coordinate contract), 6.4 (the streams), docs/ATTRIBUTES.md.
+Ref: DESIGN.md 7, 6.4, docs/ATTRIBUTES.md.
 """
 
 from __future__ import annotations
@@ -101,9 +87,12 @@ _SUFFIXES: Final[dict[str, tuple[str, str, str]]] = {
     ROLE_EXTENT_Y: ("_h", "_th", "_ph"),
 }
 
-# Face channels that are not landmarks and not the box. Named explicitly, because
-# `f0_roll` gives a suffix-matcher nothing to go on.
-_FACE_ANGLES: Final = ("_roll", "_yaw", "_pitch")
+# Face channels that are not landmarks and not the box. Named explicitly, and since
+# the rename this is load-bearing rather than convenient: `f0_angle_x` ENDS
+# IN `_x`, so a suffix matcher would read it as an image position, give it a `_tx`
+# companion and let `Screenspaceonly` delete it. The face branch of `_role_of` checks
+# this tuple before anything else for that reason.
+_FACE_ANGLES: Final = ("_angle_x", "_angle_y", "_angle_z")
 
 # The key point channel endings, built from the contract rather than written out -
 # `face_types.py` owns which four points there are.
@@ -133,10 +122,21 @@ def _role_of(stream: str, name: str) -> str:
             return ROLE_BOX_RELATIVE
         return ROLE_SCALAR
 
+    # THE PERSON BOXES, which joined the pose contract on and are the one
+    # thing on the wire that IS an extent. Checked before the generic rules below,
+    # because `human0_bbox_w` ends in `_w` and would otherwise fall through to
+    # ROLE_SCALAR - and a width read as a scalar is never scaled, so the box would
+    # keep its normalised size in a world-space render.
+    #
+    # Same `_bbox_` convention as the face, deliberately, so there is one rule to
+    # know rather than two.
+    if name.endswith(("_bbox_x", "_bbox_y", "_bbox_w", "_bbox_h")):
+        return {"x": ROLE_POSITION_X, "y": ROLE_POSITION_Y,
+                "w": ROLE_EXTENT_X, "h": ROLE_EXTENT_Y}[name[-1]]
+
     # Hands and pose: a joint's `_x`/`_y` are image positions; `_conf` and every
-    # per-hand or per-frame scalar is a scalar. Nothing in either contract is an
-    # extent or an angle - `hands_angle` and friends are DERIVED downstream by
-    # derive.py and never arrive on the wire.
+    # per-hand or per-frame scalar is a scalar. `hands_angle` and friends are DERIVED
+    # downstream by derive.py and never arrive on the wire.
     if name.endswith("_x"):
         return ROLE_POSITION_X
     if name.endswith("_y"):
@@ -161,34 +161,18 @@ STREAM_MERGED: Final = "merged"
 def channel_roles(stream: str) -> dict[str, str]:
     """Every channel a stream carries, mapped to its role.
 
-    Contract: covers exactly the stream's own contract channels, PLUS the `sc_*`
-              status channels on the hands stream, because those arrive on the same
-              port and anything a builder does not classify vanishes from the COMP
-              output (DESIGN.md 2.11). Raises on an unknown stream rather than
-              returning an empty map, which would silently build a network that
-              transforms nothing.
-    STREAM_MERGED: the union of all three, in the order `merge_streams` produces -
-              each stream in STREAM_NAMES order, and within hands the wire contract
-              followed by what `derive_chop` and `temporal` publish, because that is
-              the order that stream's own Merge CHOP is wired in. THE ORDER IS THE
-              CONTRACT here: `compact_pattern` compares a pattern's expansion to the
-              wanted list as ORDERED LISTS, so a universe in the wrong order makes
-              every candidate fail and every branch fall back to a literal list -
-              which looks exactly like "no pattern fits" and is not (DESIGN.md 2.11).
-    Why the ROLES cannot be recomputed from the merged names alone: `_role_of` takes
-              the stream because the rules differ by stream. `sc_src_w` is a SCALAR on
-              hands - the hands rule classifies by `_x`/`_y` alone and everything else
-              is a scalar - while `f0_bbox_w` is an EXTENT on face. Same suffix,
-              different answer, so the merged map is built by asking each stream about
-              its OWN names and never by asking a merged `_role_of`.
-    NOT COMPLETE, and the builder has to know it: `derived_roles` classifies 24 of
-              the 171 channels `derive_chop` publishes, so the rest - the 84
-              hand-local descriptors, the derived bounding boxes - are absent from
-              this map. Any pattern verified only against it must be re-verified
-              against the LIVE channel list before use, exactly as
-              tools/td_add_screenspace.py's `_scope_for` does and for the same
-              reason: a pattern that is correct until a toggle moves is worse than a
-              literal list, because it is correct when you test it.
+    Contract: covers the stream's own contract channels plus the `sc_*` status
+              channels on the hands stream, which arrive on the same port. Raises on
+              an unknown stream rather than returning an empty map, which would
+              silently build a network that transforms nothing.
+    STREAM_MERGED: the union of all three, in the order `merge_streams` produces.
+              THE ORDER IS THE CONTRACT - `compact_pattern` compares a pattern's
+              expansion to the wanted list as ORDERED lists, so a universe in the
+              wrong order makes every candidate fail and every branch fall back to a
+              literal list.
+    NOT COMPLETE: `derived_roles` classifies only some of what `derive_chop`
+              publishes, so any pattern verified against this map must be re-verified
+              against the LIVE channel list before use.
     """
     if stream == STREAM_MERGED:
         merged: dict[str, str] = {}
@@ -255,28 +239,17 @@ def compact_pattern(wanted: Sequence[str], universe: Iterable[str],
     """The first candidate pattern that selects EXACTLY `wanted` out of `universe`,
     or the explicit space-joined list of `wanted` when none of them does.
 
-    Contract: the return value is a TouchDesigner channel-pattern string. Whatever
-              it is, feeding it to a Select CHOP's `channames` or any CHOP's `scope`
-              selects precisely `wanted` - never a superset, never a subset.
-    Why:      a builder's alternative is a literal list of every channel name, and
-              those lists got long enough to cost real time. MEASURED: the face
-              filter's Select carried 362 names and cost 0.1725 ms per cook, more
-              than the filter it fed and 10% of the whole COMP.
-    Why verified rather than trusted: DESIGN.md 2.11 records twice that a wildcard
-              cannot partition these channels, and both times the damage was
-              silent - `h?_*_x` matches a raw landmark and a derived one, and
-              `* ^*_x` selected 423 channels out of a 141-channel input because the
-              terms are ADDITIVE and `^` does not exclude. So no pattern is used on
-              the strength of looking right. Each candidate is EXPANDED against the
-              universe it will be applied to and accepted only on an exact match.
-    Traps:    `fnmatchcase`, not `fnmatch` - the latter is case-insensitive on
-              macOS, which would accept a pattern TouchDesigner rejects.
-              VERIFIED that TouchDesigner's own matcher agrees with `fnmatchcase`
-              on the syntax used here: `*`, `?` and `[0-9]` character classes all
-              selected the identical channel set in a live network. Nothing else is
-              used, deliberately - `^` in particular does NOT mean what it looks
-              like (see above).
-    Ref:      DESIGN.md 2.11, docs/BUILD_PLAN.md step 10.
+    Contract: whatever comes back, feeding it to a Select CHOP's `channames` or any
+              CHOP's `scope` selects precisely `wanted` - never a superset, never a
+              subset.
+    Why:      a literal list of every channel name gets long enough to cost real
+              time - the face filter's Select carried 362 names at 0.1725 ms a cook,
+              more than the filter it fed.
+    Why verified rather than trusted: a wildcard cannot partition these channels, and
+              the damage is silent. `h?_*_x` matches a raw landmark and a derived one,
+              and `* ^*_x` selects a superset because the terms are ADDITIVE and `^`
+              does not exclude. So every candidate is EXPANDED against the universe
+              and compared before it is returned.
     """
     target = list(wanted)
     ordered = list(universe)
@@ -404,14 +377,24 @@ class BoxBranch(NamedTuple):
 # falls back to the literal list rather than selecting the wrong channels.
 _POSITION_HEADS: Final[tuple[str, ...]] = ("w", "t", "i", "m", "r", "l", "pa", "pi")
 _MERGED_CANDIDATES: Final[dict[str, tuple[str, ...]]] = {
+    # `human?_bbox_*` joined on with the person boxes. Named here rather
+    # than swept up by a wildcard for the reason the whole table exists: `*_x` would
+    # also match the face's 176 BOX-RELATIVE landmark points, which are not positions
+    # and must not be transformed as if they were.
+    # `hands_center_*` and `index_center_*` BY NAME, not `hands_*_x`. That wildcard
+    # was written when the only per-frame positions were the two centres, and it also
+    # matches `hands_angle_x` - a two-hand ANGLE, which has no world coordinate and
+    # was silently given a `hands_angle_tx` the day it was added.
     ROLE_POSITION_X: (" ".join(
         ["h?_%s*_x" % head for head in _POSITION_HEADS]
-        + ["hands_*_x", "index_*_x", "p?_*_x", "f?_bbox_x"]),),
+        + ["hands_center_x", "index_center_x", "p?_*_x", "f?_bbox_x",
+           "human?_bbox_x"]),),
     ROLE_POSITION_Y: (" ".join(
         ["h?_%s*_y" % head for head in _POSITION_HEADS]
-        + ["hands_*_y", "index_*_y", "p?_*_y", "f?_bbox_y"]),),
-    ROLE_EXTENT_X: ("h?_vel_x f?_bbox_w",),
-    ROLE_EXTENT_Y: ("h?_vel_y f?_bbox_h",),
+        + ["hands_center_y", "index_center_y", "p?_*_y", "f?_bbox_y",
+           "human?_bbox_y"]),),
+    ROLE_EXTENT_X: ("h?_vel_x f?_bbox_w human?_bbox_w",),
+    ROLE_EXTENT_Y: ("h?_vel_y f?_bbox_h human?_bbox_h",),
 }
 
 

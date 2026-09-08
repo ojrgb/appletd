@@ -198,7 +198,7 @@ The diagnosis was slower than it should have been because the placeholder frame
 was 256×192 — byte-identical in shape to a real `fast` mask. It is 16×16 now, so a
 frozen TOP looks obviously wrong.
 
-### Three parameter facts that cost a day each
+### Three parameter facts worth knowing before you hit them
 
 - **Removing the code that creates a parameter does not remove the parameter.**
   A name has to be actively deleted or it haunts the file for ever. Hence
@@ -244,7 +244,8 @@ A frozen COMP's Out CHOP keeps reporting its channels, holding whatever they las
 cooked. That is deliberate and it is the right behaviour - a channel that VANISHES
 breaks every downstream reference with no error anywhere (DESIGN.md 6.2) - but it
 means switching a group off leaves a plausible wrong number on the output rather than
-nothing. `Coordspx` off used to leave 100 `_px`/`_py` channels reading last frame's
+nothing. Without the trim, `Coordspx` off leaves 100 `_px`/`_py` channels on the
+output reading last frame's
 values for ever.
 
 That is the entire reason there is a Select in front of the output: the trim list is
@@ -395,7 +396,7 @@ is the whole reason the Delete is so slow:
 
 So the rule is not "Select beats Delete" - it is **a short pattern list beats a long
 literal one, whichever operator carries it.** The three `screen_only` operators are
-Deletes because their DROP set is pattern-expressible, and a 2026-08-24 measurement
+Deletes because their DROP set is pattern-expressible, and a measurement
 against literal-keep Selects had them winning on two streams of three and by 1.8x on
 face. `trim_empty` is a Select because its KEEP set is not pattern-expressible.
 

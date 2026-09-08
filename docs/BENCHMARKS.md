@@ -361,6 +361,56 @@ So `One Face Only` — which gates no cooking at all — **saves 0.39 ms** simpl
 making the keep list 362 names shorter. Removing a channel anywhere upstream of the
 trim is paid back at the trim.
 
+### Camera Flip costs nothing — measured 2026-09-08
+
+`Camera Flip` mirrors the image by passing `kCGImagePropertyOrientationUpMirrored`
+to `performRequests:onCMSampleBuffer:orientation:`, so no pixel is touched in Python
+and no buffer is copied. It is one more argument on a call already being made.
+
+WHAT COMES BACK MIRRORED, which is the part worth measuring rather than assuming.
+One frame of `fixtures/hand_clip.mp4`, run twice:
+
+| | orientation Up | UpMirrored |
+|---|---|---|
+| hand landmarks, mean x | 0.7841 | 0.2278 |
+| depth map vs the Up map | — | mean abs diff 0.2710 |
+| depth map vs the FLIP of the Up map | — | mean abs diff 0.0329 |
+
+The landmark x values sum to 1.0119, which is a mirror. The depth map is **8.2x**
+closer to the flip of the original than to the original, on a map spanning 1.0.
+
+So Vision returns its IMAGE outputs oriented too, not just its coordinates. The
+segmentation mask and the flow field go through the same handler and the same flag.
+Nothing downstream of the sidecar needs flipping - a Flip TOP on the mask, depth or
+flow output would UNDO the mirror rather than apply it.
+
+The one exception is `video_in`: TouchDesigner opens the camera as a second client
+and that image never reaches Vision, so `video_flip` sits between it and the
+composite and is the only Flip TOP in the component.
+
+### What the hand overlay costs — measured 2026-09-08
+
+The hand overlay draws a skeleton, so it needs all 21 joints in world space, and
+`early_trim` sits before `coords` — so `Fingertipsonly` was removing the joints
+before they could be composed. The toggle now applies at `trim_empty` instead while
+a hand overlay is on, which leaves the output identical and lets `coords` see all 21.
+
+`coords/world`, 40 forced cooks each, one hand present.
+
+| | joints reaching `coords` | `sel_tx`+`sel_ty` | `math_tx`+`math_ty` | branch |
+|---|---|---|---|---|
+| `Fingertipsonly`, overlay off | 14 x-channels | 0.0508 ms | 0.0118 ms | **0.073 ms** |
+| overlay on | 44 x-channels | 0.0843 ms | 0.0215 ms | **0.118 ms** |
+
+**0.045 ms**, or 0.3% of a 60 fps frame, to compose every joint instead of the six
+`Fingertipsonly` leaves. The trim moves rather than lifts: `out1` carries 46 channels
+and zero non-tip joints in both states, verified by toggling.
+
+Worth stating because the reverse was assumed. The saving `early_trim` exists for is
+real at the FACE, where `Facekeypoints` strips 348 landmark channels and
+`face/coords/lm_world` costs 0.7751 ms — two orders of magnitude more than this. A
+face overlay will have to pay that; the hands never did.
+
 ### One `coords` at the master instead of three — measured 2026-08-24
 
 89 frames, everything cooking, synthetic senders on all three ports.
@@ -501,3 +551,60 @@ worse than one that is wrong, because there is no way to tell which is which.
 Ref: `design/DESIGN.md` §2 is where each measurement is argued rather than listed —
 2.14 (COMP cost by configuration), 2.15 (the one output), 2.18 (segmentation), 2.19 (the
 transport), 2.20 (the mask into TD), 2.21 (input-less Script TOPs), 2.22 (depth).
+
+## TOP readback to CPU — measured 2026-09-07
+
+What `Input Mode = TOP Input` has to pay every frame, on TouchDesigner's main thread,
+to get pixels out of a TOP and into a shared buffer. `TOP.numpyArray(delayed=False)`,
+12 samples per resolution, reference M4 Pro.
+
+| resolution | median | min | max |
+|---|---|---|---|
+| 640 x 360 | **0.05 ms** | 0.05 | 3.88 |
+| 1280 x 720 | **0.26 ms** | 0.21 | 3.31 |
+| 1920 x 1080 | **0.57 ms** | 0.54 | 10.03 |
+
+Against a 33.3 ms frame interval and the 3.41 ms hands already costs, 720p input is
+affordable. This was the open risk on the feature and it is answered: the readback is
+not what makes TOP input expensive.
+
+**The maxima are the part to design around, not the medians.** `delayed=False` forces a
+GPU sync, so a frame that arrives mid-render stalls - 3.3 ms at 720p, 10 ms at 1080p.
+`numpyArray(delayed=True)` returns the PREVIOUS frame instead and does not stall, which
+costs one frame of latency and removes the spike. For a capture path already one frame
+behind, that is the right trade.
+
+## Optical flow — measured 2026-09-07
+
+`VNTrackOpticalFlowRequest`, reference M4 Pro, synthetic textured frames shifted a known
+number of pixels. Median of four after a warm-up.
+
+| accuracy | 1280 x 720 |
+|---|---|
+| `low` | **16.2 ms** |
+| `medium` | **18.9 ms** |
+| `high` | **30.1 ms** |
+
+Against a 33.3 ms frame interval and depth's 23 ms, this is a HEAVYWEIGHT stream: even
+`low` is five times hands' 3.41 ms, and `high` cannot hold 30 fps on its own.
+
+**The output is FULL input resolution**, unlike the segmentation mask which comes back
+at 256x192. Two float32 components a pixel:
+
+| input | flow | per frame |
+|---|---|---|
+| 640 x 360 | 640 x 360 | 1.8 MB |
+| 1280 x 720 | 1280 x 720 | **7.2 MB** |
+
+So the transport moves 7.2 MB a frame at 720p - 216 MB/s at 30 fps - against the mask's
+48 KB. It goes through the same shared-memory path, where that is two memcpys and no
+socket, but it is the reason this stream is off by default and worth a smaller input.
+
+**The sign convention is BACKWARD flow**, measured rather than assumed: content moved
++6 px in x reads **-5.53**. The vector points from the current frame back to where the
+content came from, which is what a warp wants. The values are in image coordinates -
+TOP-LEFT origin, unlike every channel this project publishes.
+
+**The first frame after a start produces no observation at all**, because flow is a
+comparison. That is not counted as a failure; anything downstream sees the first field
+arrive one frame late.

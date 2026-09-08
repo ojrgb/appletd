@@ -12,9 +12,8 @@
     one, because a face carries both a bounding box and 174 points that are
     normalised to that box rather than to the image.
 
-EVERY STREAM, ONE SET OF PARAMETERS. This used to be hands-only, inside the hands
-COMP, because hands came first. A body's joints and a face's box want exactly the
-same conversion, and one Ortho Width has to serve all three or they disagree about
+EVERY STREAM, ONE SET OF PARAMETERS. A body's joints and a face's box want exactly
+the same conversion, and one Ortho Width has to serve all three or they disagree about
 where the world is - which is why the parameters live on the master COMP and every
 stream's branches read them through `op.Appletd`.
 
@@ -135,10 +134,9 @@ FULL_INPUT = "in2"
 FULL_SOURCE = "merge_streams"
 
 # ---- layout -----------------------------------------------------------------
-# The group's position inside its stream comes from `appletd/td_layout.py`, the
-# one table for it - this script and td_add_filter.py both used to place their group
-# at (-400, -300), on top of each other, with nothing able to notice. The positions
-# INSIDE the group are here, beside the code that builds them.
+# The group's position inside its stream comes from `appletd/td_layout.py`, the one
+# table for it - two builders choosing their own coordinates put groups on top of each
+# other and nothing notices. The positions INSIDE the group are here.
 COL_W = 200
 ROW_H = 150
 # Column 0 is the group's In CHOP; each branch occupies one ROW at columns 1 and 2;
@@ -187,7 +185,7 @@ HALVES = (
     # name        toggle          the suffixes            box branches
     ("world", "Coordstx", ("_tx", "_ty", "_tw", "_th"), "keypoints"),
     ("pixels", "Coordspx", ("_px", "_py", "_pw", "_ph"), "keypoints"),
-    # STILL SEPARATE COMPS, on the SAME toggle since 2026-08-24. `Lmcoordstx` and
+    # STILL SEPARATE COMPS, on the SAME toggle. `Lmcoordstx` and
     # `Lmcoordspx` were collapsed into the two above by request - needing both on
     # before a face landmark reached world space was a distinction nobody wanted -
     # and the COMPs stay split because `Facekeypoints` freezes exactly these two and
@@ -374,10 +372,7 @@ def _clear_keeping_ports(td, group, ports):
         # a snapshot of `children` taken before the loop can hold a reference to an
         # operator a previous iteration removed - and touching it raises "Invalid OP
         # object. The node this python object referenced has likely been deleted."
-        #
-        # MEASURED, twice, and the first time it was written off as MCP flakiness:
-        # it only started happening when `tmp_motion_callbacks` moved inside this
-        # group, and it left the group half-built at 5 operators of 74.
+        # It leaves the group half-built, and reports nothing useful when it does.
         if not child.valid:
             continue
         if child.name in ports:
@@ -422,7 +417,7 @@ def _apply_rename(node, names, old_suffix, new_suffix, failures, label):
     node.par.renamefrom = "*" + old_suffix
     node.par.renameto = "*" + new_suffix
     node.cook(force=True)
-    # SORTED, and this is a 2026-08-24 correction rather than a loosening.
+    # SORTED, and this is a correction rather than a loosening.
     #
     # MEASURED: a Select CHOP emits in PATTERN-TERM order, not input order. With one
     # term - which is every per-stream pattern this file ever used - the two are the
@@ -453,8 +448,8 @@ def _apply_rename(node, names, old_suffix, new_suffix, failures, label):
         # channels there is nothing to rename, and the rename map is still correct -
         # it just cannot be demonstrated. That happens whenever the branch reads a
         # group `allowCooking` has frozen, or a stream that is switched off, and it
-        # used to be reported as four failures on a network that was fine. A check
-        # that cries wolf hides the next real failure among its noise.
+        # must not read as a failure: a check that cries wolf hides the next real one
+        # among its noise.
         if not any(inp.numChans for inp in node.inputs):
             return "unverified"
         failures.append("%s: renaming produced %r, expected %r"

@@ -1,31 +1,22 @@
 """The handoff: how a LandmarkFrame gets from the capture thread to TD's cook.
 
-This module is the insulation layer between the engine and TouchDesigner
-(DESIGN.md 5). It imports NO pyobjc at module scope - `InProcessSource` imports
-`engine` lazily, inside `start()`. That is not tidiness:
+The insulation layer between the engine and TouchDesigner. Imports NO pyobjc at module
+scope - `InProcessSource` imports `engine` lazily inside `start()` - so the interface
+and the box stay importable and testable without dragging AVFoundation into the
+process, and an out-of-process source can be swapped in as a transport change.
 
-  * `td/hands_chop.py` needs the `HandSource` type and the box to write its
-    cook function against, and must be importable, testable and readable
-    without dragging AVFoundation into the process.
-  * The whole point of a `HandSource` interface is that an out-of-process or
-    C++-backed source (DESIGN.md 9) can be swapped in as a *transport* change.
-    A module-scope `import Vision` here would make pyobjc a hard dependency of
-    the interface itself, which is precisely backwards.
+THE CONTRACT THAT MATTERS: `latest()` NEVER BLOCKS. TouchDesigner cooks on one main
+thread, so a Script CHOP that could wait on a lock, a queue or a condition variable is
+one that can freeze the application. There is no code path here from the reader to the
+writer - not a fast one, none.
 
-THE CONTRACT THAT MATTERS: `latest()` NEVER BLOCKS. TouchDesigner cooks on a
-single main thread and everything on it is blocking, so a Script CHOP that could
-wait - on a lock, on a queue, on a condition variable - is a Script CHOP that can
-freeze the whole application (DESIGN.md 4.1). There is no code path here from
-the reader to the writer. Not a fast one; none.
+A SINGLE SLOT AND NOT A QUEUE: TD cooks at its own rate, unrelated to the camera's. A
+queue either grows without bound, with latency creeping up until the overlay follows a
+hand that has already moved, or needs draining logic amounting to "keep only the last
+one" - which is this, without the allocations.
 
-WHY A SINGLE SLOT AND NOT A QUEUE. TD cooks at its own rate, unrelated to the
-camera's. A queue either grows without bound - latency creeping up until the
-overlay is following a hand that has already moved - or needs draining logic
-that amounts to "throw away everything but the last one", which is what this is,
-without the intermediate allocations. For a realtime overlay the correct policy
-is "most recent result, discard what the renderer never saw" (DESIGN.md 4.3).
-
-Ref: DESIGN.md 4.3 (the lock-free slot), 5 (module layout), 6.1 (LandmarkFrame).
+Thread: the writer is the capture queue; the reader is whichever thread cooks.
+Ref: DESIGN.md 4.3, 5, 6.1.
 """
 
 from __future__ import annotations
@@ -45,6 +36,7 @@ from appletd.streams import (
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
     REQUEST_DEPTH,
+    REQUEST_FLOW,
     REQUEST_SEGMENT,
     STREAM_FACE,
     STREAM_HANDS,
@@ -58,6 +50,7 @@ if TYPE_CHECKING:
     # still gets the real types instead of a pile of `# type: ignore`.
     from appletd.depth import DepthFrame
     from appletd.engine import HandEngine
+    from appletd.flow import FlowImage
 
     # `pins` imports numpy AT MODULE SCOPE, and this module promises to be importable
     # with neither pyobjc nor numpy present - `appletd/__init__.py` says the core
@@ -110,42 +103,22 @@ FrameT = TypeVar("FrameT", bound=TimedFrame)
 class LatestBox(Generic[FrameT]):
     """A single-slot, lock-free latest-value box. One writer, many readers.
 
-    GENERIC over the frame type because there is now more than one stream, and
-    every subtlety below - the atomic rebind, the frame-before-clock ordering in
-    `age_ms`, the single-writer counters - applies identically to a pose frame.
-    Duplicating this class per stream would duplicate the reasoning, and it is
-    the reasoning rather than the code that is expensive here. `LatestFrameBox`
-    and `LatestPoseBox` are the two concrete boxes.
+    Generic over the frame type: every subtlety below applies identically to a hand,
+    a pose and a face frame, and it is the reasoning rather than the code that is
+    expensive to duplicate.
 
     Thread: `publish()` is called from the capture thread and ONLY from there.
             `latest()` may be called from any thread, as often as it likes, and
             cannot block.
 
-    WHY THIS NEEDS NO LOCK, precisely - because "it's atomic" is the kind of
-    claim that is right until it isn't:
+    It needs no lock because the only shared mutable state is `_frame`, and updating
+    it is a single attribute rebind - atomic under the GIL, so a reader sees the old
+    reference or the new one and never a half-written pointer. The frame itself is
+    frozen and its contents immutable, so a reader that got the old one can keep
+    reading it safely while the writer moves on.
 
-      * The only shared mutable state is `_frame`, and updating it is a single
-        attribute rebind. CPython's GIL makes that store atomic with respect to
-        other bytecode: a reader sees either the old reference or the new one,
-        never a half-written pointer.
-      * `LandmarkFrame` is a FROZEN dataclass of immutable values, so a reader
-        holding the old reference keeps a fully-formed frame. Nothing mutates
-        under it. This is the property that makes the missing lock safe, and it
-        is why unfreezing those dataclasses would be a concurrency change rather
-        than a style change.
-      * Every counter has exactly ONE writer thread. `+=` is not atomic by the
-        language definition - it is a load, an add and a store - so two writers
-        could in principle lose counts. Honesty about the evidence: the M3
-        review could not actually lose a count on CPython 3.11, even with six
-        threads and a 1 microsecond switch interval, because the eval breaker is
-        not polled between those three bytecodes. So the single-writer rule here
-        is discipline against an implementation detail changing, not a fix for
-        an observed race. It costs nothing to keep. `_n_published` is written
-        only by the publishing thread and `_n_read` only by a reader.
-
-    What a reader can observe: a frame one publish behind the very latest. That
-    is not a race to fix, it is the design - the alternative is waiting, and
-    waiting is the one thing the main thread must never do.
+    `age_ms` reads the FRAME before the clock, deliberately: the other order can
+    report a negative age when a publish lands between the two reads.
     """
 
     def __init__(self, blank: FrameT) -> None:
@@ -206,7 +179,7 @@ class LatestBox(Generic[FrameT]):
         # Frame FIRST, clock second. Sampling `now` first leaves a window - the
         # reader can be preempted between the two lines, default switch interval
         # 5 ms - in which a newer frame lands with captured_at later than `now`,
-        # and the age comes out NEGATIVE. Measured by the M3 review: 55 negative
+        # and the age comes out NEGATIVE. Measured: 55 negative
         # readings in 7.5M against a fast synthetic producer, worst -6.3 ms. It
         # never happened against the real engine, because Vision's ~3.4 ms
         # covers the window - but FakeSource is what the CHOP is developed
@@ -255,7 +228,7 @@ class HandSource(Protocol):
 
     runtime_checkable so `isinstance(source, HandSource)` works and conformance
     can be ASSERTED rather than assumed. Without it, nothing in the repo bound a
-    HandSource, so mypy never checked conformance either - the M3 review deleted
+    HandSource, so mypy never checked conformance either - it turned out
     `FakeSource.errors` and the whole suite stayed green under ruff and
     mypy --strict alike. Note what isinstance does and does not buy: it checks
     that the attributes exist, not that they have the right signatures. The
@@ -337,10 +310,15 @@ class InProcessSource:
                  streams: tuple[str, ...] = DEFAULT_STREAMS,
                  on_mask: Callable[[MaskImage], None] | None = None,
                  mask_quality: str = DEFAULT_SEGMENT_QUALITY,
+                 mask_instances: bool = False,
+                 flow_accuracy: str = "low",
+                 frames_path: str | None = None,
                  on_depth: Callable[[DepthFrame], None] | None = None,
+                 on_flow: Callable[[FlowImage], None] | None = None,
                  depth_pins: tuple[Pin, ...] = (),
                  depth_drop_m: float = 0.5,
-                 depth_compute: str = "all") -> None:
+                 depth_compute: str = "all",
+                 flip: bool = False) -> None:
         """`streams` is which Vision requests to run - see appletd/streams.py.
 
         Read once, here, because it is a launch flag: the sidecar is started with
@@ -362,12 +340,20 @@ class InProcessSource:
         # `balanced` gives can ask for it; the default should not spend a third of
         # the frame budget without being asked.
         self._mask_quality = mask_quality
+        self._mask_instances = mask_instances
+        self._flow_accuracy = flow_accuracy
+        # Set means TOP Input: frames arrive through this buffer and no camera is
+        # opened at all. None means the camera, which is the default everywhere.
+        self._frames_path = frames_path
+        self._frames_stop: threading.Event | None = None
+        self._frames_thread: threading.Thread | None = None
         # DEPTH's destination and its configuration. The PINS live here rather than in
         # the detector's defaults because they are a property of the ROOM, not of the
         # model - and a default pin list that silently produced metres for somebody
         # else's room would be the most convincing wrong number in the project. An
         # empty tuple means "no metric claim", which `pins.py` reports as such.
         self._on_depth = on_depth
+        self._on_flow = on_flow
         self._depth_pins = depth_pins
         self._depth_drop_m = depth_drop_m
         self._depth_compute = depth_compute
@@ -394,6 +380,9 @@ class InProcessSource:
         # Stored rather than applied, because the engine - and therefore pyobjc -
         # is not imported until start(). None means "whatever engine.py's
         # measured defaults are", so the defaults live in exactly one place.
+        # CAMERA FLIP. Held rather than acted on: it reaches Vision as an image
+        # ORIENTATION on the request, so nothing here touches a pixel.
+        self._flip = flip
         self._camera_name = camera_name
         self._width_px = width_px
         self._height_px = height_px
@@ -434,15 +423,34 @@ class InProcessSource:
             # and throws the result away, so it is treated as off - and `errors`
             # records it, because a launch flag that quietly did nothing is worse
             # than one that refuses.
-            seg_detector = None
+            # Annotated to the PROTOCOL rather than to either class: the engine
+            # drives the single-person and the instance detector identically.
+            from appletd.segmentation import MaskDetector
+            seg_detector: MaskDetector | None = None
             if REQUEST_SEGMENT in self._streams:
                 if self._on_mask is None:
                     self._retained_errors.append(
                         "segment was requested but no mask destination was given, "
                         "so the request was not built")
                 else:
-                    from appletd.segmentation import SegmentationDetector
-                    seg_detector = SegmentationDetector(self._mask_quality)
+                    if self._mask_instances:
+                        from appletd.segmentation import (
+                            InstanceSegmentationDetector,
+                        )
+                        seg_detector = InstanceSegmentationDetector()
+                    else:
+                        from appletd.segmentation import SegmentationDetector
+                        seg_detector = SegmentationDetector(self._mask_quality)
+
+            flow_detector = None
+            if REQUEST_FLOW in self._streams:
+                if self._on_flow is None:
+                    self._retained_errors.append(
+                        "flow was requested but no destination was given, so the "
+                        "request was not built")
+                else:
+                    from appletd.flow import FlowDetector
+                    flow_detector = FlowDetector(self._flow_accuracy)
 
             depth_detector = None
             if REQUEST_DEPTH in self._streams:
@@ -471,6 +479,9 @@ class InProcessSource:
                 on_mask=self._on_mask if seg_detector is not None else None,
                 depth_detector=depth_detector,
                 on_depth=self._on_depth if depth_detector is not None else None,
+                flow_detector=flow_detector,
+                on_flow=self._on_flow if flow_detector is not None else None,
+                flip=self._flip,
                 camera_name=self._camera_name or DEFAULT_CAMERA_NAME,
                 width_px=self._width_px or DEFAULT_WIDTH_PX,
                 height_px=self._height_px or DEFAULT_HEIGHT_PX,
@@ -497,7 +508,13 @@ class InProcessSource:
             if face_detector is not None:
                 self.face_box.mark_started()
             try:
-                engine.start()
+                if self._frames_path:
+                    # No camera. The engine is made ready to RECEIVE frames and a
+                    # reader thread feeds it from the buffer TouchDesigner writes.
+                    engine.start_frames_only()
+                    self._start_frame_reader(engine)
+                else:
+                    engine.start()
             except Exception as exc:
                 # Not a blind swallow: the exception propagates. But it is
                 # RECORDED first - a caller that only watches the CHOP's health
@@ -508,16 +525,78 @@ class InProcessSource:
                 raise
             self._engine = engine
 
+    def _start_frame_reader(self, engine: HandEngine) -> None:
+        """Feed the engine from the frame buffer until told to stop.
+
+        A THREAD AND NOT A QUEUE, unlike the camera path, because there is no
+        AVFoundation session here to deliver on one - but the guarantee it has to
+        provide is the same: exactly one thread ever calls into the engine, because
+        the detectors hold Vision's inter-frame state and are not thread-safe.
+        """
+        from appletd.frames import FrameBufferReader
+
+        reader = FrameBufferReader(self._frames_path or "")
+        # HELD, so the status line can say whether frames are actually arriving. In
+        # TOP Input mode a sidecar with nothing wired to the COMP's image input runs
+        # perfectly and finds nothing, and without this that is indistinguishable
+        # from a tracking failure.
+        self.frame_reader = reader
+        stop_event = threading.Event()
+
+        def pump() -> None:
+            from appletd.frames import sample_buffer_from_bgra
+            while not stop_event.is_set():
+                try:
+                    newest = reader.latest()
+                except Exception as exc:               # noqa: BLE001
+                    # Recorded, not raised: a malformed frame is the writer's fault
+                    # and killing the reader would take every stream down with it.
+                    self._retained_errors.append("frame read failed: %s" % exc)
+                    stop_event.wait(0.25)
+                    continue
+                if newest is None:
+                    # Nothing new. TouchDesigner writes at its frame rate and this
+                    # polls faster, so this is the common case - a short sleep rather
+                    # than a spin, and short enough not to add latency of its own.
+                    stop_event.wait(0.002)
+                    continue
+                pixels, captured_at = newest
+                try:
+                    engine.submit_sample_buffer(
+                        sample_buffer_from_bgra(pixels, captured_at))
+                except Exception as exc:               # noqa: BLE001
+                    self._retained_errors.append("frame submit failed: %s" % exc)
+                    stop_event.wait(0.25)
+            reader.close()
+
+        thread = threading.Thread(target=pump, name="appletd-frames", daemon=True)
+        thread.start()
+        self._frames_stop = stop_event
+        self._frames_thread = thread
+
+    def _stop_frame_reader(self) -> None:
+        stop_event, thread = self._frames_stop, self._frames_thread
+        self._frames_stop, self._frames_thread = None, None
+        if stop_event is not None:
+            stop_event.set()
+        if thread is not None and thread.is_alive():
+            # Bounded, like `stop()` in the launcher: a reader that will not go is
+            # reported rather than waited on for ever.
+            thread.join(timeout=1.0)
+
     def stop(self) -> None:
         """Stop the engine and release it. Idempotent, and safe after a failed start.
 
         ORDER: stop the engine, THEN drop the reference, and only in a finally.
-        Nulling first - as the first version did - means that if `engine.stop()`
-        raises (a pyobjc exception out of stopRunning, say) the live capture
-        session becomes unreachable: `running` reports False, a retry of stop()
-        is a no-op, and nothing can ever shut it down. Keeping the reference
-        until the stop has actually returned makes a retry possible.
+        Nulling first means that if `engine.stop()` raises - a pyobjc exception
+        out of stopRunning, say - the live capture session becomes unreachable:
+        `running` reports False, a retry of stop() is a no-op, and nothing can ever
+        shut it down. Keeping the reference until the stop has actually returned
+        makes a retry possible.
         """
+        # BEFORE the lock and before the engine: the reader thread calls INTO the
+        # engine, so it has to be stopped first or a frame can arrive mid-teardown.
+        self._stop_frame_reader()
         with self._lifecycle_lock:
             engine = self._engine
             if engine is None:
@@ -619,12 +698,11 @@ class FakeSource:
         self._thread: threading.Thread | None = None
         # ONE EVENT PER RUN, created in start() and owned by that run's thread.
         #
-        # The first version kept a single Event and cleared it in start(). The
-        # M3 review demonstrated what that costs: if a publishing thread had not
-        # finished when stop() returned, a later start() cleared the shared Event
-        # and RESURRECTED the orphan, which then published alongside the new
-        # thread - two writers into one LatestFrameBox, breaking the
-        # single-writer invariant this module's correctness rests on.
+        # A single Event cleared in start() costs this: if a publishing thread has
+        # not finished when stop() returns, a later start() clears the shared Event
+        # and RESURRECTS the orphan, which then publishes alongside the new thread -
+        # two writers into one LatestFrameBox, breaking the single-writer invariant
+        # this module's correctness rests on.
         #
         # Honest accounting of which fix does the work: the barrier that
         # actually prevents this now is stop() keeping `_thread` set when the
@@ -648,9 +726,9 @@ class FakeSource:
         thread = threading.Thread(target=self._run, args=(stop_event,),
                                   name="appletd-fake", daemon=True)
         # Started BEFORE being recorded: if Thread.start() raises - thread
-        # exhaustion - the first version left _thread set, which made running
-        # report True, start() a permanent no-op, and stop() raise
-        # "cannot join thread before it is started" on the teardown path.
+        # exhaustion - recording it first leaves `_thread` set, which makes running
+        # report True, start() a permanent no-op, and stop() raise "cannot join
+        # thread before it is started" on the teardown path.
         thread.start()
         self._thread = thread
         self._stop = stop_event
@@ -676,12 +754,11 @@ class FakeSource:
         Raises: RuntimeError if the publisher will not stop. That is deliberate.
                 The whole value of this class as a test double is that after
                 stop() returns, nothing is still writing into the box a test is
-                about to assert on - and the first version promised exactly that
-                in its docstring while never checking the join result, so a slow
-                frame_factory made it a lie (MEASURED, M3 review: stop()
-                returned with the publisher still running and `running`
-                reporting False). A test double that lies about its own state is
-                worse than no test double.
+                about to assert on. Promising that without checking the join
+                result makes it a lie the moment `frame_factory` is slow: stop()
+                returns with the publisher still running and `running` reporting
+                False. A test double that lies about its own state is worse than
+                no test double.
         """
         stop_event = self._stop
         if stop_event is not None:
@@ -711,7 +788,7 @@ class FakeSource:
         """True while a publisher thread is actually alive.
 
         is_alive() rather than a flag, so this cannot report False while a
-        thread is still writing - the exact lie the M3 review caught.
+        thread is still writing - the exact lie it turned out.
         """
         thread = self._thread
         return thread is not None and thread.is_alive()

@@ -1,30 +1,22 @@
 """Derived attributes: the stateless half, as one pure function.
 
-`derive()` maps one frame's channel values to the derived channels specified in
-docs/ATTRIBUTES.md. It is pure - same input, same output, no clock, no memory -
-which is the whole point: every formula in that document becomes an assertion
-against a synthetic hand, with no TouchDesigner and no camera involved.
+`derive()` maps one frame's channel values to the derived channels in
+docs/ATTRIBUTES.md. Pure - same input, same output, no clock, no memory - so every
+formula in that document becomes an assertion against a synthetic hand, with no
+TouchDesigner and no camera.
 
-WHAT IS NOT HERE, deliberately. Anything with memory: velocity, filters, the
-Schmitt latches, edge pulses, debounce, dwell, refractory windows. Those live in
-native CHOPs, where TouchDesigner does them properly, they are visible in the
-network, and they keep no hidden Python state for a project reload to mishandle.
-This module emits the *levels* those operators act on - a distance, a condition -
-and never the state derived from them over time.
+NOT HERE, deliberately: anything with memory. Velocity, filters, Schmitt latches, edge
+pulses, debounce, dwell. Those live in native CHOPs, where they are visible in the
+network and keep no hidden Python state for a project reload to mishandle. This module
+emits the LEVELS those operators act on, never the state derived over time.
 
-TWO RULES THAT ARE NOT OPTIONAL (docs/ATTRIBUTES.md). An absent hand publishes
-every joint at (0, 0):
+An absent hand publishes every joint at (0, 0), which would make every distance 0 -
+below every engage threshold, so losing a hand would fire pinch, snap and clap at once
+- and `size` 0, making every normalised distance NaN. So `h{i}_valid` gates
+everything, `size` has a floor, and an invalid hand emits zeros.
 
-  * every distance would read 0, which is below every engage threshold, so losing
-    a hand would fire pinch, snap and clap at once;
-  * `size` would be 0, so every normalised distance would be 0/0 - NaN, which
-    spreads silently through TouchDesigner maths and is very hard to trace.
-
-So `h{i}_valid` gates everything, `size` has a floor, and an invalid hand emits
-zeros rather than stale or undefined values.
-
-Ref: docs/ATTRIBUTES.md (the definitions), DESIGN.md 6.2 (the input contract),
-7 (normalised, bottom-left, never flipped).
+Thread: pure and stateless. Safe anywhere.
+Ref: docs/ATTRIBUTES.md, DESIGN.md 6.2, 7.
 """
 
 from __future__ import annotations
@@ -271,6 +263,35 @@ def _hand_channels(view: _HandView, hand: int, params: Params,
         put("tilt", magnitude)
         put("tilt_axis", axis)
 
+        # THE SAME TILT, as three angles - so a hand and a face can be read with one
+        # vocabulary (`f0_angle_x` and friends, renamed).
+        #
+        # A palm turned by `magnitude` about an in-plane axis at `axis` degrees is a
+        # rotation VECTOR, and its components about the image axes are the projection
+        # of that vector. So this is the same measurement in a different basis, not a
+        # new one, and it inherits everything `_tilt` can and cannot do.
+        #
+        # WHAT THE SIGN IS WORTH, and this is the honest part. `axis` comes from the
+        # longest edge of the projected palm triangle, and an EDGE HAS NO DIRECTION -
+        # it is the same line read either way, so `axis` is only defined modulo 180
+        # degrees. The consequence is exact: **`angle_x` and `angle_y` are correct up
+        # to one shared sign flip.** Their RATIO is meaningful, so "leaning mostly
+        # about the horizontal axis" is a real reading; "leaning toward me rather than
+        # away" is not, and no amount of arithmetic here recovers it, because a palm
+        # tilted 30 degrees toward the camera and one tilted 30 away project
+        # identically (DESIGN.md, and `_tilt`'s own docstring).
+        #
+        # Sampling the depth map at the wrist against the middle MCP would settle it,
+        # and that is a follow-on rather than something to fake here.
+        radians = math.radians(axis)
+        put("angle_x", magnitude * math.cos(radians))
+        put("angle_y", magnitude * math.sin(radians))
+        # EXACT, unlike the two above: an in-plane roll is fully determined by a
+        # projection. The same number the `pose` group publishes as `rotation`,
+        # repeated here so the three angles arrive together rather than one of them
+        # depending on a different toggle.
+        put("angle_z", view.angle("wrist", "middle_mcp"))
+
     if "gestures" in groups:
         extended = {f: curls[f] < params.extendedbelow for f in FINGER_NAMES}
         curled = {f: curls[f] > params.curledabove for f in FINGER_NAMES}
@@ -346,7 +367,35 @@ def _twohand_channels(views: list[_HandView], curls: list[dict[str, float]],
     put("hands_distance", math.hypot(a.palm_x - b.palm_x, a.palm_y - b.palm_y) / mean_size)
     put("hands_center_x", (a.palm_x + b.palm_x) / 2.0)
     put("hands_center_y", (a.palm_y + b.palm_y) / 2.0)
-    put("hands_angle", math.degrees(math.atan2(b.palm_y - a.palm_y, b.palm_x - a.palm_x)))
+    # THE LINE JOINING THE PALMS, as three angles - the same vocabulary and the same
+    # decomposition the per-hand angles use, so there is one thing to learn rather
+    # than two.
+    #
+    # `_z` is EXACT: an in-plane bearing, which a projection determines fully.
+    #
+    # `_x` and `_y` are RELATIVE, and the honesty is the whole point. They need the
+    # line's tilt out of the image plane, which needs a depth DIFFERENCE between the
+    # two hands - and the only per-hand depth here is apparent SIZE, which is not
+    # comparable between two different hands: a child's hand at 40 cm and an adult's
+    # at 60 measure alike. So the difference in size is a signed "which hand is
+    # nearer", scale-free and continuous, and NOT a distance. Its direction and its
+    # change are trustworthy; its magnitude is not degrees of anything.
+    #
+    # Sampling the depth map at each palm would make these absolute, and would give
+    # `h{i}_z` a real measurement instead of the proxy. That is the follow-on.
+    across_x, across_y = b.palm_x - a.palm_x, b.palm_y - a.palm_y
+    bearing = math.atan2(across_y, across_x)
+    put("hands_angle_z", math.degrees(bearing))
+    # Signed relative depth along the line: positive when h0 is the NEARER hand, so
+    # the line runs away from the camera in the same sense `h{i}_z` grows.
+    toward = (a.size - b.size) / mean_size
+    # The elevation out of the image plane, then decomposed onto the image axes the
+    # way `_tilt` decomposes a palm's rotation vector - the tilt is about an in-plane
+    # axis PERPENDICULAR to the line, which is why x takes the sine and y the cosine.
+    elevation = math.degrees(math.atan2(
+        toward, math.hypot(across_x, across_y) or 1e-9))
+    put("hands_angle_x", -elevation * math.sin(bearing))
+    put("hands_angle_y", elevation * math.cos(bearing))
     put("index_distance", math.hypot(a.x["index_tip"] - b.x["index_tip"],
                                      a.y["index_tip"] - b.y["index_tip"]) / mean_size)
     put("index_center_x", (a.x["index_tip"] + b.x["index_tip"]) / 2.0)
@@ -401,29 +450,19 @@ def _tilt(view: _HandView, params: Params) -> tuple[float, float]:
     """The palm's rotation OUT of the image plane, as (degrees, axis degrees).
 
     Contract: the first value is 0 when the palm faces the camera square on and
-              approaches 90 as it turns edge-on. The second is the direction of the
-              axis it is leaning about, in the same convention as every other angle
-              here - degrees, 0 = +x, counter-clockwise - and is meaningless when the
-              magnitude is near zero, exactly as a direction is meaningless when speed
-              is near zero.
-    WHY NOT PITCH AND YAW, which is what was asked for. Every existing angle in this
-              module comes from `atan2` on two image coordinates, so all of them are
-              rotations about the camera's Z axis - in-plane. Recovering the other two
-              from a 2D projection needs the one thing a projection destroys: which
-              side of the image plane a point is on. A palm tilted 30 degrees toward
-              the camera and one tilted 30 away project IDENTICALLY. So pitch and yaw
-              cannot be signed, and publishing them unsigned under those names would
-              be a lie about what they are. Magnitude and axis is what the projection
-              actually determines.
-    HOW. The palm triangle's apparent AREA shrinks as the cosine of the tilt, so
-              `acos(area / area_face_on)` is the magnitude. The axis it is leaning
-              about is the triangle's LONGEST remaining extent - the direction that
-              did not foreshorten - so the axis is perpendicular to the direction that
-              did.
-    UNMEASURED, and `params.palmarea` is a GUESS. What should set it is one hand held
-              square on to the camera with `h0_size` and the raw triangle area read
-              off together. Until then `tilt` is monotonic in the right direction with
-              an arbitrary zero.
+              approaches 90 edge-on. The second is the direction of the axis it leans
+              about - degrees, 0 = +x, counter-clockwise - and is meaningless when the
+              magnitude is near zero.
+    Not pitch and yaw: recovering those needs which side of the image plane a point is
+              on, which a projection destroys. A palm tilted 30 degrees toward the
+              camera and one tilted 30 away project identically, so they cannot be
+              signed. Magnitude plus axis is what the projection determines.
+    How:      the palm triangle's apparent AREA shrinks with the cosine of the tilt,
+              so `acos(area / Palmarea)` is the magnitude; the axis is the longest
+              surviving edge, because the palm foreshortens along the direction it
+              leans.
+    `Palmarea` is the zero point and needs calibrating - if a face-on hand reads
+              non-zero tilt, raise it.
     """
     a, b, c = PALM_TRIANGLE
     # Twice the signed triangle area, by the shoelace formula. Normalised by size

@@ -1,33 +1,20 @@
-"""A file-backed mmap carrying one image, with a seqlock. The segmentation transport.
+"""A file-backed mmap carrying one image, with a seqlock.
 
-WHAT THIS OWNS. One shared buffer holding one frame of single-component pixels, and
-the coherence protocol that lets a writer in the sidecar process and a reader inside
-TouchDesigner use it with no locks held across the boundary. It owns nothing else: it
-does not know what a mask is, does not import Vision, and does not import
-TouchDesigner. Both ends are plain files and bytes.
+The transport for every image this component publishes - the segmentation mask, the
+depth map, the optical flow field, and frames going the other way for TOP Input. It
+owns the buffer and the coherence protocol and nothing else: it does not know what a
+mask is, and imports neither Vision nor TouchDesigner. Both ends are files and bytes.
 
-WHY A FILE AND NOT TOUCHDESIGNER'S SHARED MEMORY. Researched and decided
-2026-08-21, and `docs/BUILD_PLAN.md` step 9 has the compiled header layouts. The
-short version: TD's `UT_SharedMem` names its lock `myName + "Mutex"`, which for the
-info segment is 36 characters against macOS's 31-character `shm_open` limit, so a
-segment has to be registered in TD's own name directory - and it only registers for
-the segment's OWNER. A foreign owner would have to reimplement that directory
-protocol AND initialise process-shared `pthread_mutex_t` in shared memory, where the
-receiver's `tryLock(5000)` turns a mistake into a five-second stall of
-TouchDesigner's main thread per frame rather than a clean failure.
+A FILE rather than TouchDesigner's shared memory, because TD's `UT_SharedMem` names
+its lock `myName + "Mutex"` - 36 characters against macOS's 31-character `shm_open`
+limit - so a segment must be registered in TD's own name directory, and it registers
+only for the segment's owner. `mmap` on a file is the same physical pages with no copy
+and no kernel round trip, and it is testable with no TouchDesigner running.
 
-A file in /tmp has none of that. `mmap` on both sides is the same physical pages, so
-there is no copy and no kernel round trip per frame, and the whole thing is testable
-with no TouchDesigner running - which is why this module has tests and TD's protocol
-never could.
-
-WHY A SEQLOCK. The reader runs on TouchDesigner's main thread. Anything that can
-block there is disqualified: a held lock in the writer becomes dropped frames in the
-whole project, not just in this operator. A seqlock never blocks the reader - it
-either gets a coherent frame or it detects that it did not and says so - and the
-caller decides what to do with a miss, which for a mask is "show the previous one".
-
-THE PROTOCOL, and each of the three layers earns its place:
+A SEQLOCK because the reader runs on TouchDesigner's main thread, where anything that
+can block is disqualified: a held lock in the writer becomes dropped frames across the
+whole project. The reader either gets a coherent frame or detects that it did not, and
+the caller decides - which for an image is "show the previous one".
 
     writer                              reader
     seq += 1        (now ODD)           s1 = seq;  if s1 is odd -> retry
@@ -36,34 +23,12 @@ THE PROTOCOL, and each of the three layers earns its place:
     seq_tail = seq                      if seq_tail != s1 -> retry
     seq += 1        (now EVEN)
 
-  * `seq` ODD says a write is in progress. Catches a reader that arrives mid-write.
-  * `seq_tail` catches a whole write that STARTED and FINISHED inside the reader's
-    copy, which the leading counter alone cannot see.
-  * the FENCE is the honest part. Python's interpreter does not reorder these
-    statements, but the CPU may make the tail counter visible before the pixels, and
-    on Apple Silicon that is a weakly ordered store buffer rather than a theoretical
-    one. An uncontended `threading.Lock` acquire/release is a real acquire/release
-    barrier and costs about 50 ns, so it is used as one. It is NOT a C11
-    `atomic_thread_fence` and this module does not claim to be provably correct
-    against the memory model.
+`seq` odd catches a reader arriving mid-write; `seq_tail` catches a whole write that
+started and finished inside the reader's copy. So `seq` advances by TWO per published
+frame, which anything counting dropped frames has to know.
 
-    WHAT THE RESIDUAL RISK COSTS, because that is what makes the trade acceptable:
-    one torn frame - a mask with a band of the previous frame in it - on a stream
-    where the next frame arrives in 16 ms. Not a crash, not a stall, not corruption
-    that persists. If that ever proves visible, the fix is a checksum in the header,
-    which the reserved bytes are there for.
-
-NOT A RING BUFFER. One slot, deliberately. A mask is only ever wanted at its newest,
-so a queue would add latency to deliver frames nobody will draw. The writer
-overwrites; a reader that misses gets the next one 16 ms later.
-
-THREADS AND PROCESSES. `MaskWriter` is written to be used from the capture queue -
-one writer, one thread, no internal locking beyond the fence. `MaskReader` is
-read-only and may be used from any single thread. Two writers on one path is not
-supported and is not detected.
-
-Ref: docs/BUILD_PLAN.md step 9 (the decision and what TD's protocol costs),
-     appletd/coords.py (the y-axis convention this deliberately does not apply).
+Thread: one writer, one reader, no lock held across the boundary.
+Ref: docs/BUILD_PLAN.md step 9.
 """
 
 from __future__ import annotations
@@ -96,21 +61,21 @@ _HEADER: Final = struct.Struct("<IIIIIIIIQdII")
 # numbers mean; teaching it about metres would make it a depth transport rather than
 # a transport. The same reasoning that keeps the y-flip out of here.
 AUX_BYTES: Final = 32
-# 128, not 64. Raised 2026-08-22 when the aux block landed, because 56 + 32 = 88 and
+# 128, not 64. Raised when the aux block landed, because 56 + 32 = 88 and
 # the old reserve had 8 bytes left - a reserve with nothing in it is not a reserve.
 # The payload is hundreds of KB, so 64 more bytes of header costs nothing measurable.
 HEADER_BYTES: Final = 128
 assert _HEADER.size + AUX_BYTES <= HEADER_BYTES, "header + aux must fit the reserve"
 
 MAGIC: Final = 0x56484D42          # 'VHMB' - appletd mask buffer
-# 2 as of 2026-08-22: the header grew from 64 bytes to 128 and gained the aux block.
+# 2 : the header grew from 64 bytes to 128 and gained the aux block.
 # A version bump rather than a silent layout change, so a stale buffer from the
 # previous version fails LOUDLY - the reader says which version it found and which it
 # speaks. Misparsing an old header would give a plausible geometry and garbage pixels.
 VERSION: Final = 2
 
 # The SOURCE frame this image was derived from, and it is in the header because the
-# alternative is a side channel that goes stale. MEASURED 2026-08-22 and this is not
+# alternative is a side channel that goes stale. MEASURED and this is not
 # a nicety: `VNGeneratePersonSegmentationRequest` does NOT return a mask matching its
 # input's aspect ratio. It snaps to one of two shapes per quality level, chosen only
 # by whether the input is wider than it is tall:

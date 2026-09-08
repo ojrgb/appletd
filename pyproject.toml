@@ -71,6 +71,10 @@ ignore = [
 "tools/td_add_install.py" = ["F821"]
 "tools/td_add_about.py" = ["F821"]
 "tools/td_add_pages.py" = ["F821"]
+"tools/td_add_topinput.py" = ["F821"]
+"tools/td_add_video.py" = ["F821"]
+"tools/td_add_overlay.py" = ["F821"]
+"tools/td_add_flow.py" = ["F821"]
 "tools/probe_m1_in_td.py" = [
     "E402",
     # The probe's entire purpose is to survive a failing stage and report which

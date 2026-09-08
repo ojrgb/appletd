@@ -74,10 +74,9 @@ EXAMPLE_PINS = ((0.06, 0.30, 2.5), (0.94, 0.30, 2.4), (0.50, 0.96, 1.1))
 SPARE_PINS = ((0.06, 0.70, 2.5), (0.94, 0.70, 2.4), (0.50, 0.50, 1.8),
               (0.25, 0.10, 3.0), (0.75, 0.10, 3.0))
 
-# Parameters this builder used to own and no longer does. Empty today, and kept
-# because removing the code that creates a parameter does not remove the parameter -
-# `Segment` sat on a page driving nothing for two commits before anybody noticed
-# (docs/BUILD_PLAN.md, TouchDesigner facts). A retire table from the start costs
+# Parameters this builder no longer owns. Empty today, and kept because removing the
+# code that creates a parameter does not remove the parameter - it sits on a page
+# driving nothing, indistinguishable from a working control. A retire table costs
 # nothing and is the only thing that cleans one up.
 RETIRED_PARS: dict[str, str] = {}
 
@@ -97,10 +96,9 @@ import sys
 # install would mean a developer silently running stale code - the two-copies hazard
 # that `Sourceversion` exists to catch one layer up.
 #
-# On anybody else's machine BUILT_AT does not exist, so `Installroot` is used - which
-# is what makes a shipped .tox work at all. Before 2026-08-23 this was a baked
-# absolute path and nothing else, so a .tox carried one person's home directory and
-# failed at its first cook everywhere else.
+# On anybody else's machine BUILT_AT does not exist, so `Installroot` is used, which
+# is what makes a shipped .tox work at all. A baked absolute path carries one person's
+# home directory and fails at its first cook everywhere else.
 _COMP_PATH = %(comp_for_root)r
 %(resolver)s
 
@@ -130,7 +128,7 @@ GAP = 2                 # pixels left clear at the centre, so the pin's own valu
 
 # The reader lives in MODULE GLOBALS and never in operator storage. TouchDesigner
 # PICKLES operator storage into the .toe on save, and an `mmap` cannot be pickled -
-# which is exactly how this project lost the ability to save on 2026-08-21.
+# which is exactly how this project lost the ability to save.
 _READERS = {}
 
 # 16x16, and the SIZE is the diagnostic: a shape nothing else in this path produces,
@@ -200,10 +198,9 @@ def onCook(scriptOp):
     published, units = _corrected(comp, raw, fit)
 
     # THE PINS, into the array before it is published rather than as a second publish.
-    # MEASURED 2026-08-22: drawing used to cost 1.4176 ms against 0.4991 without,
-    # because it corrected the map twice and called `copyNumpyArray` twice - once with
-    # the mono map and again with the RGB one. ONE correction, ONE upload, and the cost
-    # is the widening to three channels and nothing else.
+    # Correcting the map twice and calling `copyNumpyArray` twice - once mono, once
+    # RGB - costs 1.4176 ms against 0.4991 for one pass. ONE correction, ONE upload,
+    # so the cost is the widening to three channels and nothing else.
     #
     # Drawn from the PARAMETERS, not the solve: they show where the pins are
     # CONFIGURED. `Depthfitpins` says how many the solve used, and the two differ
@@ -425,7 +422,7 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from appletd.td_layout import PACKAGE_ROOT_SOURCE, master_xy
+    from appletd.td_layout import OUTPUT_ORDER, PACKAGE_ROOT_SOURCE, master_xy
 
     master = op(MASTER_PATH)
     if master is None:
@@ -470,7 +467,7 @@ def main():
     else:
         # A DELIBERATE RELABEL. Existing parameters keep their labels - a rebuild
         # must not overwrite one somebody edited - so dropping "restart to apply"
-        # from this label on 2026-08-23 needed saying explicitly or it would only
+        # from this label needed saying explicitly or it would only
         # ever have applied to a network built from scratch. `Capturestate` reports
         # "Requires Restart" now, in one place instead of five labels.
         on_par.label = "Use Pins  (metric depth)"
@@ -661,6 +658,10 @@ def main():
     _at(out, master_xy("outdepth"), keep_layout, out_existed)
     # PRESERVED, never recreated - an Out TOP IS a COMP output connector.
     out.inputConnectors[0].connect(fit_top)
+    # The connector number, pinned. Without it a COMP orders its outputs by the
+    # alphabetical name of the Out operators inside it, so a rename would silently
+    # reorder what a project's wires carry. appletd/td_layout.py owns the numbers.
+    out.par.connectorder = OUTPUT_ORDER["outdepth"]
 
     print("2. depth_map -> depth_fit -> outdepth")
     print("   depth_map format=mono32float (fp16 in, widened - copyNumpyArray "

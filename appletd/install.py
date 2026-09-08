@@ -1,31 +1,23 @@
 """What an install needs, decided in Python rather than in TouchDesigner.
 
-WHY THIS IS A PACKAGE MODULE AND NOT A BUILDER. Everything here is arithmetic over
-paths and subprocesses: which interpreter works, what is already on disk, whether it
-is the right version. None of it touches a TouchDesigner object, so all of it can be
-tested against a real filesystem and a real interpreter with no TD running - which is
-the same split that lets `pins.py` be tested against a synthetic frame.
+Arithmetic over paths and subprocesses: which interpreter works, what is on disk,
+whether it is the right version. None of it touches a TouchDesigner object, so all of
+it is testable against a real filesystem with no TD running.
 `tools/td_add_install.py` builds the panel; this decides what the panel is looking at.
 
-THE ONE RULE, and it was learned expensively on 2026-08-23: an interpreter is
-verified by RUNNING `import objc` IN A SUBPROCESS OF IT. Not by its version, not by
-its path, not by `codesign`. Four signals agreed that TouchDesigner's own Python
-would work - `pip install --dry-run` resolved, `pip install --target` exited 0, the
-version was right, and the hardened-runtime flag was in output already read - and the
-import failed on library validation. See docs/BUILD_PLAN.md 21.1.
+THE ONE RULE: an interpreter is verified by RUNNING `import objc` in a subprocess of
+it. Not by its version, not by its path, not by `codesign`. Four other signals once
+agreed that TouchDesigner's own Python would work, and the import failed on library
+validation.
 
-THREE ROUTES WERE TRIED. TouchDesigner's bundled python3.11 cannot load pyobjc: the
-`disable-library-validation` entitlement is on TouchDesigner.app, not on the
-interpreter inside it. Apple's /usr/bin/python3 is 3.9.6 and pyobjc-core has no cp39
-wheel worth having. What works is a relocatable CPython, downloaded - which is also
-what `uv` does.
+TouchDesigner's bundled 3.11 cannot load pyobjc - the `disable-library-validation`
+entitlement is on TouchDesigner.app, not on the interpreter inside it. Apple's
+/usr/bin/python3 is 3.9.6. What works is a relocatable CPython, downloaded.
 
-ARM ONLY, by decision 2026-08-23. Intel Macs are out of scope: they have no Neural
-Engine, so every figure in docs/BENCHMARKS.md is meaningless there and depth in
-particular is several times slower. `require_arm64()` refuses rather than installing
-something that will disappoint.
+ARM ONLY. Intel Macs have no Neural Engine, so every figure in docs/BENCHMARKS.md is
+meaningless there; `require_arm64()` refuses rather than disappointing later.
 
-Ref: docs/BUILD_PLAN.md step 21, docs/ARCHITECTURE.md.
+Ref: docs/BUILD_PLAN.md 21.
 """
 
 from __future__ import annotations
@@ -60,7 +52,7 @@ PYTHON_URL: Final = (
 # means: the release publishes no `.sha256` asset at this path, so this is not a
 # vendor checksum. It is the fingerprint of the exact tarball that was downloaded,
 # pip-installed against `requirements.txt`, and run through all 544 tests on
-# 2026-08-23. A mismatch means "this is not what we verified" - which is a reason to
+# A mismatch means "this is not what we verified" - which is a reason to
 # re-verify, never a reason to skip the check.
 PYTHON_SHA256: Final = (
     "fcba9f3f676c83e07225e38116649f0c6eb94cb4fcc166632cf92769462b6e39"
@@ -129,8 +121,13 @@ RUNTIME_MODULES: Final[tuple[str, ...]] = (
     "engine",
     "face",
     "face_types",
+    # TOP Input's transport. The sidecar imports it whenever Input Mode is not
+    # Camera, so it has to travel - the appletd.motion bug was exactly
+    # this, a runtime module nobody added to this list.
+    "flow",
+    "frames",
     "maskbuf",
-    # ADDED 2026-09-04, and it had been missing since motion.py was written on
+    # Added, and it had been missing since motion.py was written on
     # 08-23. `tools/td_add_temporal.py` generates a Script CHOP that does
     # `from appletd.motion import MotionParams, directions` at COOK time, and that
     # module never travelled - so an install had every other module and not this one.
@@ -172,7 +169,7 @@ EMBEDDED_MODULES: Final[tuple[str, ...]] = RUNTIME_MODULES + PANEL_MODULES
 
 # What `verify_interpreter` imports. Both matter and neither is optional: `objc` is
 # the whole point, and `numpy` was a runtime dependency declared only in the dev
-# requirements until 2026-08-23 - an interpreter with pyobjc and no numpy runs until
+# requirements previously - an interpreter with pyobjc and no numpy runs until
 # `appletd.pins` is imported and then dies.
 _VERIFY_IMPORTS: Final = "import objc, numpy"
 _VERIFY_TIMEOUT_S: Final = 30.0
@@ -278,10 +275,10 @@ fi
 # Written only after everything above succeeded, because its whole job is to answer
 # "is this install complete and current". A stamp written early would say yes about a
 # half-finished install, which is worse than no stamp at all.
-# ASKED, not assumed. This used to write the pinned DOWNLOAD version, which is
-# wrong whenever the probe reused an interpreter that was already here - it recorded
-# 3.11.16 for a 3.11.9 venv. A stamp that misreports what it installed is worse than
-# one that omits it.
+# ASKED, not assumed. Writing the pinned DOWNLOAD version instead is wrong whenever
+# the probe reused an interpreter that was already here - recording 3.11.16 for a
+# 3.11.9 venv. A stamp that misreports what it installed is worse than one that omits
+# it.
 PYVER=$("$PYTHON" -c 'import sys;print("%%d.%%d.%%d"%%sys.version_info[:3])')
 cat > "$ROOT/%(stamp)s" <<STAMPEOF
 {
@@ -596,7 +593,7 @@ def probe(root: str = DEFAULT_INSTALL_ROOT, wanted_version: str = "") -> Install
     The states, and each is a fact rather than a guess:
         missing        no stamp, so nothing has ever been installed here
         incomplete     a stamp, but a module, the packages or the model is absent.
-                       THE MODEL COUNTS as of 2026-08-24 - it was computed here and
+                       THE MODEL COUNTS - it was computed here and
                        then left out of this decision, so an install with no model
                        read "installed", which disables the Install button. Turning
                        `Depth Map` on later left no way to fetch it but Force Install,

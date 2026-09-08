@@ -42,6 +42,11 @@ TEMPLATES: tuple[tuple[str, str, dict[str, Any]], ...] = (
     # so `%%r` in the middle layer is one level of escaping that has now been got
     # wrong seven times in this repository.
     ("td_build_vision.py", "SIDECAR_START_SOURCE", {"comp": "/project1/appletd"}),
+    # The control module. Its `schedule_refresh` builds a `run()` string, so `%%r` in
+    # the middle layer is the escaping this file exists to catch.
+    ("td_build_vision.py", "SIDECAR_CONTROL_SOURCE",
+     {"resolver": "PACKAGE_ROOT", "port": 10000, "comp": "/project1/appletd",
+      "request_toggles": (("hands", "Streamhands"),)}),
 )
 
 

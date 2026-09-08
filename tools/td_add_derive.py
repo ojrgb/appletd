@@ -72,10 +72,9 @@ import sys
 # install would mean a developer silently running stale code - the two-copies hazard
 # that `Sourceversion` exists to catch one layer up.
 #
-# On anybody else's machine BUILT_AT does not exist, so `Installroot` is used - which
-# is what makes a shipped .tox work at all. Before 2026-08-23 this was a baked
-# absolute path and nothing else, so a .tox carried one person's home directory and
-# failed at its first cook everywhere else.
+# On anybody else's machine BUILT_AT does not exist, so `Installroot` is used, which
+# is what makes a shipped .tox work at all. A baked absolute path carries one person's
+# home directory and fails at its first cook everywhere else.
 _COMP_PATH = %(comp_for_root)r
 %(resolver)s
 
@@ -377,10 +376,9 @@ def main():
     _place(chop, stream_xy("derive_chop"), keep, existing_chop is not None)
     chop.par.callbacks = callbacks.path
     # The raw OSC channels are the input; derive() needs the landmark positions.
-    # The FILTERED stream, not the raw input, and this line is a bug fix. It used to
-    # read `in1` and rely on tools/td_add_filter.py repointing it afterwards - which
-    # never happened, because in the documented build order the filter is built
-    # BEFORE this script and had nothing to repoint. Measured on the live network:
+    # The FILTERED stream, not the raw input, and stated HERE rather than left to the
+    # filter builder to repoint later: in the documented build order the filter is
+    # built BEFORE this script and has nothing to repoint. Reading `in1` instead means:
     # `derive_chop` read `in1`, so every derived attribute - every pinch distance,
     # every latch input - was computed on UNSMOOTHED landmarks while the coordinate
     # spaces used smoothed ones. Each consumer states its own input now, which is

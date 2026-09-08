@@ -1,69 +1,37 @@
-"""Person segmentation: `VNGeneratePersonSegmentationRequest` -> a mask of bytes.
+"""Person segmentation: Vision's mask requests -> a mask of bytes.
 
-WHAT THIS OWNS. One Vision request and the extraction of its mask into plain bytes.
-It owns neither the camera nor the transport: `engine.py` owns the capture session
-and hands this module a buffer that has already been delivered, and
-`appletd/maskbuf.py` owns getting the bytes to TouchDesigner. So this file is the
-only place that knows anything about Vision's pixel formats, and `maskbuf.py` is the
-only place that knows anything about sharing memory. Neither imports the other.
+Owns one Vision request and the extraction of its mask into plain bytes. It owns
+neither the camera nor the transport: `engine.py` hands it a buffer that has already
+been delivered, and `maskbuf.py` gets the bytes to TouchDesigner. So this is the only
+file that knows Vision's pixel formats, and `maskbuf.py` the only one that knows about
+sharing memory. Neither imports the other.
 
-WHY IT IS SHAPED LIKE face.py AND pose.py. Same reason and the same boundary rules:
-this is a plug-in on top of engine.py, engine.py does not import it, and a
-segmentation failure cannot break the hands path that a live project is using.
+Two detectors behind one protocol. `SegmentationDetector` answers "is this pixel a
+person" and gives 0 or 255; `InstanceSegmentationDetector` answers "WHICH person",
+giving an instance index per pixel with 0 for background.
 
-THE BOUNDARY RULES, which are not stylistic:
+Boundary rules, not stylistic: imports nothing from TouchDesigner, and NO pyobjc
+object escapes the capture thread - a `CVPixelBuffer` released by the wrong thread
+crashes weeks later. What leaves here is `bytes`, which is why the mask is COPIED out
+of the buffer rather than passed along.
 
-  * imports nothing from TouchDesigner - not `td`, not `op`;
-  * NO pyobjc object escapes the capture thread. A `CVPixelBuffer` handed to
-    another thread would be released by whichever thread dropped the last
-    reference, which is a crash that arrives weeks later (DESIGN.md 4.2). What
-    leaves this module is `bytes`, and that is the whole reason the mask is COPIED
-    out of the buffer here rather than passed along as a buffer.
+The pixel format is CHECKED rather than assumed: reading a two-component buffer as one
+produces an image, and it is the wrong image.
 
-THE FORMAT, and it is CHECKED rather than assumed. The request has a readable
-`outputPixelFormat`, which reports `0x4c303038` - `L008`, one 8-bit component per
-pixel, 0 for background and 255 for person with soft edges between. So the claim is
-verified at construction instead of being a comment that might have gone stale, and
-`mask_bytes_from_pixel_buffer` checks the buffer it is actually handed as well.
-`supportedRevisions()` is `[1]`: revision 1 is the only one there is. Three quality
-levels, and they change the OUTPUT SIZE as well as the cost, which is why
-`maskbuf.py` carries the live geometry in its header instead of assuming it
-(BUILD_PLAN step 9).
-
-CONSTRUCTION IS NOT LIKE THE OTHER REQUESTS, and this cost a probe to find:
-`init` and `new` are both **NS_UNAVAILABLE** on this class, where every other Vision
-request in this project is `alloc().init()`. The designated initialiser is
-`initWithCompletionHandler_`, and nil is the right handler here - with a
-`VNSequenceRequestHandler` the results are on the request object synchronously once
-`performRequests` returns, so a completion block would be a second path to the same
-data.
-
-ROW PADDING IS THE TRAP. `CVPixelBufferGetBytesPerRow` is NOT
-`width * bytesPerPixel`: CoreVideo aligns rows, and at 256 wide the padding has been
-observed as zero while at 253 it is not. Reading `height * bytesPerRow` bytes and
-handing them on as a packed image gives a picture that shears progressively down the
-frame - plausible enough on screen to be mistaken for a bad mask. So this module
-un-pads, row by row, and its tests assert that it does.
-
-THREADS. Every function here runs on the GCD capture queue, called from the engine's
-sample-buffer callback, except `verify_segmentation_support` and
-`SegmentationDetector.__init__`, which run on the caller's thread at construction so
-a framework mismatch is reported where it can be acted on.
-
-Ref: docs/BUILD_PLAN.md step 9 (the transport decision and the L008 finding),
-     appletd/maskbuf.py (where the bytes go), DESIGN.md 6.4 (the stream contract).
+Thread: one detector, one serial capture queue. Not thread-safe.
+Ref: DESIGN.md 2.18, 4.2.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Final, NamedTuple
+from typing import Final, NamedTuple, Protocol, runtime_checkable
 
 import Quartz
 import Vision
 
 from appletd.engine import EngineError, ObjCObject
-from appletd.streams import SEGMENT_QUALITIES
+from appletd.streams import ORIENTATION_UP, SEGMENT_QUALITIES
 
 # The quality levels come from `streams.py`, which is pyobjc-free: `sidecar.py` needs
 # the same list for its command line and must stay importable with no frameworks
@@ -106,6 +74,9 @@ class MaskImage(NamedTuple):
     seq: int
     captured_at: float
     inference_ms: float
+    # How many people the instance model separated, 0 for the single-person request.
+    # Defaulted, so every existing construction is unchanged.
+    people: int = 0
 
     @property
     def coverage(self) -> float:
@@ -202,6 +173,113 @@ def _four_cc(value: int) -> str:
     return text if text.isprintable() else "?"
 
 
+@runtime_checkable
+class MaskDetector(Protocol):
+    """What the engine needs of a segmentation detector, whichever request it holds.
+
+    Two implementations: `SegmentationDetector` answers "is this pixel a person" and
+    `InstanceSegmentationDetector` answers "which person is it". The engine drives
+    them identically, so it should depend on the shape rather than on either class.
+    """
+
+    failures: int
+    last_inference_ms: float
+
+    def detect_pixel_buffer(self, pixel_buffer: ObjCObject, seq: int,
+                            captured_at: float,
+                            orientation: int = ORIENTATION_UP) -> MaskImage | None: ...
+
+    def detect_sample_buffer(self, sample_buffer: ObjCObject, seq: int,
+                             captured_at: float,
+                             orientation: int = ORIENTATION_UP) -> MaskImage | None: ...
+
+
+def verify_instance_segmentation_support() -> None:
+    """`VNGeneratePersonInstanceMaskRequest` exists. macOS 14+."""
+    if getattr(Vision, "VNGeneratePersonInstanceMaskRequest", None) is None:
+        raise EngineError(
+            "this Vision has no VNGeneratePersonInstanceMaskRequest - multi-person "
+            "masks need macOS 14 or newer. Switch Multi-Person off to use the "
+            "single-person request, which works everywhere this component runs.")
+
+
+class InstanceSegmentationDetector:
+    """People separated from each other, not just from the background.
+
+    THE MASK MEANS SOMETHING DIFFERENT HERE, and that is the whole point.
+    `VNGeneratePersonSegmentationRequest` answers "is this pixel a person" and gives
+    0 or 255. This one answers "WHICH person is this pixel", and Vision hands that
+    back natively as `instanceMask` - one component per pixel, carrying the instance
+    INDEX, with 0 for background.
+
+    So a project that wants the old union does `> 0` and has it. Going the other way
+    is impossible, which is why the index form is what gets published.
+
+    Vision separates at most FOUR people. `people` reports how many it actually
+    found, so a project can tell "nobody" from "five in frame and one merged away".
+
+    Thread: NOT thread-safe, exactly like `SegmentationDetector`. One detector, one
+            serial capture queue.
+    """
+
+    def __init__(self) -> None:
+        verify_instance_segmentation_support()
+        self._sequence = Vision.VNSequenceRequestHandler.alloc().init()
+        # `initWithCompletionHandler_` for the same reason the other request uses it:
+        # `init` and `new` are NS_UNAVAILABLE on these classes.
+        self._request = (Vision.VNGeneratePersonInstanceMaskRequest.alloc()
+                         .initWithCompletionHandler_(None))
+        self.revision = int(self._request.revision())
+        # No quality level on this request - it has none to set, which is why
+        # `Segquality` is documented as applying to the single-person path only.
+        self.quality = "instances"
+        self.last_inference_ms = 0.0
+        self.failures = 0
+
+    def detect_pixel_buffer(self, pixel_buffer: ObjCObject, seq: int,
+                            captured_at: float,
+                            orientation: int = ORIENTATION_UP) -> MaskImage | None:
+        started_s = time.perf_counter()
+        ok, err = self._sequence.performRequests_onCVPixelBuffer_orientation_error_(
+            [self._request], pixel_buffer, orientation, None)            # TRAP: out-param
+        self.last_inference_ms = (time.perf_counter() - started_s) * 1e3
+        if not ok:
+            raise EngineError("Vision performRequests failed: %s" % (err,))
+        return self._mask_from_results(seq, captured_at)
+
+    def detect_sample_buffer(self, sample_buffer: ObjCObject, seq: int,
+                             captured_at: float,
+                             orientation: int = ORIENTATION_UP) -> MaskImage | None:
+        started_s = time.perf_counter()
+        ok, err = self._sequence.performRequests_onCMSampleBuffer_orientation_error_(
+            [self._request], sample_buffer, orientation, None)           # TRAP: out-param
+        self.last_inference_ms = (time.perf_counter() - started_s) * 1e3
+        if not ok:
+            raise EngineError("Vision performRequests failed: %s" % (err,))
+        return self._mask_from_results(seq, captured_at)
+
+    def _mask_from_results(self, seq: int, captured_at: float) -> MaskImage | None:
+        results = list(self._request.results() or [])
+        if not results:
+            self.failures += 1
+            return None
+        observation = results[0]
+        # `instanceMask` rather than `generateScaledMaskForImage...`: the scaled call
+        # returns ONE mask for a chosen set of instances, so index-encoding through it
+        # would mean one Vision pass per person and a composite afterwards. The
+        # instance mask already carries the indices, and the existing `Maskfit` path
+        # is built to scale a small mask up (docs/ATTRIBUTES.md, Segmentation).
+        buffer = observation.instanceMask()
+        if buffer is None:
+            self.failures += 1
+            return None
+        width, height, pixels = mask_bytes_from_pixel_buffer(buffer)
+        instances = observation.allInstances()
+        people = int(instances.count()) if instances is not None else 0
+        return MaskImage(width, height, pixels, seq, captured_at,
+                         self.last_inference_ms, people)
+
+
 class SegmentationDetector:
     """Holds Vision's segmentation request state and turns buffers into MaskImages.
 
@@ -246,7 +324,8 @@ class SegmentationDetector:
         self.failures = 0
 
     def detect_pixel_buffer(self, pixel_buffer: ObjCObject, seq: int,
-                            captured_at: float) -> MaskImage | None:
+                            captured_at: float,
+                            orientation: int = ORIENTATION_UP) -> MaskImage | None:
         """The replay path: a CVPixelBuffer, from a decoded fixture or a converted frame.
 
         Contract: returns None when Vision produced no observation, and COUNTS it in
@@ -255,15 +334,16 @@ class SegmentationDetector:
                   which is a different thing from finding nobody in frame.
         """
         started_s = time.perf_counter()
-        ok, err = self._sequence.performRequests_onCVPixelBuffer_error_(
-            [self._request], pixel_buffer, None)            # TRAP: out-param
+        ok, err = self._sequence.performRequests_onCVPixelBuffer_orientation_error_(
+            [self._request], pixel_buffer, orientation, None)            # TRAP: out-param
         self.last_inference_ms = (time.perf_counter() - started_s) * 1e3
         if not ok:
             raise EngineError("Vision performRequests failed: %s" % (err,))
         return self._mask_from_results(seq, captured_at)
 
     def detect_sample_buffer(self, sample_buffer: ObjCObject, seq: int,
-                             captured_at: float) -> MaskImage | None:
+                             captured_at: float,
+                             orientation: int = ORIENTATION_UP) -> MaskImage | None:
         """The live path: a CMSampleBuffer straight from the camera, unconverted.
 
         The camera's native 420v goes into Vision with no conversion at all -
@@ -271,8 +351,8 @@ class SegmentationDetector:
         (DESIGN.md 3). Only the MASK comes back as one component.
         """
         started_s = time.perf_counter()
-        ok, err = self._sequence.performRequests_onCMSampleBuffer_error_(
-            [self._request], sample_buffer, None)           # TRAP: out-param
+        ok, err = self._sequence.performRequests_onCMSampleBuffer_orientation_error_(
+            [self._request], sample_buffer, orientation, None)           # TRAP: out-param
         self.last_inference_ms = (time.perf_counter() - started_s) * 1e3
         if not ok:
             raise EngineError("Vision performRequests failed: %s" % (err,))

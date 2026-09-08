@@ -37,7 +37,7 @@ adjusted" on purpose:
     every boolean and pulse       found, pinching, the edge pulses
     every counter and age         seq, age_ms, n_hands, sc_*
     every confidence and score    they have no meaning in pixels
-    every ANGLE                   roll, yaw, pitch, hands_angle. There is no such
+    every ANGLE                   the three `angle_[xyz]`. There is no such
                                   thing as a yaw in world units, so an angle has no
                                   companion to be redundant with
 
@@ -92,7 +92,7 @@ def _apply(comp):
     """Write the delete scope from the streams that are ON, and set the bypass.
 
     ONE OWNER for this operator. It was three nodes with a bypass until the coordinate
-    spaces moved to the master on 2026-08-24 (BUILD_PLAN step 25), and then one node
+    spaces moved to the master (BUILD_PLAN step 25), and then one node
     whose scope was fixed at build - which meant a face-only project still paid for 26
     hands and pose terms it could never match. A Delete CHOP's cost is list length x
     input channels whether a term matches or not.
@@ -308,7 +308,7 @@ _HANDS_LOOSE = " ".join(
 
 # AND THE ONE THAT FITS, which uses NOTHING but `?` and `*`.
 #
-# MEASURED 2026-08-24: the literal list this replaced cost **0.4885 ms** per cook -
+# MEASURED: the literal list this replaced cost **0.4885 ms** per cook -
 # the most expensive single operator in the component outside the face landmarks, and
 # every microsecond of it spent deciding which channels to throw away. A Delete CHOP's
 # cost is list length x input channels, so 24 terms against 100 names is the saving.
@@ -359,7 +359,7 @@ _HANDS = " ".join(
 # with a composed twin, so it still gets deleted.
 # GROUPED BY STREAM, and that grouping is the point rather than a tidiness.
 #
-# MEASURED 2026-08-24, live, with only the face stream running: this operator cost
+# MEASURED, live, with only the face stream running: this operator cost
 # **0.8285 ms** - the biggest single thing in the component - carrying 42 terms of
 # which 26 were hands and pose terms that could not match anything, because
 # `early_trim` had already taken those streams out. A Delete CHOP's cost is list
@@ -469,13 +469,13 @@ def _build_one(td, master, stream, doomed, optional, engaged, failures, node_xy,
     node.par.discard = "scoped"
     # A VERIFIED PATTERN where one exists, the literal list where none does.
     #
-    # MEASURED 2026-08-24 in a fresh project: this operator was the single most
+    # MEASURED in a fresh project: this operator was the single most
     # expensive thing in the component. `face/screen_only` carried 356 literal names
     # over 1,083 input channels and cost **2.1595 ms a frame** - more than everything
     # else put together, and it was paying that with the sidecar switched OFF.
     #
     # A Delete CHOP's cost grows with list length x input channels (BENCHMARKS.md).
-    # It is still the right OPERATOR here - measured again on 2026-08-24 against a
+    # It is still the right OPERATOR here - measured again against a
     # Select carrying the complement, and the Delete won on two streams of three and
     # by 1.8x on face - because its list is patterns and the Select's would be names.
     #

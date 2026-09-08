@@ -21,10 +21,10 @@ frame wide, so reading a channel from here samples whatever frame the read lands
 on: a pulse is almost certainly missed, and a held state says nothing about how it
 got there.
 
-The first version of this tool recorded a Trail CHOP instead, and it was WRONG in
-a way worth writing down. A diagnostic branch with nothing downstream does not
-cook - TouchDesigner has no reason to cook it - so the Trail advanced only when
-this script forced it, and its 1200-sample "history" was a record of when the
+NOT a Trail CHOP, and the reason is worth knowing. A diagnostic branch with nothing
+downstream does not cook - TouchDesigner has no reason to cook it - so a Trail
+advances only when a script forces it, and its 1200-sample "history" is a record of
+when the
 script ran rather than of what the network did. It reported a rock-steady
 distance through a sweep that had unquestionably swept. Neither `viewer = True`
 nor a Null CHOP downstream fixes it; only a real consumer does.
@@ -50,7 +50,7 @@ and each has a distinct failure it catches:
                other sweep leaves slot 1 empty, so this is the only thing that
                ever exercises that column.
 
-ALL FIVE PASSED on 2026-08-20: +4, +1, clap +3, both +3 on all four per-hand
+ALL FIVE PASSED : +4, +1, clap +3, both +3 on all four per-hand
 counters with clap +0, and absent +0 everywhere.
 
 The same expectations are asserted with no TouchDesigner at all in
@@ -190,8 +190,8 @@ def main():
     store = comp.op(BASELINE_DAT)
     if store is None:
         store = comp.create(td.textDAT, BASELINE_DAT)
-        # Out of the way, from the one layout table. It used to land wherever
-        # `create` put it, which was in the middle of the attribute layer.
+        # Out of the way, from the one layout table - `create` otherwise puts it in
+        # the middle of the attribute layer.
         from appletd.td_layout import stream_xy
         store.nodeX, store.nodeY = stream_xy(BASELINE_DAT)
         store.nodeX, store.nodeY = 200, -1800

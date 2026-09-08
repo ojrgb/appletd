@@ -70,7 +70,7 @@ def chan_or_zero(operator, channel):
     """An expression reading one channel by name, safe when the channel is absent.
 
     WHY IT HAS TO BE GUARDED. Indexing a CHOP for a channel that is not there returns
-    **None**, not an error and not zero (MEASURED 2026-08-23). A Constant CHOP's value
+    **None**, not an error and not zero (MEASURED). A Constant CHOP's value
     parameter then does `float(None)` and the operator goes into error:
 
         TypeError: float() argument must be a string or a real number, not 'NoneType'
@@ -142,7 +142,7 @@ import os
 import sys
 %(resolver)s
 # RESOLVED HERE, not baked. This carried `REPO_ROOT = "/Users/<whoever>/..."` until
-# 2026-08-24 with NO fallback at all - so on any other machine the import below simply
+# with NO fallback at all - so on any other machine the import below simply
 # failed and the Script CHOP produced nothing. The worst of the six places a home
 # directory had been baked in, because the others at least said what was wrong.
 _ROOT = _find_package_root(op(%(comp_for_root)r))
@@ -177,10 +177,9 @@ def onCook(scriptOp):
 
 # ---- layout -----------------------------------------------------------------
 # Every coordinate this script writes comes from here. It matters more in this file
-# than anywhere else: `temporal` is 73 operators, and they used to be placed by a
-# SINGLE running counter, so each new operator went 170 further right whatever row
-# it was on. The result was a network 11,590 units wide with ten rows all starting
-# somewhere different - the "spaghetti" this pass exists to fix.
+# than anywhere else: `temporal` is 73 operators, and a single running counter puts
+# each one 170 further right whatever row it is on - a network 11,590 units wide with
+# ten rows all starting somewhere different.
 #
 # One counter PER ROW is the whole change. A row now reads left to right in the
 # order it is built, and the ten rows line up under each other.
@@ -371,10 +370,7 @@ def _clear_keeping_ports(td, group, ports):
         # a snapshot of `children` taken before the loop can hold a reference to an
         # operator a previous iteration removed - and touching it raises "Invalid OP
         # object. The node this python object referenced has likely been deleted."
-        #
-        # MEASURED, twice, and the first time it was written off as MCP flakiness:
-        # it only started happening when `tmp_motion_callbacks` moved inside this
-        # group, and it left the group half-built at 5 operators of 74.
+        # It leaves the group half-built, and reports nothing useful when it does.
         if not child.valid:
             continue
         if child.name in ports:
@@ -419,7 +415,7 @@ def main():
     # UNFREEZE it for the build, and let tools/td_add_groups.py decide the final
     # state - it runs last in the chain precisely so that it can.
     #
-    # WHY, measured 2026-08-22 after a TouchDesigner restart: a project reloads with
+    # WHY, measured after a TouchDesigner restart: a project reloads with
     # this group frozen (its master toggle off in the saved file), so every operator built
     # below cooks to NOTHING and every check in section 4 reports `got ()`. Ten
     # failures on a build that was fine. Worse than the noise, it did not fully
@@ -955,7 +951,7 @@ def main():
     print("\nNOT YET BUILT, and each needs something this file does not have:")
     print("   hands_twist   the derivative of an ANGLE, which wraps at +/-180 and")
     print("                 spikes if differentiated naively. Publish sin/cos of")
-    print("                 hands_angle from derive() and use")
+    print("                 hands_angle_z from derive() and use")
     print("                 cos*d(sin) - sin*d(cos), which is wrap-free")
     print("   steadiness    Trail(Steadywindow) into Analyze, inverted")
     print("   dwell         Count gated on a radius test against a Hold")

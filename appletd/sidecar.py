@@ -1,69 +1,35 @@
-"""The sidecar: camera and Vision in their OWN process, landmarks out over OSC.
+"""The sidecar: camera and Vision in their own process, landmarks out over OSC.
 
     RUN IT
-        ~/.venvs/appletd/bin/python -m appletd.sidecar
-        ~/.venvs/appletd/bin/python -m appletd.sidecar --fps 60 --port 10000
-        ~/.venvs/appletd/bin/python -m appletd.sidecar --slots off
-        ~/.venvs/appletd/bin/python -m appletd.sidecar --streams hands,pose
-
-    STREAMS are launch flags, one Vision request each, and `--port` is the BASE
-    of a block: hands 10000, body pose 10001, face 10002, so no stream's channels
-    can land in another's OSC In CHOP (DESIGN.md 6.4). A stream that is switched
-    off costs no inference but STILL SENDS its channels, as zeros - because TD's
-    OSC In CHOP creates channels as they arrive, so omitting them makes them
-    vanish, and a vanished channel breaks its consumers silently.
-
-    SLOT ASSIGNMENT is on by default: h0 is the right hand, h1 the left, whatever
-    order Vision hands them over in (appletd/slots.py). `--slots off` passes
-    Vision's order straight through. It is read once at startup, so the toggle in
-    TouchDesigner takes effect on the next Start rather than immediately - which is
-    deliberate: there is no control channel INTO this process, and adding one to
-    change a partition would be a lot of machinery for something nobody changes
-    mid-session.
+        python -m appletd.sidecar --port 10000 --streams hands,pose
 
     RECEIVE IT
-        One OSC In CHOP in TouchDesigner per stream, on that stream's port. That
-        is the entire TD side: no Script CHOP, no callbacks DAT, no Python
-        running in TD at all.
+        One OSC In CHOP per stream, on that stream's port. That is the whole
+        TouchDesigner side - no Script CHOP, no Python running in TD.
 
-WHY THIS EXISTS, and it is not a preference. MEASURED inside TouchDesigner
-(DESIGN.md 2.8): the same Vision call costs 2.09 ms on TD's main thread and
-58.90 ms on a background thread in TD's process, and the observation-to-Hand
-conversion pushes that to 190.83 ms because each of its ~126 pyobjc property
-calls waits for the GIL again. Delivery decayed to 13 fps with inter-frame gaps
-swinging from 15 to 203 ms - visibly choppy. TouchDesigner's frame loop holds the
-GIL in long non-yielding stretches, and lowering the switch interval tenfold
-changed nothing.
+`--port` is the BASE of a block: hands 10000, body pose 10001, face 10002, so no
+stream's channels can land in another's OSC In CHOP. Streams are LAUNCH FLAGS, read
+once at startup. A stream that is off costs no inference but still sends its channels
+as zeros: TD's OSC In CHOP creates channels as they arrive, so omitting them makes
+them vanish, and a vanished channel breaks its consumers silently.
 
-In a separate process there is no TD frame loop to compete with, and the same
-work measures 4.38 ms even while TD renders at 60 fps. So the engine, the capture
-thread and the lock-free box all stay exactly as they were - they were never the
-problem - and only their *host* changes.
+Why a separate process: the same Vision call costs 2.09 ms on TouchDesigner's main
+thread and 58.90 ms on a background thread inside it, because TD's frame loop holds
+the GIL in long non-yielding stretches. Here it measures 4.38 ms while TD renders at
+60 fps.
 
-WHAT CROSSES THE BOUNDARY, per tick: 137 hand floats (3480 bytes) plus 4 status
-channels on the base port, 123 pose floats on the next, and 23 face floats on the
-one after. No pixels. TD can
-open the same camera itself for display - measured, both processes receive live
-frames simultaneously - so there is no image to transport.
+Three things the OSC boundary costs, all handled here:
 
-THREE THINGS THE OSC BOUNDARY COSTS US, all measured, all handled here:
+  * OSC floats are 32-bit, so `age_ms` is computed at send time rather than shipping
+    a timestamp - float32 resolution at typical uptime is 1/16 s.
+  * `seq` is exact in float32 only to 2**24, so it is sent modulo SEQ_MODULUS.
+  * a dead sidecar leaves TD's channels FROZEN, not zeroed. `sc_uptime_s` rises for
+    as long as this process lives, which is what tells "sidecar dead" apart from
+    "stream switched off".
 
-  * OSC floats are 32-bit, so `age_ms` is computed at send time rather than
-    shipping a raw timestamp. `time.monotonic()` is genuinely comparable across
-    processes on macOS, but float32 resolution at typical uptime magnitudes is
-    1/16 s, which would make a millisecond age meaningless.
-  * `seq` is exact in float32 only to 2**24, which is 6.5 days at 30 fps, after
-    which it silently stops incrementing. It is sent modulo SEQ_MODULUS.
-  * A dead sidecar leaves TD's channels FROZEN, not zeroed - the OSC In CHOP
-    holds its last value forever. The in-process design got liveness for free;
-    here TD has to derive it. Three signals are available with no Python: the
-    slope of `seq` is zero when the camera stops, the slope of `age_ms` is zero
-    when this process stops, and `sc_uptime_s` rises for as long as the process
-    lives - which is what tells "sidecar dead" apart from "stream switched off",
-    since a disabled stream's own seq is frozen too.
+No pixels cross: TD can open the same camera itself for display.
 
-Ref: DESIGN.md 2.8 (why), 2.9 (the transport), 6.2 (the hands channel contract),
-     6.4 (several streams: the ports, the flags, and the status channels).
+Ref: DESIGN.md 2.8, 2.9, 6.2, 6.4.
 """
 
 from __future__ import annotations
@@ -82,7 +48,7 @@ from appletd.face_types import (
     face_channel_names,
     face_channel_values,
 )
-from appletd.maskbuf import DTYPE_F16, MaskWriter
+from appletd.maskbuf import DTYPE_F16, DTYPE_F32, MaskWriter
 from appletd.osc import datagram_socket, encode_channels
 from appletd.pins import parse_pins
 from appletd.pose_types import blank_pose_frame, pose_channel_names, pose_channel_values
@@ -95,9 +61,13 @@ from appletd.source import (
     PoseSource,
 )
 from appletd.streams import (
+    DEFAULT_FLOW_ACCURACY,
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
+    FLOW_ACCURACIES,
+    FLOW_COMPONENTS,
     REQUEST_DEPTH,
+    REQUEST_FLOW,
     REQUEST_NAMES,
     REQUEST_SEGMENT,
     SEGMENT_QUALITIES,
@@ -105,6 +75,7 @@ from appletd.streams import (
     STREAM_HANDS,
     STREAM_POSE,
     format_streams,
+    pack_mask_aux,
     parse_streams,
     port_for,
     status_channel_names,
@@ -118,6 +89,7 @@ if TYPE_CHECKING:
     # request is not being used. The mask arrives as an argument, never constructed
     # here.
     from appletd.depth import DepthFrame
+    from appletd.flow import FlowImage
     from appletd.segmentation import MaskImage
 
 # Where TouchDesigner's OSC In CHOP listens. Loopback only: this stream is
@@ -137,6 +109,9 @@ DEFAULT_PORT = 10000
 # It has to MATCH `Maskbuffer` on the TouchDesigner side. One default in each place
 # and a parameter on both, which is the same arrangement the OSC port has.
 DEFAULT_MASK_PATH = "/tmp/appletd_mask.buf"
+# Optical flow, in its own buffer. 7.2 MB a frame at 720p against the
+# mask's 48 KB, which is why it is a separate file rather than a bigger one.
+DEFAULT_FLOW_PATH = "/tmp/appletd_flow.buf"
 
 # The depth map's own buffer. A SECOND file rather than a second slot in the first
 # one: the two are different sizes, different dtypes and different cadences, and a
@@ -187,10 +162,15 @@ class Sidecar:
                  streams: tuple[str, ...] = DEFAULT_STREAMS,
                  mask_path: str = DEFAULT_MASK_PATH,
                  mask_quality: str = DEFAULT_SEGMENT_QUALITY,
+                 mask_instances: bool = False,
+                 frames_path: str | None = None,
+                 flow_path: str = DEFAULT_FLOW_PATH,
+                 flow_accuracy: str = DEFAULT_FLOW_ACCURACY,
                  depth_path: str = DEFAULT_DEPTH_PATH,
                  depth_pins: str = "",
                  depth_drop_m: float = 0.5,
-                 depth_compute: str = "all") -> None:
+                 depth_compute: str = "all",
+                 flip: bool = False) -> None:
         """`source` is injectable so the send path can be tested with no camera.
 
         Defaulting to InProcessSource keeps the production path a one-liner; a
@@ -215,6 +195,12 @@ class Sidecar:
         # small and refuses every write.
         self.mask_path = mask_path
         self.mask_quality = mask_quality
+        self.mask_instances = mask_instances
+        self.frames_path = frames_path
+        self.flow_path = flow_path
+        self.flow_accuracy = flow_accuracy
+        self._flow_writer: MaskWriter | None = None
+        self.n_flows_written = 0
         self._mask_writer: MaskWriter | None = None
         self.n_masks_written = 0
         # DEPTH's buffer, on the same terms as the mask's. The PINS are parsed here,
@@ -234,9 +220,13 @@ class Sidecar:
             camera_name=camera_name, slot_mode=slot_mode, streams=streams,
             on_mask=self._write_mask if REQUEST_SEGMENT in streams else None,
             mask_quality=mask_quality,
+            mask_instances=mask_instances,
+            frames_path=frames_path,
+            flow_accuracy=flow_accuracy,
+            on_flow=self._write_flow if REQUEST_FLOW in streams else None,
             on_depth=self._write_depth if REQUEST_DEPTH in streams else None,
             depth_pins=self.depth_pins, depth_drop_m=depth_drop_m,
-            depth_compute=depth_compute)
+            depth_compute=depth_compute, flip=flip)
         # A source can implement one stream and not the other. Asked once, here,
         # rather than per send: with no pose support the pose bundle is sent from
         # a blank frame, which is the same zeros a disabled stream sends.
@@ -274,6 +264,30 @@ class Sidecar:
         self._last_optional_seq: dict[str, int] = {}
 
     # -- the mask -----------------------------------------------------------
+    def _write_flow(self, field: FlowImage) -> None:
+        """Publish one flow field into its own shared buffer.
+
+        Thread: the capture queue, exactly like `_write_mask`, and for the same
+                reason nothing here locks.
+        Contract: may raise OSError or ValueError; the engine counts and records.
+
+        FOUR BYTES PER COMPONENT AND TWO COMPONENTS, so 720p is 7.2 MB a frame - a
+        hundred and fifty times the mask. It still goes through mmap rather than a
+        socket, where that is a memcpy and not a serialise, but it is the reason this
+        stream is off by default.
+        """
+        writer = self._flow_writer
+        if writer is None:
+            writer = MaskWriter(self.flow_path, field.width, field.height,
+                                components=FLOW_COMPONENTS, dtype=DTYPE_F32)
+            self._flow_writer = writer
+            print("flow buffer %s: %dx%d, %d bytes, accuracy %s"
+                  % (self.flow_path, field.width, field.height, writer.capacity,
+                     self.flow_accuracy), flush=True)
+        writer.write(field.pixels, width=field.width, height=field.height,
+                     timestamp=field.captured_at, source=self._source_px())
+        self.n_flows_written += 1
+
     def _write_mask(self, mask: MaskImage) -> None:
         """Publish one mask into the shared buffer.
 
@@ -298,6 +312,10 @@ class Sidecar:
                      self.mask_quality), flush=True)
         writer.write(mask.pixels, width=mask.width, height=mask.height,
                      timestamp=mask.captured_at,
+                     # HOW MANY PEOPLE this mask separates, so the consumer knows
+                     # whether it is holding indices or a 0/255 silhouette. 0 for the
+                     # single-person request. See streams.pack_mask_aux.
+                     aux=pack_mask_aux(mask.people),
                      # The SOURCE geometry, so the far side can undo the anisotropic
                      # stretch. Nothing in the mask itself says what it was scaled
                      # from (DESIGN.md 2.18), and without this the consumer has to
@@ -366,9 +384,9 @@ class Sidecar:
     def start(self) -> None:
         """Open the camera. Does NOT set `running` - see run().
 
-        `running` used to be set here, unconditionally, AFTER source.start().
-        That silently discarded a SIGTERM arriving during start-up, and start-up
-        is where a signal is most likely to land: opening the camera takes ~1.5 s
+        Setting `running` here, after source.start(), silently discards a SIGTERM
+        arriving during start-up - and start-up is where a signal is most likely to
+        land: opening the camera takes ~1.5 s
         of warm-up (MEASURED, DESIGN.md 2.7). The consequence with TouchDesigner's
         launcher is not cosmetic - TD calls terminate(), the sidecar ignores it,
         the 3 s wait expires and TD sends SIGKILL, which skips stop() entirely
@@ -665,7 +683,7 @@ class Sidecar:
                     # off the HANDS sequence - so with hands disabled it read 0.5 fps
                     # and the age climbed to four seconds while depth was running
                     # perfectly. Two numbers that looked like a catastrophe and
-                    # measured nothing. MEASURED 2026-08-22, from a user asking why
+                    # measured nothing. MEASURED, from a user asking why
                     # depth was not working.
                     #
                     # `age` has the same problem and the same fix: it is the HANDS
@@ -688,6 +706,19 @@ class Sidecar:
                     # is precisely why "is depth even on?" could not be answered from
                     # this log. A count that climbs is the whole answer, and the
                     # inference gauge next to it says what it is costing.
+                    # TOP INPUT, whose failure is otherwise invisible: the sidecar
+                    # runs, every request works, and no frame ever arrives because
+                    # nothing is wired to the component's image input. `waiting for
+                    # TouchDesigner` is the whole diagnosis.
+                    reader = getattr(self.source, "frame_reader", None)
+                    if reader is not None:
+                        if reader.frames_read:
+                            parts.append("frames %d" % reader.frames_read)
+                            if reader.frames_skipped:
+                                parts[-1] += " (skipped %d)" % reader.frames_skipped
+                        else:
+                            parts.append("waiting for TouchDesigner to publish a "
+                                         "frame to %s" % reader.path)
                     if REQUEST_SEGMENT in self.streams:
                         parts.append("masks %d" % self.n_masks_written)
                     if REQUEST_DEPTH in self.streams:
@@ -767,6 +798,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="send rate, independent of the camera's rate")
     parser.add_argument("--camera", default=None,
                         help="substring of the camera name; never an index")
+    parser.add_argument("--flip", action="store_true",
+                        help="mirror the camera on the X axis before Vision sees "
+                             "it. FREE: it is an image orientation on the request, "
+                             "so no pixel is touched here - and everything comes "
+                             "back mirrored with it, the landmarks and the mask, "
+                             "depth and flow images alike. Note that chirality "
+                             "follows the mirror: a mirrored left hand IS a right "
+                             "hand, and that is what gets reported.")
     parser.add_argument("--list-cameras", action="store_true",
                         help="print the capture devices and exit. Enumeration "
                              "only - it opens no device, starts no session and "
@@ -794,6 +833,26 @@ def main(argv: list[str] | None = None) -> int:
                         help="where `segment` publishes its mask, as a shared mmap. "
                              "Must match `Maskbuffer` on the TouchDesigner side. "
                              "(default: %(default)s)")
+    parser.add_argument("--flow-path", default=DEFAULT_FLOW_PATH,
+                        help="where `flow` publishes its field, as a shared mmap. "
+                             "Must match `Flowbuffer` on the TouchDesigner side. "
+                             "(default: %(default)s)")
+    parser.add_argument("--flow-accuracy", default=DEFAULT_FLOW_ACCURACY,
+                        choices=list(FLOW_ACCURACIES),
+                        help="optical flow accuracy. MEASURED per frame at 1280x720: "
+                             "low 16.2 ms, medium 18.9, high 30.1 - all of it on the "
+                             "same serial queue as hands' 3.41. (default: %(default)s)")
+    parser.add_argument("--frames-path", default=None,
+                        help="take frames from this shared buffer instead of opening "
+                             "a camera - what `Input Mode = TOP Input` uses. "
+                             "TouchDesigner writes BGRA into it; no capture device is "
+                             "opened at all, so no camera permission is needed.")
+    parser.add_argument("--mask-instances", action="store_true",
+                        help="separate PEOPLE rather than person-from-background, "
+                             "with VNGeneratePersonInstanceMaskRequest. The mask then "
+                             "carries an instance INDEX per pixel (0 background) "
+                             "rather than 0/255, and --mask-quality does not apply - "
+                             "the instance request has no quality level. macOS 14+.")
     parser.add_argument("--mask-quality", default=DEFAULT_SEGMENT_QUALITY,
                         choices=list(SEGMENT_QUALITIES),
                         help="Vision's segmentation quality. MEASURED per frame: "
@@ -848,9 +907,12 @@ def main(argv: list[str] | None = None) -> int:
                       camera_name=args.camera, parent_pid=args.parent_pid,
                       slot_mode=args.slots, streams=streams,
                       mask_path=args.mask_path, mask_quality=args.mask_quality,
+                      mask_instances=args.mask_instances,
+                      frames_path=args.frames_path,
+                      flow_path=args.flow_path, flow_accuracy=args.flow_accuracy,
                       depth_path=args.depth_path, depth_pins=args.depth_pins,
                       depth_drop_m=args.depth_drop,
-                      depth_compute=args.depth_compute)
+                      depth_compute=args.depth_compute, flip=args.flip)
 
     def handle_signal(signum: int, frame: FrameType | None) -> None:
         # Only sets a flag. Doing the teardown here would run camera shutdown

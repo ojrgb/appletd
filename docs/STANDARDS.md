@@ -8,49 +8,67 @@ build; this document is the source of truth for *how*.
 
 ## 1. Comment standard
 
-The goal is that the logic can be understood from the code files alone, without
-`DESIGN.md` open beside them. The rule that keeps that from becoming noise:
-**comments carry information the code cannot** — intent, invariants, units,
-thread context, native-API behaviour, and why the obvious alternative is wrong.
-A comment that restates the line above it is deleted, not tolerated.
+**These files are read by users.** The package ships inside the `.tox` and anyone can
+open it. A comment that reads as a diary entry — what we measured on which date, what
+we tried first, how long something cost — makes the code look unfinished, whatever it
+says about the engineering behind it.
 
-### 1.1 Four tiers, in every file
+So the rule is: **a comment carries information the code cannot, in as few lines as
+will do it.** Intent, invariants, units, thread context, native-API behaviour, and why
+an obvious alternative is wrong. Nothing else.
 
-**Tier 1 — module docstring.** What this module owns; what it must *never*
-import or touch; which thread its code runs on; the `DESIGN.md` section it
-implements. The negative statements matter as much as the positive ones —
-`engine.py` never imports TD, `td/*` never imports pyobjc, and the docstring is
-where that is declared.
+### 1.1 What goes in the code
 
-**Tier 2 — section banners.** `# ---- 75-col rule ----` around a named group of
-concerns, as `reference/spike_vision_hands_live.py` already does. One concern
-per section.
+**Module docstring, 5 to 12 lines.** What this module owns, what it must never import
+or touch, which thread its code runs on, and a `Ref:` line. Negative statements matter
+as much as positive ones — `engine.py` never imports TD, the package never imports
+TouchDesigner — and the docstring is where that is declared.
 
-**Tier 3 — function and class docstrings.** A one-line summary, then whichever
-of these labelled blocks apply:
+**A builder in `tools/` may run to about 25**, because it is a script and its
+docstring is also its usage: how to run it, what it adds to the network, and the one
+or two things that will bite somebody editing it. That is the ceiling, not the target
+— and it buys no history. `td_add_filter.py` was 101 lines, of which about 70 were the
+account of an earlier wrong turn; it is 35 now, and the measurements live in
+`docs/internals/filter-rationale.md`.
+
+**Function and class docstrings.** A one-line summary, then only the labelled blocks
+that apply:
 
 ```
-Thread:    which thread/queue this runs on, and which it must never run on
-Contract:  inputs and outputs with units and coordinate origin stated
-Why:       the design rationale, including why the obvious alternative is wrong
-Traps:     native-API behaviour that has already cost us time
+Thread:    which thread or queue this runs on, and which it must never run on
+Contract:  inputs and outputs, with units and coordinate origin stated
+Traps:     native-API behaviour that will bite the next reader
 Ref:       DESIGN.md section number
 ```
 
-Omit a block rather than pad it. `Thread:` is mandatory on anything that can run
-off the main thread. `Contract:` is mandatory anywhere a coordinate or a unit
-crosses a function boundary.
+`Thread:` is mandatory on anything that can run off the main thread. `Contract:` is
+mandatory anywhere a coordinate or a unit crosses a function boundary. Omit a block
+rather than pad it, and prefer one sentence to three.
 
-**Tier 4 — inline comments.** On every non-obvious line: why it is written that
-way, what invariant it preserves, what the native call actually does. Every
-pyobjc gotcha is annotated at its own call site, not once at the top of the
-file — the out-param pattern in particular:
+**Inline comments.** On a line whose reason is not visible: what invariant it
+preserves, what the native call actually does. One or two lines. Every pyobjc gotcha
+is annotated at its own call site:
 
 ```python
 ok, err = seq.performRequests_onCMSampleBuffer_error_([req], sbuf, None)
 #                                                                 ^ TRAP:
-# out-param selector: pass None, get (ok, err) back as a tuple. DESIGN.md 2.3.
+# out-param selector: pass None, get (ok, err) back as a tuple.
 ```
+
+### 1.1.1 What does NOT go in the code
+
+  * **Dates and measurement diaries.** "MEASURED 2026-08-24 on the reference M4 Pro"
+    belongs in `docs/BENCHMARKS.md`. Quote the NUMBER in the code if it justifies a
+    decision; leave the provenance where provenance lives.
+  * **What we tried first**, what it cost, how many builds it took. That is
+    `docs/JOURNAL.md`.
+  * **The argument for a design**, at length. One sentence in the code, the reasoning
+    in `DESIGN.md` or `docs/internals/`.
+  * **Anything that reads as an apology or a war story.**
+
+The test: would a reviewer who has never seen this repo be helped by the line, or
+would they wonder why it is there? If the second, it goes somewhere else — not
+nowhere, somewhere else.
 
 ### 1.2 Greppable tags
 

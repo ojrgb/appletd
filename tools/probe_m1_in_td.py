@@ -707,10 +707,9 @@ def main():
 
 # Called unconditionally, with no `if __name__ == "__main__"` guard.
 #
-# That is deliberate, and the first version of this file got it wrong. A Text
-# DAT in TouchDesigner does not necessarily set __name__ to "__main__", and the
-# fallback used here - checking for TD's injected `op` in builtins - was a guess
-# about where TD puts its API. It was wrong in practice: the first in-TD run
+# Deliberate. A Text DAT in TouchDesigner does not necessarily set __name__ to
+# "__main__", and checking for TD's injected `op` in builtins is a guess about where
+# TD puts its API - wrong in practice: an in-TD run
 # produced no report at all, because neither branch fired.
 #
 # A guard exists to stop a module doing work when it is *imported*. This module

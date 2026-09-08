@@ -205,7 +205,7 @@ def update(comp=None):
         return _say(comp, "No update URL set")
 
     _say(comp, "Downloading...")
-    tmp = os.path.join(tempfile.gettempdir(), "appletd_update.tox")
+    tmp = os.path.join(tempfile.gettempdir(), "appletd_update .tox")
     try:
         got = subprocess.run(["curl", "-fL", "--max-time", "120", url, "-o", tmp],
                              capture_output=True, text=True, timeout=180)
@@ -239,10 +239,9 @@ def update(comp=None):
         try:
             # MODE AND TEXT, never `eval()`. A parameter driven by an expression
             # EVALUATES TO A NUMBER, and writing that number back is how a live
-            # reference becomes a frozen constant - which is what the first version of
-            # this did to `Renderw`, `Renderh` and `Orthowidth` on 2026-09-03. They
-            # still held the right expression TEXT, so nothing looked wrong until the
-            # render was resized and the numbers did not move.
+            # reference becomes a frozen constant. The parameter still holds the right
+            # expression TEXT, so nothing looks wrong until the render is resized and
+            # the numbers do not move.
             values[par.name] = {"mode": par.mode.name, "val": par.val,
                                 "expr": par.expr, "bind": par.bindExpr}
         except Exception:                 # noqa: BLE001, S112 - unreadable is skippable
@@ -281,13 +280,13 @@ def update(comp=None):
 _SWAP = """import json
 import os
 
-# REPLACING A COMPONENT IS A PARENT-SIDE OPERATION, and the first version of this got
-# it exactly backwards. `comp.loadTox(path)` does NOT replace the contents of `comp`:
+# REPLACING A COMPONENT IS A PARENT-SIDE OPERATION, and the obvious call does the
+# opposite. `comp.loadTox(path)` does NOT replace the contents of `comp`:
 # it loads the .tox's root component AS A CHILD of it. Calling it on the component
 # being updated therefore nests a copy inside the thing you meant to replace, leaves
-# every original operator and parameter untouched, and reports success. Measured
-# 2026-09-03: three loads into one COMP gave children 1 -> 2 -> 3 and a descendant
-# count of 308 -> 616 -> 924. DESIGN.md 2.28.
+# every original operator and parameter untouched, and reports success. Three loads
+# into one COMP gave children 1 -> 2 -> 3 and a descendant count of 308 -> 616 -> 924.
+# DESIGN.md 2.28.
 #
 # So the load goes to the PARENT, which is where a sibling can appear beside the old
 # one, and the old one is destroyed only once the new one is there and looks right.
@@ -362,7 +361,7 @@ else:
         if par is None or par.readOnly:
             dropped.append(name)
             continue
-        # A snapshot written before 2026-09-03 is a bare value, and it means CONSTANT.
+            # A snapshot written is a bare value, and it means CONSTANT.
         entry = value if isinstance(value, dict) else {"mode": "CONSTANT", "val": value}
         # THE NEW VERSION'S EXPRESSION WINS. Same rule the builder uses when it
         # rebuilds over a tuned component: a parameter this build drives from
@@ -536,9 +535,8 @@ def main():
         # AND RESET ON EVERY BUILD, which is the one parameter here that gets that
         # treatment. Testing the updater means pointing this at a `file://` copy or a
         # branch, and an export taken afterwards SHIPS that - a component whose Update
-        # button fetches a scratchpad path that exists on one machine. It nearly did:
-        # the 2026-09-03 export carried `file:///private/tmp/.../livecam2.tox` and was
-        # caught by reading the file back rather than by anything automatic.
+        # button fetches a scratchpad path that exists on one machine, caught only by
+        # reading the exported file back.
         #
         # A rebuild is a developer action, so taking the default back costs a fork
         # nothing it cannot redo in one edit - the same trade `td_build_vision.py`
@@ -611,7 +609,7 @@ def main():
     # it is rendered here, at build, against the real substitutions.
     try:
         header = ("COMP_PATH = %r\nTOX = %r\nSNAPSHOT = %r\nETAG = %r\n"
-                  % (comp.path, "/tmp/x.tox", "/tmp/x.json", "abc"))
+                  % (comp.path, "/tmp/x .tox", "/tmp/x.json", "abc"))
         compile(header + module._SWAP, "swap", "exec")
     except Exception as problem:                   # noqa: BLE001 - reported
         failures.append("the swap script does not render or compile: %r" % (problem,))

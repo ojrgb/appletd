@@ -111,7 +111,7 @@ def sample():
     comp = op(MASTER_PATH)
     if comp is None:
         return
-    # WHICHEVER STREAM IS ACTUALLY SENDING, not hands. Until 2026-08-24 this read
+        # WHICHEVER STREAM IS ACTUALLY SENDING, not hands. Until this read
     # `seq` off the hands stream alone, which meant every run with `Streamhands` off
     # was DISCARDED as "the input never moved" - the one configuration the component
     # is most often in, and the one whose measurements were therefore never trusted.

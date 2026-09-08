@@ -63,9 +63,9 @@ MASTER_PATH = "/project1/appletd"
 
 PAGE = "Segmentation Mask"
 
-# Parameters this builder used to own and no longer does, with why. Destroyed on the
-# next run, because a parameter outlives the code that created it - see the retire
-# block in main().
+# Parameters this builder no longer owns, with why. Destroyed on the next run,
+# because a parameter outlives the code that created it - see the retire block in
+# main().
 RETIRED_PARS = {
     "Segment": "`Streamsegment` on the Vision page does both jobs now: it puts "
                "`segment` on the sidecar's command line AND gates this Script TOP. "
@@ -89,10 +89,9 @@ import sys
 # install would mean a developer silently running stale code - the two-copies hazard
 # that `Sourceversion` exists to catch one layer up.
 #
-# On anybody else's machine BUILT_AT does not exist, so `Installroot` is used - which
-# is what makes a shipped .tox work at all. Before 2026-08-23 this was a baked
-# absolute path and nothing else, so a .tox carried one person's home directory and
-# failed at its first cook everywhere else.
+# On anybody else's machine BUILT_AT does not exist, so `Installroot` is used, which
+# is what makes a shipped .tox work at all. A baked absolute path carries one person's
+# home directory and fails at its first cook everywhere else.
 _COMP_PATH = %(comp_for_root)r
 %(resolver)s
 
@@ -112,10 +111,11 @@ if REPO_ROOT not in sys.path:
 import numpy
 
 from appletd.maskbuf import MaskReader
+from appletd.streams import MASK_INSTANCE_COLOURS, unpack_mask_people
 
 # The reader lives in MODULE GLOBALS and never in operator storage. TouchDesigner
 # PICKLES operator storage into the .toe on save, and an `mmap` cannot be pickled -
-# which is exactly how this project lost the ability to save on 2026-08-21, over a
+# which is exactly how this project lost the ability to save, over a
 # dataclass. A module global is not saved, and is rebuilt on demand.
 _READERS = {}
 
@@ -123,10 +123,10 @@ _READERS = {}
 # Script TOP's 2x2 default, so a project wired to `outmask` has a sane image from the
 # first cook instead of something that changes shape when the sidecar starts.
 #
-# 16x16, and the SIZE is the diagnostic. It used to be 256x192 - which is exactly the
-# size of a `fast` mask, so "the buffer has never been read" and "a real mask arrived"
-# looked identical in the operator's resolution. That cost real time on 2026-08-22:
-# the mask was black and the only way to tell which case it was involved running the
+# 16x16, and the SIZE is the diagnostic. 256x192 is exactly the size of a `fast` mask,
+# so "the buffer has never been read" and "a real mask arrived" look identical in the
+# operator's resolution - and with a black mask either way, the only way to tell them
+# apart is running the
 # callback's own logic by hand. A shape nothing else produces answers it at a glance.
 _BLANK = numpy.zeros((16, 16, 1), dtype=numpy.uint8)
 
@@ -199,14 +199,35 @@ def onCook(scriptOp):
         # the reason `read` never blocks (maskbuf.py).
         return
 
-    # (h, w, components). MEASURED: `copyNumpyArray` needs THREE dimensions - a plain
-    # (h, w) raises "must be 3 dimensions" - and takes uint8 without conversion.
+    # (h, w, components). `copyNumpyArray` needs THREE dimensions - a plain (h, w)
+    # raises "must be 3 dimensions" - and takes uint8 without conversion.
     #
     # `[::-1]` is the y flip: Vision's mask origin is top-left, TouchDesigner's TOP
     # arrays are bottom-up. `ascontiguousarray` because the reversed view is not
     # contiguous, and it is one memcpy of the payload - 197 KB at 512x384.
     array = numpy.frombuffer(frame.pixels, dtype=numpy.uint8).reshape(
         frame.height, frame.width, frame.components)
+
+    # A MULTI-PERSON MASK IS COLOURED HERE, and the indices are what travelled.
+    #
+    # `instanceMask` is index-encoded - 0 background, 1..4 per person - so the buffer
+    # holds 1, 2, 3, 4 in a uint8 and looks black. Indices are the right thing to
+    # send: one component, lossless, and integer arithmetic all the way. Making them
+    # visible is the consumer's job, which is this operator.
+    #
+    # HOW IT KNOWS WHICH MASK IT HAS: the people count travels in the frame's aux
+    # block, not off `Multiperson`. That toggle is a launch flag, so between flipping
+    # it and restarting, the parameter and the running sidecar disagree - and reading
+    # a 0/255 silhouette as indices would index a five-entry table with 255.
+    people = unpack_mask_people(frame.aux)
+    if people and frame.components == 1:
+        # `clip` and not trust: an index past the table is a Vision change, and a
+        # wrong colour is a better failure than an IndexError inside a cook.
+        table = numpy.array(MASK_INSTANCE_COLOURS, dtype=numpy.uint8)
+        indices = numpy.clip(array[::-1, :, 0], 0, len(table) - 1)
+        scriptOp.copyNumpyArray(numpy.ascontiguousarray(table[indices]))
+        return
+
     scriptOp.copyNumpyArray(numpy.ascontiguousarray(array[::-1]))
 
     # The source geometry, onto the parameters the Fit TOP reads. Written rather than
@@ -245,7 +266,7 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from appletd.td_layout import PACKAGE_ROOT_SOURCE, master_xy
+    from appletd.td_layout import OUTPUT_ORDER, PACKAGE_ROOT_SOURCE, master_xy
 
     master = op(MASTER_PATH)
     if master is None:
@@ -262,12 +283,12 @@ def main():
     # -- the parameters ----------------------------------------------------
     # APPEND ONLY WHAT IS ABSENT. `append*` on an existing parameter RESETS it, and
     # the reset fires a DEFERRED callback that outlives any write-it-back fix -
-    # measured 2026-08-22, DESIGN.md 2.17. Nothing that exists is touched here except
+    # measured, DESIGN.md 2.17. Nothing that exists is touched here except
     # its `default`, which is not a value.
     page = _page(master, PAGE)
     existing = {par.name: par for par in master.customPars}
 
-    # -- retire what this builder used to own ------------------------------
+    # -- retire what this builder no longer owns ---------------------------
     # BEFORE anything is appended. REMOVING THE CODE THAT CREATES A PARAMETER DOES
     # NOT REMOVE THE PARAMETER: `Segment` stopped being created when `Streamsegment`
     # took over both jobs, and it sat on this page reading True and driving nothing
@@ -347,7 +368,7 @@ def main():
     # THE THING THAT MAKES IT COOK AT ALL, and it took a black mask to find.
     #
     # A Script TOP with NO INPUT is never dirtied, so TouchDesigner cooks it once and
-    # then serves that texture for ever. MEASURED 2026-08-22: `totalCooks` sat at 151
+    # then serves that texture for ever. MEASURED: `totalCooks` sat at 151
     # across many frames while the buffer held a perfectly good mask, because the
     # single cook had happened before the file existed and published the blank. There
     # is no Cook Type parameter on a Script TOP to fix it with - the Common page has
@@ -411,6 +432,10 @@ def main():
     # PRESERVED, never recreated - an Out TOP IS a COMP output connector, and
     # destroying it disconnects whatever the project had wired to it.
     out.inputConnectors[0].connect(fit_top)
+    # The connector number, pinned. Without it a COMP orders its outputs by the
+    # alphabetical name of the Out operators inside it, so a rename would silently
+    # reorder what a project's wires carry. appletd/td_layout.py owns the numbers.
+    out.par.connectorder = OUTPUT_ORDER["outmask"]
 
     print("2. seg_mask -> seg_fit -> outmask")
     print("   seg_mask format=mono8fixed, cooked by its `Tick` expression")

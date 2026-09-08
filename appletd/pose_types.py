@@ -167,6 +167,39 @@ class Body:
 
 
 @dataclass(frozen=True)
+class HumanRect:
+    """One person's bounding box, from `VNDetectHumanRectanglesRequest`.
+
+    NOT MATCHED TO A `Body`, and that is the point of the separate name. The two are
+    different Vision requests with different orderings: `human0` is the leftmost
+    RECTANGLE and `p0` the leftmost SKELETON, and while they usually describe the same
+    person nothing guarantees it. Associating them would mean inventing a matching
+    rule and publishing its guesses as fact.
+
+    Normalised, origin BOTTOM LEFT, as Vision gives it - so `y` is the BOTTOM edge
+    (DESIGN.md 7), exactly like the face's box.
+    """
+
+    # Plain 0.0 rather than `NormX(0.0)`: these are NewType aliases over float, so a
+    # call in a dataclass default buys nothing and ruff refuses it (RUF009).
+    x: NormX = 0.0          # type: ignore[assignment]
+    y: NormY = 0.0          # type: ignore[assignment]
+    w: float = 0.0
+    h: float = 0.0
+    confidence: Confidence = 0.0    # type: ignore[assignment]
+    found: bool = False
+
+    def sort_key(self) -> tuple[float, float]:
+        """Leftmost first, with empty slots last - the same shape as `Body`."""
+        if not self.found:
+            return (1.0, 0.0)
+        return (0.0, float(self.x))
+
+
+BLANK_HUMAN: Final = HumanRect()
+
+
+@dataclass(frozen=True)
 class PoseFrame:
     """One body-pose inference result, ready to cross the thread boundary.
 
@@ -186,6 +219,10 @@ class PoseFrame:
     width: int              # pixels, as DELIVERED
     height: int
     bodies: tuple[Body, ...]
+    # Exactly MAX_BODIES entries, always, for the same reason `bodies` is: a fixed
+    # length is what makes the fixed channel list unconditionally true. All blank
+    # when `Person Boxes` is off, which is the disabled-stream convention.
+    humans: tuple[HumanRect, ...] = ()
 
 
 BLANK_BODY: Final = Body(
@@ -210,7 +247,8 @@ def blank_pose_frame(seq: int = 0, captured_at: float = 0.0,
     two places is how contracts drift.
     """
     return PoseFrame(seq=seq, captured_at=captured_at, width=width, height=height,
-                     bodies=tuple(BLANK_BODY for _ in range(MAX_BODIES)))
+                     bodies=tuple(BLANK_BODY for _ in range(MAX_BODIES)),
+                     humans=tuple(BLANK_HUMAN for _ in range(MAX_BODIES)))
 
 
 def order_bodies(bodies: Sequence[Body]) -> tuple[Body, ...]:
@@ -243,20 +281,32 @@ def order_bodies(bodies: Sequence[Body]) -> tuple[Body, ...]:
 # ---------------------------------------------------------------------------
 _BODY_SCALARS: Final = ("found", "score", "conf_median")
 _JOINT_VALUES: Final = ("x", "y", "conf")
-_FRAME_SCALARS: Final = ("pose_n_bodies", "pose_seq", "pose_age_ms")
+_FRAME_SCALARS: Final = ("pose_n_bodies", "pose_seq", "pose_age_ms",
+                        # How many RECTANGLES were found, which is not
+                        # necessarily how many bodies were.
+                        "human_n")
+# The person boxes. `_bbox_` deliberately, so `spaces.py` classifies the width
+# and height as EXTENTS by the same rule the face box uses - a width is scaled
+# and never centred.
+_HUMAN_SCALARS: Final = ("found", "conf", "bbox_x", "bbox_y",
+                         "bbox_w", "bbox_h")
 
 
 def pose_channel_names() -> tuple[str, ...]:
     """The complete, fixed pose channel list, in publication order.
 
-    Contract: 3 + MAX_BODIES * (3 + N_BODY_JOINTS * 3) names. At MAX_BODIES = 2
-              that is 3 + 2 * 60 = 123 (DESIGN.md 6.4).
+    Contract: 4 + MAX_BODIES * 6 + MAX_BODIES * (3 + N_BODY_JOINTS * 3) names. At
+              MAX_BODIES = 2 that is 4 + 12 + 120 = 136 (DESIGN.md 6.4). The person
+              boxes joined on; before that it was 123.
     Why fixed and never conditional: the same reason as hands (DESIGN.md 6.2). A
               CHOP whose channels come and go breaks every downstream reference
               the moment they vanish, and it breaks it SILENTLY - the operator
               that referenced the channel just stops receiving.
     """
     names: list[str] = list(_FRAME_SCALARS)
+    for human_i in range(MAX_BODIES):
+        for scalar in _HUMAN_SCALARS:
+            names.append("human%d_%s" % (human_i, scalar))
     for body_i in range(MAX_BODIES):
         for scalar in _BODY_SCALARS:
             names.append("p%d_%s" % (body_i, scalar))
@@ -277,7 +327,19 @@ def pose_channel_values(frame: PoseFrame, age_ms: float,
     Coordinates: normalised, origin BOTTOM LEFT, exactly as Vision produced them.
               No flip happens here or anywhere else (DESIGN.md 7).
     """
-    values: list[float] = [float(n_bodies), float(frame.seq), float(age_ms)]
+    humans = frame.humans or tuple(BLANK_HUMAN for _ in range(MAX_BODIES))
+    n_humans = sum(1 for human in humans if human.found)
+    values: list[float] = [float(n_bodies), float(frame.seq), float(age_ms),
+                           float(n_humans)]
+    # PAIRED BY POSITION with `_HUMAN_SCALARS`, and nothing checks it at run time -
+    # which is why the two are edited together and tested together.
+    for human in humans:
+        values.append(1.0 if human.found else 0.0)
+        values.append(float(human.confidence))
+        values.append(float(human.x))
+        values.append(float(human.y))
+        values.append(float(human.w))
+        values.append(float(human.h))
     for body in frame.bodies:
         values.append(1.0 if body.found else 0.0)
         values.append(float(body.confidence))
@@ -289,8 +351,10 @@ def pose_channel_values(frame: PoseFrame, age_ms: float,
     return values
 
 
-N_POSE_CHANNELS: Final = 3 + MAX_BODIES * (len(_BODY_SCALARS)
-                                           + N_BODY_JOINTS * len(_JOINT_VALUES))
+N_POSE_CHANNELS: Final = (len(_FRAME_SCALARS)
+                          + MAX_BODIES * len(_HUMAN_SCALARS)
+                          + MAX_BODIES * (len(_BODY_SCALARS)
+                                          + N_BODY_JOINTS * len(_JOINT_VALUES)))
 
 
 # ---------------------------------------------------------------------------

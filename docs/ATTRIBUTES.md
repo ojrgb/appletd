@@ -85,19 +85,34 @@ There is no thumb trigger: every distance is measured *to* the thumb tip.
 | `h{i}_moving` | 1 when speed is above `Speedfloor`, so 0 means the held heading is stale |
 | `h{i}_accel` | d/dt of speed |
 
-### Two hands — 12 channels
+### Two hands — 14 channels
 
 | channel | definition |
 |---|---|
 | `hands_distance` | distance(h0_palm, h1_palm) / mean size |
 | `hands_together` | state on `hands_distance`, `Togetheron` / `Togetheroff` |
 | `hands_center_x`, `hands_center_y` | midpoint of the two palms |
-| `hands_angle` | angle of h0_palm to h1_palm |
+| `hands_angle_x`, `hands_angle_y` | the line's tilt out of the image plane. **RELATIVE** — see below |
+| `hands_angle_z` | in-plane angle of h0_palm to h1_palm. Exact |
 | `hands_approach` | d/dt of `hands_distance`. Negative closing, positive opening |
 | `index_distance`, `index_center_x`, `index_center_y` | as above, for the index tips |
 | `both_pinching` | `h0_pinching AND h1_pinching` |
 | `hands_overlap` | bbox intersection area / smaller box area |
 | `hands_symmetry` | 1 minus abs(h0_openness minus h1_openness) |
+
+- **`hands_angle_z` is exact; `_x` and `_y` are RELATIVE.** All three describe the line
+  joining the two palms, decomposed the same way the per-hand angles are, so there is
+  one vocabulary rather than two. `_z` is an in-plane bearing, which a projection
+  determines fully.
+  - `_x` and `_y` need the line's tilt out of the image plane, which needs a depth
+    DIFFERENCE between the hands. The only per-hand depth here is apparent SIZE, which
+    is not comparable between two different hands — a child's hand at 40 cm and an
+    adult's at 60 measure alike. So the size difference gives a signed "which hand is
+    nearer": **its direction and its change are trustworthy, its magnitude is not
+    degrees of anything.**
+  - Sampling the depth map at each palm would make these absolute, and would give
+    `h{i}_z` a real measurement instead of the proxy.
+  - All three read 0 unless BOTH hands are found, like every two-hand channel.
 
 ### Gestures — 18 channels
 
@@ -143,12 +158,21 @@ Inferred from apparent size, not measured.
   and one pointing away project identically. Meaningful only for a straight finger; use
   `h{i}_curl_<finger>` to tell those apart. UNMEASURED on a real hand.
 
-### Tilt — 4 channels
+### Tilt — 10 channels
 
 | channel | definition |
 |---|---|
 | `h{i}_tilt` | 0..90 degrees. 0 is the palm square on to the camera, 90 edge-on |
-| `h{i}_tilt_axis` | degrees, which way it is leaning. Meaningless when `tilt` is near 0 |
+| `h{i}_tilt_axis` | degrees, the axis it turns about. Meaningless when `tilt` is near 0 |
+| `h{i}_angle_x`, `h{i}_angle_y` | the same tilt as components about the image axes |
+| `h{i}_angle_z` | in-plane roll, in degrees. The same number as `h{i}_rotation` |
+
+**`angle_x` and `angle_y` are correct up to one shared sign flip**, and that is
+geometry rather than a shortcoming. The axis comes from the longest edge of the
+projected palm triangle, and an edge has no direction — so their RATIO is meaningful
+("leaning mostly about the horizontal") while their direction is not ("leaning toward
+me rather than away"). A palm tilted 30° toward the camera and one tilted 30° away
+project identically. **`angle_z` is exact**: an in-plane roll survives a projection.
 
 Every other angle in the system is in-plane; these two are the out-of-plane part, and are
 a magnitude and an axis rather than pitch and yaw, which a 2D projection cannot sign.
@@ -170,7 +194,7 @@ Every joint also arrives in TouchDesigner's spaces: `_tx`/`_ty` in world units
 
 ---
 
-## Body pose — 275 channels
+## Body pose — 304 channels
 
 Plumbing only: no derived attributes, no filtering, no temporal channels.
 
@@ -178,10 +202,18 @@ Plumbing only: no derived attributes, no filtering, no temporal channels.
 pose_n_bodies, pose_seq, pose_age_ms
 p<i>_found, p<i>_score, p<i>_conf_median              for i in 0..1
 p<i>_<joint>_x, p<i>_<joint>_y, p<i>_<joint>_conf     19 joints
+human_n
+human<i>_found, human<i>_conf                         for i in 0..1
+human<i>_bbox_x, _bbox_y, _bbox_w, _bbox_h            the person rectangle
 ```
 
-123 channels from the wire plus 152 transformed: every joint also arrives in world and
-pixel space.
+136 channels from the wire plus 168 transformed: every joint and every box also
+arrives in world and pixel space.
+
+`human<i>_*` is `VNDetectHumanRectanglesRequest` — a person's bounding box without any
+joints, cheaper than the full body pose (2.53 ms against 3.75 ms at 720p) and useful on
+its own for counting or framing people. It is part of the pose stream, so `Streampose`
+turns it on.
 
 Joints, in channel order: `nose` `left_eye` `right_eye` `left_ear` `right_ear` `neck`
 `left_shoulder` `right_shoulder` `left_elbow` `right_elbow` `left_wrist` `right_wrist`
@@ -201,7 +233,7 @@ Joints, in channel order: `nose` `left_eye` `right_eye` `left_ear` `right_ear` `
 ```
 face_n, face_seq, face_age_ms
 f<i>_found, f<i>_score, f<i>_quality                  for i in 0..1
-f<i>_roll, f<i>_yaw, f<i>_pitch                       DEGREES
+f<i>_angle_x, f<i>_angle_y, f<i>_angle_z              DEGREES
 f<i>_bbox_x, f<i>_bbox_y, f<i>_bbox_w, f<i>_bbox_h    normalised
 ```
 
@@ -214,10 +246,26 @@ centred:
     f0_bbox_th =  bbox_h        * Orthowidth * Renderh / Renderw
     f0_bbox_pw =  bbox_w        * Resw             pixels
 
-`roll`/`yaw`/`pitch` are not transformed — there is no yaw in pixels.
+The angles are not transformed — there is no yaw in pixels.
 
-- **`roll`, `yaw`, `pitch` are DEGREES.** Values under 2 for a clearly turned head mean
-  something bypassed the conversion.
+- **`angle_x` is pitch, `angle_y` is yaw, `angle_z` is roll**, in DEGREES,
+  right-handed about the camera axes. Renamed from `roll`/`yaw`/`pitch` in V2 so every
+  stream with an orientation uses one vocabulary.
+- **They are computed from the landmarks, not taken from Vision.** Vision's own
+  `roll`/`yaw`/`pitch` are QUANTISED — measured at revision 3, the highest the request
+  offers: yaw arrives in 45° steps and roll in 30°, so a head turned slowly reads 0, 0,
+  0, then −45. These are our own geometry on the four key points, measured in pixels
+  because normalised image space is not square, and they cost 4.3 µs a face.
+  - **`angle_z` (roll) is exact.** A projection determines an in-plane rotation fully.
+  - **`angle_y` (yaw) is well behaved near centre** and compresses towards the
+    extremes, where it saturates at ±90 rather than misreporting.
+  - **`angle_x` (pitch) is RELATIVE, not absolute.** It comes from the vertical face
+    foreshortening as the head nods, and the resting proportion differs between people
+    — so its direction and its change are trustworthy and its absolute magnitude is
+    not. A long face reads a degree or two negative looking straight ahead. Calibrating
+    from a frame where the head is known to be level is what would fix that.
+- **They end in `_x`/`_y`/`_z` but they are not positions.** Any filter that picks
+  channels by suffix has to exclude them, or it will treat a head angle as a landmark.
 - **`bbox_y` is the BOTTOM edge.** The top edge is `bbox_y + bbox_h`.
 - **Gate on `f<i>_quality`, not `f<i>_score`.** Both are UNMEASURED; `quality` is
   `faceCaptureQuality`, which Apple documents as a comparison metric for the same
@@ -270,7 +318,7 @@ appears on in an unmirrored image is UNMEASURED.
 
 ---
 
-## Sidecar status — 4 channels
+## Sidecar status — 9 channels
 
 On the hands port, so they arrive whatever else is enabled. Read them off the
 `housekeeping` Null CHOP beside `out1`.
@@ -278,7 +326,8 @@ On the hands port, so they arrive whatever else is enabled. Read them off the
 | channel | meaning |
 |---|---|
 | `sc_uptime_s` | seconds since the sidecar started sending. **FROZEN means the process is gone** |
-| `sc_hands`, `sc_pose`, `sc_face` | 1 when the sidecar really started that stream |
+| `sc_hands`, `sc_pose`, `sc_face`, `sc_segment`, `sc_depth`, `sc_flow` | 1 when the sidecar really started that stream |
+| `sc_src_w`, `sc_src_h` | the frame size the sidecar is actually capturing |
 
 `sc_uptime_s` is what tells "sidecar dead" apart from "stream switched off". The `sc_*`
 channels report what the process is RUNNING, not what the toggles say.
@@ -313,6 +362,30 @@ stream has a page of its own; `General` holds what applies to all of them.
 | `Tilt` | off | `h{i}_tilt` and `h{i}_tilt_axis` |
 | `Temporal` | off | master switch: off freezes everything with memory |
 | `Latches` | off | master switch: off freezes the gesture latches |
+
+### Overlay
+
+| parameter | default | what it does |
+|---|---|---|
+| `Show Overlay` (`Handsoverlay`) | off | draws the skeleton over the camera image |
+| `Overlay Mode` (`Handsoverlaymode`) | Finger Skeleton | `Finger Skeleton` (21 bones) or `Index Line` |
+
+Needs `Output Video` on to have anything to draw over. **`Show Overlay` does nothing
+while `Hands` is off** — the channels would be frozen at their last value, so it would
+draw a hand that is no longer being tracked.
+
+**`Active` off stops every overlay cooking.** With capture off there is nothing new to
+draw, so a cooking overlay would re-render the same skeleton every frame. It holds the
+picture it already had rather than blanking, which is what `Freeze` means.
+
+`Body Pose` and `Face` have the same pair. The pose skeleton is 18 bones over the 19
+joints. The face offers two modes:
+
+  * **Key Points** (default) — the eye line, both eyes to the nose tip, nose to mouth.
+    Four segments, drawn from the four key points, which is what a default project
+    publishes.
+  * **All Landmarks** — 79 segments over the 76 points. Needs `Face Key Points` OFF,
+    since that toggle strips the landmark channels at the stream.
 
 ### What reaches the output
 
@@ -377,9 +450,14 @@ On `General`, above the smoothing controls.
 | `Install` | pulse | install the sidecar's Python, packages and depth model |
 | `Installstate` | read-only | what is installed against what this build wants |
 | `Active` | off | is the capture process running |
+| `Autorefresh` | off | apply a launch-flag change by itself, 3 s after the last one |
+| `Outputvideo` | off | the image the sidecar is looking at, on `outvideo`, with any overlays composited on |
 | `Restartcapture` | pulse | stop and start in one press |
-| `Capturestate` | read-only | `Running` / `Stopped` / `Requires Restart` |
+| `Freeze` | pulse | hold the current outputs and stop capturing |
+| `Capturestate` | read-only | `Running` / `Stopped` / `Requires Restart`, a countdown while an action is pending, and `Stopped - <reason>` when the sidecar failed to start |
+| `Inputmode` | Camera | `Camera`, or `TOP Input` to take frames from the COMP's image input |
 | `Camera` | `(default)` | a menu of the real devices |
+| `Cameraflip` | off | mirror the image on X **before Vision sees it**. Restarts by itself |
 | `Listcameras` | pulse | re-enumerate and repopulate the menu |
 | `Streamhands` | on | hand pose |
 | `Streampose` | off | body pose |
@@ -396,6 +474,34 @@ they stop the stream cooking at once.
 
 Camera enumeration opens no device and raises no permission prompt, so `Listcameras` is
 safe to press at any time.
+
+**`Auto Refresh` restarts for you.** Nine labels on this page say "restart to apply";
+with this on, changing one waits three seconds after the last change and then restarts.
+Several toggles flipped in a row cost one restart, not four.
+
+**`Freeze` holds what is on the outputs and stops the capture.** The depth map, the
+mask and every channel keep their current values while the 23 ms a frame that produced
+the depth goes away — so an effect can be built against a still frame. Turning `Active`
+back on releases it.
+
+**`Input Mode = TOP Input` takes frames from the COMP's image input** instead of a
+camera: a movie, a render, a corrected feed, anything a TOP holds. **No capture device
+is opened at all**, so no camera permission is needed. It costs 0.26 ms a frame at 720p
+to move the pixels across (`docs/BENCHMARKS.md`), and `Framesbuffer` on Advanced is the
+shared file both sides use.
+
+**`Output Video` follows `Input Mode`.** It shows the image the SIDECAR is looking at,
+which in TOP Input mode is the component's own image input rather than the camera — and
+the camera is then not opened at all, so nothing holds the device and no permission
+prompt appears. That is also what an overlay has to be drawn over: landmarks found in a
+TOP composited onto a camera frame would sit wherever the two happened to disagree.
+
+`Camera Flip` mirrors whichever source is live, because the flip sits after the switch.
+
+**It counts down.** With `Auto Refresh` on, a launch-flag change reads
+`Restarting in 3`, `2`, `1` rather than sitting on `Requires Restart` and then
+restarting unannounced. `Freeze` with a `Freeze Timer` set reads `Freezing in N` the
+same way. Pressing again restarts the count rather than arming a second one.
 
 ### The status light
 
@@ -437,6 +543,7 @@ channels are normalised 0..1, about a thousand times smaller.
 |---|---|---|
 | `Screenspaceonly` | on | drops every raw normalised channel that has a `_tx`/`_px` companion |
 | `Deleteempty` | on | keeps only the channels actually being computed |
+| `Hideunused` | off | remove an output nothing is feeding. **Renumbers the outputs after it** |
 | `Slotassign` | on | h0 is the right hand, h1 the left |
 | `Activateframes` | 3 | consecutive good frames before `active` turns on |
 | `Deactivateframes` | 6 | consecutive bad frames before it turns off |
@@ -445,7 +552,7 @@ channels are normalised 0..1, about a thousand times smaller.
 | `Oscport` | 10000 | BASE port; the streams take base + 0/1/2 |
 | `Printstatus` | pulse | is a capture process running, and its pid |
 | `Capturepid` | read-only | what was last started. Not proof it is still alive |
-| `Maskbuffer`, `Depthbuffer` | `/tmp/appletd_*.buf` | shared files; must match on both sides |
+| `Maskbuffer`, `Depthbuffer`, `Framesbuffer` | `/tmp/appletd_*.buf` | shared files; must match on both sides |
 | `Installroot` | — | where the sidecar's Python and packages go |
 | `Sidecarpython` | — | interpreter override; empty means the installed one |
 | `Pythonurl` | python-build-standalone | the interpreter the installer fetches |
@@ -472,7 +579,7 @@ restart. `sc_uptime_s` freezing is the symptom of that gap.
 | `Updatefound` | read-only | what the server last reported |
 | `Openlicence` | pulse | open the LICENSE |
 
-`Update` replaces the COMPONENT; `Install` on the Vision page writes the SIDECAR's files.
+`Update` replaces the COMPONENT; `Install` on the General page writes the SIDECAR's files.
 An update restores every parameter by name and lands with `Active` off.
 
 ---
@@ -483,8 +590,18 @@ An update restores every parameter by name and lands with `Active` off.
 
 | parameter | default | what it does |
 |---|---|---|
+| `Multiperson` | off | separate PEOPLE rather than person-from-background. The mask becomes **colour**: person 1 red, 2 green, 3 blue, 4 white |
 | `Maskfit` | on | undo the anisotropic stretch, so the mask lines up with the camera frame |
 | `Masksourcew`, `Masksourceh` | 1280x720 | read-only, from the buffer header |
+
+With `Multiperson` off the mask is a single-channel 0/255 silhouette. With it on,
+Vision returns an index per pixel — 0 background, 1..4 per person — and the component
+colours them, because 1 out of 255 is indistinguishable from black. Four colours,
+white last so a fourth person shows against a light background as well as a dark one.
+
+The colour is chosen from the FRAME, not from this toggle: the people count travels in
+the buffer, so flipping the toggle without restarting cannot make the mask read as the
+wrong kind.
 
 `Segquality` sits with the stream toggle and is a launch flag:
 
@@ -497,12 +614,41 @@ An update restores every parameter by name and lands with `Active` off.
 `fast` is not simply a smaller `balanced`: it has no soft edge at all, so a feathered
 matte costs 8.54 ms.
 
+**`Multi-Person` changes what the mask MEANS.** Off, it answers "is this pixel a
+person" and the mask is 0 or 255. On, it uses `VNGeneratePersonInstanceMaskRequest` and
+answers "WHICH person is it": each pixel carries an instance index, with 0 for
+background. A project that wants the old union does `> 0`; going the other way is
+impossible, which is why the index form is what gets published. `Segquality` does not
+apply — the instance request has no quality level. Vision separates at most four
+people. macOS 14+.
+
 Vision's mask does not share its input's aspect ratio — a 1280x720 frame gives a 256x192
 mask — so `Maskfit` applies the inverse stretch on the GPU. Turn it off to work at the
 mask's native resolution.
 
 **If the mask is black**, check that `op('/project1/appletd/seg_mask').totalCooks` is
 climbing. A `seg_mask` that is 16x16 has never read the buffer.
+
+---
+
+## Optical Flow page
+
+`outflow` is a TOP, not channels.
+
+| parameter | default | what it does |
+|---|---|---|
+| `Streamflow` | off | the optical flow request. A launch flag |
+| `Flowaccuracy` | `low` | `low`, `medium`, `high`, `veryhigh` |
+| `Flowbuffer` | `/tmp/appletd_flow.buf` | the shared file the sidecar writes |
+
+Two components, at the INPUT's full resolution: **R is the x displacement in pixels, G
+is the y**. Not normalised.
+
+It is **backward** flow: the vector at a pixel points to where that content came from
+in the previous frame, not where it is going.
+
+Costs 16-30 ms a frame depending on accuracy, and 7.2 MB per frame at 720p — enough
+that the camera will drop buffers with this and depth both on.
 
 ---
 

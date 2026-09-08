@@ -232,7 +232,7 @@ def test_hands_distance_is_the_separation_over_mean_size() -> None:
             open_hand(palm_x=0.65, palm_y=0.5, size=0.1))
     assert out["hands_distance"] == pytest.approx(0.30 / 0.10, abs=1e-6)
     assert out["hands_center_x"] == pytest.approx(0.5, abs=1e-6)
-    assert out["hands_angle"] == pytest.approx(0.0, abs=1e-6)
+    assert out["hands_angle_z"] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_two_hand_attributes_need_both_hands() -> None:

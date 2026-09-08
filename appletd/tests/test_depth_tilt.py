@@ -234,12 +234,12 @@ def test_the_two_groups_are_gated_independently() -> None:
     assert "h0_z" not in tilt_only
 
 
-def test_they_add_sixteen_channels_across_two_hands() -> None:
-    """1 z + 5 finger z + tilt + tilt_axis, per hand."""
+def test_they_add_twenty_two_channels_across_two_hands() -> None:
+    """1 z + 5 finger z + tilt + tilt_axis + angle_x/y/z, per hand."""
     without = derive(_from_pose_values(), None,
                      frozenset(set(ALL_GROUPS) - {"depth", "tilt"}))
     with_both = derive(_from_pose_values(), None, GROUPS)
-    assert len(with_both) - len(without) == 16
+    assert len(with_both) - len(without) == 22
 
 
 def _from_pose_values() -> dict[str, float]:
@@ -255,3 +255,23 @@ def test_every_new_channel_is_finite() -> None:
         out = _from_pose(pose)
         for name, value in out.items():
             assert math.isfinite(value), name
+
+
+def test_the_hand_angles_are_the_tilt_in_another_basis() -> None:
+    """`angle_x` and `angle_y` are the tilt vector's components about the image axes,
+    so their magnitude has to come back as `tilt` itself. If it does not, the two are
+    describing different rotations and one of them is wrong."""
+    channels = derive(_from_pose_values(), None, GROUPS)
+    for hand in ("h0", "h1"):
+        magnitude = math.hypot(channels["%s_angle_x" % hand],
+                               channels["%s_angle_y" % hand])
+        assert magnitude == pytest.approx(channels["%s_tilt" % hand], abs=1e-6)
+
+
+def test_angle_z_is_the_in_plane_roll() -> None:
+    """The one of the three a projection determines exactly - and the same number the
+    `pose` group publishes as `rotation`, which is what makes it exact."""
+    channels = derive(_from_pose_values(), None, GROUPS)
+    for hand in ("h0", "h1"):
+        assert channels["%s_angle_z" % hand] == pytest.approx(
+            channels["%s_rotation" % hand], abs=1e-9)

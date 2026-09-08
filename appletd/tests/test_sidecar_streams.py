@@ -194,7 +194,7 @@ def test_the_face_bundle_lands_on_its_own_port_too(
     sidecar.send_once()
     face = decode_bundle(ports[2].recv(65535))
     assert set(face) == set(face_channel_names())
-    assert "f0_yaw" in face
+    assert "f0_angle_y" in face
     hands = decode_bundle(ports[0].recv(65535))
     pose = decode_bundle(ports[1].recv(65535))
     assert not set(face) & (set(hands) | set(pose))
@@ -222,8 +222,8 @@ def test_a_published_face_frame_arrives_with_its_angles_in_degrees(
     received = decode_bundle(ports[2].recv(65535))
     assert received["face_seq"] == 4.0
     assert received["face_n"] == 1.0
-    assert received["f0_roll"] == pytest.approx(45.0, abs=1e-4)
-    assert received["f0_yaw"] == pytest.approx(-30.0, abs=1e-4)
+    assert received["f0_angle_z"] == pytest.approx(45.0, abs=1e-4)
+    assert received["f0_angle_y"] == pytest.approx(-30.0, abs=1e-4)
     assert received["f0_quality"] == pytest.approx(0.6, abs=1e-6)
     assert received["f0_bbox_y"] == pytest.approx(0.4, abs=1e-6)
 

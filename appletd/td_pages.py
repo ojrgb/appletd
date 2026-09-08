@@ -9,7 +9,7 @@ toggles for five different streams in one list on `Vision`.
 This file says where things GO. The builders still create them wherever suits them; the
 layout pass moves each one to its stated home, inserts the section dividers and sorts.
 
-WHAT MAKES THAT CHEAP, and it was not obvious - MEASURED 2026-09-03:
+WHAT MAKES THAT CHEAP, and it was not obvious - MEASURED:
 
     par.page = some_page     moves the parameter and KEEPS ITS VALUE
     page.name = "General"    renames in place, parameters intact
@@ -30,9 +30,9 @@ from typing import Final
 # The page order, top to bottom. `About` last because it is the only page that is not
 # about running the thing.
 PAGE_ORDER: Final = ("General", "Hands", "Body Pose", "Face", "Segmentation Mask",
-                     "Depth", "Advanced", "About")
+                     "Depth", "Optical Flow", "Advanced", "About")
 
-# Pages that existed before 2026-09-03 and no longer do. The layout pass moves their
+# Pages that existed before and no longer do. The layout pass moves their
 # parameters out by the table below and then destroys the empty page - a page left
 # behind is an empty tab somebody has to wonder about.
 LEGACY_PAGES: Final = ("Vision", "Attributes", "Filter", "Tuning", "Segmentation",
@@ -49,8 +49,10 @@ RENAMES: Final = (("Vision", "General"),)
 # which is how a page starts with something at the top rather than under a heading.
 LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
     "General": (
-        ("Capture", ("Active", "Restartcapture", "Capturestate",
-                     "Camera", "Listcameras")),
+        ("Capture", ("Active", "Autorefresh", "Outputvideo",
+                     "Restartcapture", "Freeze",
+                     "Capturestate",
+                     "Inputmode", "Camera", "Cameraflip", "Listcameras")),
         ("Coordinate spaces", ("Coordstx", "Coordspx")),
         ("Smoothing", ("Smoothing", "Mincutoff", "Beta")),
         ("Install", ("Install", "Installstate")),
@@ -58,6 +60,7 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
     "Hands": (
         ("", ("Streamhands",)),
         ("Output", ("Fingertipsonly", "Handbox")),
+        ("Overlay", ("Handsoverlay", "Handsoverlaymode")),
         ("Attributes", ("Core", "Presence", "Contacts", "Pose", "Twohands",
                         "Gestures", "Descriptor", "Depth", "Tilt")),
         ("Detection", ("Confthreshold", "Activateframes", "Deactivateframes",
@@ -73,13 +76,15 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
     ),
     "Body Pose": (
         ("", ("Streampose",)),
+        ("Overlay", ("Poseoverlay", "Poseoverlaymode")),
     ),
     "Face": (
         ("", ("Streamface",)),
         ("Output", ("Facekeypoints", "Onefaceonly")),
+        ("Overlay", ("Faceoverlay", "Faceoverlaymode")),
     ),
     "Segmentation Mask": (
-        ("", ("Streamsegment", "Segquality")),
+        ("", ("Streamsegment", "Segquality", "Multiperson")),
         ("Output", ("Maskfit", "Masksourcew", "Masksourceh")),
     ),
     "Depth": (
@@ -92,11 +97,16 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
         ("This frame's fit", ("Depthfitalpha", "Depthfitbeta", "Depthfitpins",
                               "Depthfitresidual", "Depthfitchecked")),
     ),
+    "Optical Flow": (
+        ("", ("Streamflow", "Flowaccuracy")),
+    ),
     "Advanced": (
-        ("Output", ("Screenspaceonly", "Deleteempty", "Slotassign")),
+        ("Output", ("Screenspaceonly", "Deleteempty", "Hideunused",
+                    "Slotassign")),
         ("Geometry", ("Resw", "Resh", "Renderw", "Renderh", "Orthowidth")),
-        ("Master switches", ("Temporal", "Latches")),
-        ("Network", ("Oscport", "Maskbuffer", "Depthbuffer")),
+        ("Master switches", ("Temporal", "Latches", "Freezetimer")),
+        ("Network", ("Oscport", "Maskbuffer", "Depthbuffer",
+                     "Framesbuffer", "Flowbuffer")),
         ("Install", ("Installroot", "Sidecarpython", "Pythonurl", "Sourceversion",
                      "Forceinstall")),
         ("Diagnostics", ("Printstatus", "Capturepid", "Keeplayout")),
@@ -111,7 +121,7 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
 
 # Parameters that are deliberately not laid out because they are being removed.
 # `Verbosity` was a preset menu over the Hands attribute toggles; it went on
-# 2026-09-03 with the page it presided over.
+# with the page it presided over.
 RETIRED: Final = ("Verbosity",)
 
 

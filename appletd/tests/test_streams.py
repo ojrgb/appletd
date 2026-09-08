@@ -17,6 +17,7 @@ from appletd.streams import (
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
     REQUEST_DEPTH,
+    REQUEST_FLOW,
     REQUEST_NAMES,
     REQUEST_SEGMENT,
     SEGMENT_QUALITIES,
@@ -127,11 +128,15 @@ def test_depth_is_a_request_with_no_port_either() -> None:
         port_for(REQUEST_DEPTH)
 
 
-def test_depth_runs_after_everything_else() -> None:
-    """MEASURED at 23.00 ms a frame against hands' 3.41 (DESIGN.md 2.22), so it is
-    last on the queue and last in REQUEST_NAMES - which is the same order. Everything
-    a live project reads is published before depth starts."""
-    assert REQUEST_NAMES[-1] == REQUEST_DEPTH
+def test_the_expensive_image_requests_run_after_everything_else() -> None:
+    """Depth is MEASURED at 23.00 ms a frame and flow at 16.2 to 30.1 depending on
+    accuracy, against hands' 3.41 (DESIGN.md 2.22, docs/BENCHMARKS.md). Both are
+    images through a shared buffer rather than channels, and both run last, so
+    everything a live project READS is published before either starts.
+
+    Flow joined after depth on 2026-09-07. Which of the two is last is not the
+    invariant - that they both follow every ported stream is."""
+    assert REQUEST_NAMES[-2:] == (REQUEST_DEPTH, REQUEST_FLOW)
 
 
 def test_segment_is_a_request_with_no_port() -> None:
@@ -151,7 +156,8 @@ def test_the_portless_requests_sort_after_the_ported_ones() -> None:
     rename live channels. Also the order the requests run in on the capture queue:
     hands first, because that is what a live project is reading."""
     assert REQUEST_NAMES[:len(STREAM_NAMES)] == STREAM_NAMES
-    assert REQUEST_NAMES[len(STREAM_NAMES):] == (REQUEST_SEGMENT, REQUEST_DEPTH)
+    assert REQUEST_NAMES[len(STREAM_NAMES):] == (REQUEST_SEGMENT, REQUEST_DEPTH,
+                                                 REQUEST_FLOW)
 
 
 def test_the_quality_levels_are_in_cost_order_and_the_default_is_the_cheapest() -> None:
@@ -171,7 +177,7 @@ def test_the_status_channels_are_named_and_ordered() -> None:
     start, which is what these channels are for. The ORDER is the port order followed
     by the portless requests, and reordering it would rename live channels."""
     assert status_channel_names() == ("sc_uptime_s", "sc_hands", "sc_pose", "sc_face",
-                                     "sc_segment", "sc_depth",
+                                     "sc_segment", "sc_depth", "sc_flow",
                                      "sc_src_w", "sc_src_h")
 
 

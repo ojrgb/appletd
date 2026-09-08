@@ -1,38 +1,17 @@
 """Which physical hand goes in which slot, and keeping it there.
 
-THE PROBLEM. Vision hands back a list of observations with **no tracking ID**, and
-their order is not stable between frames. So `h0` swaps to the other physical hand
-whenever Vision feels like reordering, and nothing downstream can tell. That is the
-most dangerous defect this system can have, because it looks completely fine on
-screen: the landmarks still track two hands, they are just attributed to the wrong
-one. Everything with memory then measures a hand that changed identity mid-gesture
-- `h0_vel_x`, `h0_speed`, `h0_held`, `h0_dwell`, and every per-hand latch and its
-counters.
+Vision hands back observations with NO tracking ID and no stable order, so `h0` swaps
+to the other physical hand whenever Vision reorders them. That is the most dangerous
+defect this system can have, because it looks fine on screen: the landmarks still
+track two hands, they are just attributed to the wrong one. Everything with memory
+then measures a hand that changed identity mid-gesture.
 
-THE FIX, and it is nearly free: Vision already tells us which hand is which.
-`VNHumanHandPoseObservation.chirality` reports left or right, `engine.py` has read
-it since it was written, and DESIGN.md 2.3 records it verified against a real hand.
-So the assignment is a partition, not a tracking problem:
+The fix is nearly free: `VNHumanHandPoseObservation.chirality` already reports left or
+right, so the slot is chosen by chirality rather than by arrival order. Where
+chirality is unavailable, a proximity fallback matches against the previous frame.
 
-    slot 0 = the RIGHT hand,  slot 1 = the LEFT hand
-
-with the ordering fixed by anatomy rather than by Vision's whim, which means it is
-stable across dropouts, occlusion and reordering without any history at all.
-
-WHY ANATOMY AND NOT IMAGE SIDE. Vision reports the *anatomical* hand - measured,
-DESIGN.md 2.3: it returned `right` for a right hand with the palm to the camera -
-not which side of the frame it appeared on. So this is unaffected by whether the
-image is mirrored, which is a separate question about the x coordinate and not
-about identity.
-
-WHAT IT COSTS, and it is a real behavioural change rather than a free win: with
-assignment ON, a single LEFT hand in shot puts nothing in slot 0. Every `h0_*`
-channel reads zero and `h1_*` carries the hand. That is the correct reading of "h0
-is always the right hand", and it will surprise anyone who has been reading `h0`
-as "the hand". It is why this is a toggle.
-
-Ref: DESIGN.md 6.3 (the algorithm), 2.3 (chirality verified), 6.1 (the frame
-contract), docs/ATTRIBUTES.md (the per-hand identity caveat this closes).
+Thread: pure functions plus one small carried state. Safe anywhere.
+Ref: DESIGN.md 6.3.
 """
 
 from __future__ import annotations
@@ -196,7 +175,7 @@ class SlotAssigner:
 
         Without this, a restart would match the first frame of the new session
         against the last frame of the old one - which is exactly the class of
-        stale-state bug the M2b review found three of.
+        stale-state bug it turned out three of.
         """
         self._previous = (BLANK_HAND,) * MAX_HANDS
 

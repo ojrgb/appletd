@@ -53,6 +53,14 @@ LAYERS = (
     # does not own.
     ("segmentation", "td_add_segmentation.py"),
     ("depth", "td_add_depth.py"),
+    ("flow", "td_add_flow.py"),
+    # After the master exists and before the page layout: it adds two parameters and
+    # an image input, and touches no operator any other builder owns.
+    ("topinput", "td_add_topinput.py"),
+    # The camera image as a TOP, and the composite the overlays land on.
+    ("video", "td_add_video.py"),
+    # AFTER video: it connects into `video_over`, which that layer creates.
+    ("overlay", "td_add_overlay.py"),
     # LAST, and independent of every operator above: it carries the package into the
     # file and touches nothing in the CHOP or TOP networks. Last also means the
     # version it stamps reflects the sources as they are at the end of a chain run.
@@ -75,7 +83,7 @@ LAYERS = (
 # comes earlier is safe.
 REQUIRES = {
     # `td_build_vision.py` no longer destroys the callback DATs other builders own
-    # (OTHER_BUILDERS_OWN, 2026-08-22), so a master rebuild is genuinely standalone.
+    # (OTHER_BUILDERS_OWN), so a master rebuild is genuinely standalone.
     # It does re-derive the Attributes page's parameters though, and `groups` is what
     # writes the gating and the trim list from them.
     "master": ("groups", "segmentation", "depth"),

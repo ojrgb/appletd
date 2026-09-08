@@ -1,35 +1,22 @@
-"""Body pose: `VNDetectHumanBodyPoseRequest` -> `PoseFrame`. The pose half of engine.py.
+"""Body pose: `VNDetectHumanBodyPoseRequest` -> `PoseFrame`.
 
-WHAT THIS OWNS. One Vision request, its sequence handler, and the conversion from
-`VNHumanBodyPoseObservation` to our own immutable `Body`. It does NOT own the
-camera: `engine.py` owns the capture session and hands this module a sample
-buffer that has already been delivered, so both streams see the SAME frame
-(DESIGN.md 6.4 - one process, one camera, several requests).
+Owns one Vision request, its sequence handler, and the conversion from
+`VNHumanBodyPoseObservation` to our own immutable `Body`. It does not own the camera:
+`engine.py` hands it a buffer that has already been delivered, so every enabled stream
+sees the same frame and shares its `seq`.
 
-WHY A SEPARATE MODULE and not more of engine.py. Direction of dependency:
-`engine.py` is the base - camera, queue, teardown, hands - and this is a plug-in
-on top of it. So this module imports engine and engine does not import this one,
-except under TYPE_CHECKING for the annotation. `source.py` wires the two
-together. The practical payoff is that a pose failure is a pose failure: nothing
-here can break the hands path, which is what a live TouchDesigner project is
-using.
+A plug-in on top of `engine.py`, not more of it: this imports engine and engine does
+not import this. So a pose failure is a pose failure, and cannot break the hands path
+a live project is using.
 
-THE SAME BOUNDARY RULES AS engine.py, and they are not stylistic:
+Also publishes the person BOXES from `VNDetectHumanRectanglesRequest` when they are
+enabled. They are NOT matched to the skeletons: `human0` is the leftmost rectangle and
+`p0` the leftmost skeleton, and nothing guarantees they are the same person.
 
-  * imports nothing from TouchDesigner - not `td`, not `op`;
-  * no pyobjc object may escape the capture thread. A
-    `VNHumanBodyPoseObservation` handed to another thread would be released by
-    whichever thread dropped the last reference, which is a crash that arrives
-    weeks later (DESIGN.md 4.2). Everything crossing out of here is floats and
-    tuples.
+Nothing from TouchDesigner, and no pyobjc object leaves the capture thread.
 
-THREADS. Every function in this file runs on the GCD capture queue, called from
-`HandEngine._on_sample_buffer`, except `verify_body_joint_table` and
-`PoseDetector.__init__`, which run on the caller's thread at construction so a
-framework mismatch is reported where it can be acted on.
-
-Ref: DESIGN.md 2.12 (the API surface, measured), 6.4 (the stream contract),
-     appletd/pose_types.py (the joint table and the channel list).
+Thread: the GCD capture queue, except `__init__` and the verifiers.
+Ref: DESIGN.md 6.4.
 """
 
 from __future__ import annotations
@@ -50,6 +37,7 @@ from appletd.pose_types import (
     PoseFrame,
     order_bodies,
 )
+from appletd.streams import ORIENTATION_UP
 from appletd.types import (
     Confidence,
     Joint,
@@ -68,25 +56,13 @@ BODY_JOINT_CONSTANT_PREFIX = "VNHumanBodyPoseObservationJointName"
 def verify_body_joint_table(request: ObjCObject | None = None) -> None:
     """Check every hardcoded body-joint code against the live framework.
 
-    Why: `pose_types.py` hardcodes 19 constant suffixes and their values so the
-         pure core needs no pyobjc. Hardcoding without verification would be
-         reckless here for a sharper reason than it was for hands - the constant
-         NAMES and their VALUES disagree about anatomy (`LeftElbow` is
-         `left_forearm_joint`, MEASURED, DESIGN.md 2.12), so a table built from
-         one and used against the other maps an elbow to a forearm and looks
-         entirely plausible on screen.
-    Contract: `request` is a live VNDetectHumanBodyPoseRequest, which is asked
-         what it supports. Passing None checks the CONSTANTS only, which is
-         weaker - the request's own answer is the authority on what it will
-         actually return.
-    What it CANNOT catch: a reordering of the table, because each row stays
-         internally consistent when rows are swapped. Order is what `p0_nose_x`
-         means and it is pinned by tests/test_pose_types.py instead.
-    Cost: 19 getattr calls plus one framework call, once per detector. Not per
-         frame.
-    Raises: EngineError listing EVERY mismatch rather than the first - if Apple
-         has changed something, seeing all of it at once is one investigation
-         instead of nineteen.
+    `pose_types.py` hardcodes 19 joint codes so the pure core needs no pyobjc, and
+    hardcoding without verification would be reckless here for a sharp reason: the
+    constant NAMES and their VALUES disagree about anatomy - `LeftElbow` is
+    `left_forearm_joint` - so a table built from one and used against the other maps
+    an elbow to a forearm and looks entirely plausible on screen.
+
+    Raises on a mismatch at construction, where it can be acted on.
     """
     problems: list[str] = []
     for joint in BODY_JOINTS:
@@ -273,7 +249,8 @@ class PoseDetector:
 
     def detect_sample_buffer(self, sample_buffer: ObjCObject, seq: int,
                              captured_at: float, width_px: int,
-                             height_px: int) -> PoseFrame:
+                             height_px: int,
+                             orientation: int = ORIENTATION_UP) -> PoseFrame:
         """The live path: the same CMSampleBuffer the hand detector just saw.
 
         Contract: the image dimensions are passed IN rather than re-read here.
@@ -285,13 +262,14 @@ class PoseDetector:
                   (DESIGN.md 3).
         """
         return self._detect(
-            lambda: self._sequence.performRequests_onCMSampleBuffer_error_(
-                [self._request], sample_buffer, None),    # TRAP: out-param
+            lambda: self._sequence.performRequests_onCMSampleBuffer_orientation_error_(
+                [self._request], sample_buffer, orientation, None),    # TRAP: out-param
             seq, captured_at, width_px, height_px)
 
     def detect_pixel_buffer(self, pixel_buffer: ObjCObject, seq: int,
                             captured_at: float, width_px: int,
-                            height_px: int) -> PoseFrame:
+                            height_px: int,
+                            orientation: int = ORIENTATION_UP) -> PoseFrame:
         """The replay path: a CVPixelBuffer we built ourselves.
 
         Why it exists: performance claims may only come from replaying a fixed
@@ -301,8 +279,8 @@ class PoseDetector:
                   performRequests.
         """
         return self._detect(
-            lambda: self._sequence.performRequests_onCVPixelBuffer_error_(
-                [self._request], pixel_buffer, None),     # TRAP: out-param
+            lambda: self._sequence.performRequests_onCVPixelBuffer_orientation_error_(
+                [self._request], pixel_buffer, orientation, None),     # TRAP: out-param
             seq, captured_at, width_px, height_px)
 
     def _detect(self, perform: Callable[[], tuple[bool, ObjCObject]], seq: int,

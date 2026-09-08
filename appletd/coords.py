@@ -1,35 +1,17 @@
 """Every coordinate conversion in the system, and nothing else.
 
-THE RULE, and the reason this module is so small:
+    Vision reports normalised positions with the origin at the BOTTOM LEFT, y
+    increasing upwards. TouchDesigner's TOP arrays are bottom-up and its UVs are
+    bottom-left. THEY ALREADY AGREE. NOTHING IN THE PIPELINE FLIPS Y.
 
-    Vision reports normalised positions with the origin at the BOTTOM LEFT,
-    y increasing upwards. TouchDesigner's TOP numpy arrays are bottom-up
-    (row 0 = bottom) and its UVs are bottom-left. THEY ALREADY AGREE.
-    NOTHING IN THE PIPELINE FLIPS Y.
+The engine keeps Vision-native bottom-left coordinates end to end, across the CHOP
+boundary and out into the project. The only consumers needing a top-left origin are
+cv2 and PIL - the debug overlay - and that flip exists in exactly one function here.
 
-The engine keeps Vision-native normalised bottom-left coordinates end to end,
-across the CHOP boundary and out into the TD project. The only consumers that
-need a top-left origin are cv2 and PIL, i.e. the debug overlay, and the flip
-they need exists in exactly one expression in this repo - `norm_y_bl_to_tl`
-below. Everything else that wants top-left goes through it.
+Getting this wrong does not crash and does not look broken: it produces landmarks that
+track a hand correctly and upside down, which is why the rule is stated once, here.
 
-Why this is worth a whole module and this much prose: getting it wrong does not
-crash and does not look broken. It produces landmarks that track a hand
-correctly and are vertically mirrored, which is the kind of defect that survives
-a demo and gets found by someone else later. The spike in reference/ flips with
-(1 - y) because it draws with PIL and cv2; porting that flip into the engine
-would be the single easiest way to ruin this project. DESIGN.md 7.
-
-To verify visually, use an asymmetric pose - an open palm with fingers up. The
-wrist and the fingertips then sit at opposite ends of the y range, so a flip is
-obvious. A fist tells you nothing.
-
-There is no letterbox remap here. Vision consumes the full frame at its native
-aspect ratio, so normalised (0,0) is the frame's corner and not the corner of
-some padded square. Constants ported from a letterboxed detector pipeline are
-wrong here; discard them.
-
-Thread: pure functions, no state. Safe to call from anywhere.
+Thread: pure functions. Safe anywhere.
 Ref: DESIGN.md 7.
 """
 
