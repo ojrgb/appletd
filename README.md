@@ -62,7 +62,7 @@ instead of building your own: [`examples/`](examples/).
 | parameter | does |
 |---|---|
 | `Active` | starts and stops the sidecar |
-| `Camera` | refreshable dropdown |
+| `Camera` | refreshable dropdown; `(default)` is the built-in camera |
 | `Restart` | needed after changing anything read at launch |
 | `Camera Flip` | mirrors the image before Vision sees it |
 | `Streamhands` `Streampose` `Streamface` | one Vision request each |

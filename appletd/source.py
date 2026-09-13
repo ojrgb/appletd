@@ -406,7 +406,6 @@ class InProcessSource:
             if self._engine is not None:
                 return
             from appletd.engine import (
-                DEFAULT_CAMERA_NAME,
                 DEFAULT_HEIGHT_PX,
                 DEFAULT_WIDTH_PX,
                 HandEngine,
@@ -501,7 +500,7 @@ class InProcessSource:
                 flow_detector=flow_detector,
                 on_flow=self._on_flow if flow_detector is not None else None,
                 flip=self._flip,
-                camera_name=self._camera_name or DEFAULT_CAMERA_NAME,
+                camera_name=self._camera_name,
                 width_px=self._width_px or DEFAULT_WIDTH_PX,
                 height_px=self._height_px or DEFAULT_HEIGHT_PX,
                 # Continue the sequence rather than restarting it. A new engine

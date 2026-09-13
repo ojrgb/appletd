@@ -61,6 +61,8 @@ from appletd.source import (
     PoseSource,
 )
 from appletd.streams import (
+    DEFAULT_CAMERA_MARK,
+    DEFAULT_CAMERA_NAMES,
     DEFAULT_FLOW_ACCURACY,
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
@@ -798,7 +800,7 @@ class Sidecar:
 
 
 def _print_cameras() -> int:
-    """Print every capture device, one per line, as `name<TAB>uniqueID`.
+    """Print every capture device, one per line: `name<TAB>uniqueID<TAB>mark`.
 
     Why it lives in the SIDECAR rather than in a tool of its own: this is the
     process that already imports pyobjc, and `--camera` takes a substring of the
@@ -806,9 +808,14 @@ def _print_cameras() -> int:
     disagree. TouchDesigner shells out to it (`Listcameras` on the Vision page)
     precisely so that no pyobjc import ever happens inside TD.
 
-    Contract: stdout is machine-readable - `name`, a tab, `uniqueID` - so the caller
-              can build a menu from it. Returns 0 even when the list is empty; no
-              cameras is a fact about the machine, not a failure of this command.
+    Contract: stdout is machine-readable - `name`, a tab, `uniqueID`, a tab, and
+              DEFAULT_CAMERA_MARK on the one device the engine picks with no
+              `--camera`, an empty field on the rest. TouchDesigner builds its menu
+              from the first column and points its own Video Device In at the marked
+              device, which is how picture and tracking stay on one camera on a Mac
+              whose built-in camera is not called what this one's is. Returns 0 even
+              when the list is empty; no cameras is a fact about the machine, not a
+              failure of this command.
     Traps:    enumeration does NOT open a device or start a session, so it raises no
               TCC prompt and does not take the camera from whatever already has it.
               VERIFIED on this machine: four devices listed with the camera in use
@@ -817,11 +824,13 @@ def _print_cameras() -> int:
               Vision, and `--list-cameras` must not be the reason a machine without
               them cannot even print a usage message.
     """
-    from appletd.engine import discover_devices
+    from appletd.engine import default_device, discover_devices
 
     devices = discover_devices()
+    chosen = default_device(devices)
     for device in devices:
-        print("%s\t%s" % (device.localizedName(), device.uniqueID()))
+        print("%s\t%s\t%s" % (device.localizedName(), device.uniqueID(),
+                              DEFAULT_CAMERA_MARK if device is chosen else ""))
     if not devices:
         print("(no video capture devices found)")
     return 0
@@ -836,7 +845,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fps", type=int, default=DEFAULT_SEND_FPS,
                         help="send rate, independent of the camera's rate")
     parser.add_argument("--camera", default=None,
-                        help="substring of the camera name; never an index")
+                        help="substring of the camera name; never an index. Without "
+                             "it: the built-in camera, or failing that the first "
+                             "device named like one of %s" % list(DEFAULT_CAMERA_NAMES))
     parser.add_argument("--flip", action="store_true",
                         help="mirror the camera on the X axis before Vision sees "
                              "it. FREE: it is an image orientation on the request, "
@@ -846,10 +857,12 @@ def main(argv: list[str] | None = None) -> int:
                              "follows the mirror: a mirrored left hand IS a right "
                              "hand, and that is what gets reported.")
     parser.add_argument("--list-cameras", action="store_true",
-                        help="print the capture devices and exit. Enumeration "
-                             "only - it opens no device, starts no session and "
-                             "triggers no permission prompt, which is what makes "
-                             "it safe to call from a button in TouchDesigner")
+                        help="print the capture devices and exit, one per line: "
+                             "name, uniqueID, and `%s` on the device chosen when "
+                             "--camera is not given. Enumeration only - it opens no "
+                             "device, starts no session and triggers no permission "
+                             "prompt, which is what makes it safe to call from a "
+                             "button in TouchDesigner" % DEFAULT_CAMERA_MARK)
     parser.add_argument("--slots", default=SLOT_MODE_CHIRALITY, choices=SLOT_MODES,
                         help="which physical hand goes in which slot. "
                              "'chirality' puts the right hand in h0 and the left "

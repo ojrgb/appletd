@@ -5620,3 +5620,44 @@ That is the exact shape the install states were built to close, one layer up: "t
 files are there" is not "the thing that is running is those files". `Installstate` now
 ends with `- restart capture to run it` whenever an install finishes with a sidecar
 still up.
+
+## 2026-09-13 — `(default)` meant "MacBook", and the status light covered for it
+
+**Reported by email, with screenshots, from the first Mac that was not this one.** Their
+camera list: `FaceTime HD Camera`, `NDI Virtual Camera`, `Merlin Cray Camera`. Ours:
+`MacBook Pro Camera` — and `(default)` was the substring `"MacBook"` on both sides of
+the design, the sidecar's `pick_device` and `video_in`'s device expression. So on their
+machine the sidecar raised `EngineError` at startup and `video_in` resolved to an empty
+device: no tracking, no picture, and a Video Device In on build 2025.33230 that sat on
+`Initializing` at 88 ms a cook.
+
+**And the panel said `Running`.** `check_started` looked once, 1.2 s after `Popen`. A
+process that rejects its arguments is gone by then; one that imports Vision, fails to
+find a camera and tears down properly is not — MEASURED at 3.08 s here
+(docs/BENCHMARKS.md). So the light stayed green with no process behind it, `Restart`
+repeated the same sequence, and the reason sat in `/tmp/appletd_sidecar.log` where
+nobody was told to look. Two defects, and the second is what made the first
+undiagnosable from the panel.
+
+**What changed.**
+
+  * `(default)` is the built-in camera by DEVICE TYPE
+    (`AVCaptureDeviceTypeBuiltInWideAngleCamera`), then the first device named like
+    `MacBook` or `FaceTime`. Pure over a device list (`engine.default_device`), so the
+    reporter's list is now a test, with fakes.
+  * `--list-cameras` marks that device in a third column. The control module stores the
+    marked name on the COMP as `default_camera` whenever it enumerates — the pulse, the
+    end of a build, and now the first `start()` on a machine other than the one that
+    saved the file, told apart by the home directory the way the install root is.
+    `video_in` reads the stored name, with the engine's name fallbacks standing in until
+    it exists. Picture and tracking come from one device by construction rather than by
+    two copies of one rule.
+  * `check_started` polls once a second until the process is gone or `sc_uptime_s` has
+    moved since the launch, capped at 60 s for a cold Core ML compile. pgrep at 1 Hz for
+    the length of a start; `set_state` is still never on a timer.
+  * The old parser listed "(no video capture devices found)" as a camera. It is a pure
+    function now, extracted from the template by a test like `_is_sidecar_line`.
+
+**Unverified:** the reporter has not yet run the fix. The device-type rule is checked
+against their list with fakes, not their hardware, and a Mac with no built-in camera
+still has to pick a device by name — the error now says so and lists them.

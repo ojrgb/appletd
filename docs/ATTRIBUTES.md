@@ -458,7 +458,7 @@ On `General`, above the smoothing controls.
 | `Freeze` | pulse | hold the current outputs and stop capturing |
 | `Capturestate` | read-only | `Running` / `Stopped` / `Requires Restart`, a countdown while an action is pending, and `Stopped - <reason>` when the sidecar failed to start |
 | `Inputmode` | Camera | `Camera`, or `TOP Input` to take frames from the COMP's image input |
-| `Camera` | `(default)` | a menu of the real devices |
+| `Camera` | `(default)` | a menu of the real devices. `(default)` is the built-in camera, whatever this Mac calls it |
 | `Cameraflip` | off | mirror the image on X **before Vision sees it**. Restarts by itself |
 | `Listcameras` | pulse | re-enumerate and repopulate the menu |
 | `Streamhands` | on | hand pose |
@@ -476,6 +476,12 @@ they stop the stream cooking at once.
 
 Camera enumeration opens no device and raises no permission prompt, so `Listcameras` is
 safe to press at any time.
+
+`(default)` is resolved by the sidecar from the device **type**, not the name — the
+built-in camera is "MacBook Pro Camera" on one Mac and "FaceTime HD Camera" on another —
+and `outvideo` follows the same choice: `Listcameras` records which device that is, and
+the first start on a machine other than the one that saved the file does the same by
+itself.
 
 **`Auto Refresh` restarts for you.** Nine labels on this page say "restart to apply";
 with this on, changing one waits three seconds after the last change and then restarts.

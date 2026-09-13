@@ -53,7 +53,7 @@ def main():
     for stale in [n for n in list(sys.modules)
                   if n == "appletd" or n.startswith("appletd.")]:
         del sys.modules[stale]
-    from appletd.streams import DEFAULT_CAMERA_NAME
+    from appletd.streams import DEFAULT_CAMERA_NAMES
     from appletd.td_layout import (
         OUTPUT_ORDER,
         ensure,
@@ -102,22 +102,28 @@ def main():
     # callback because the device list repopulates when something is plugged in, and
     # an expression re-evaluates then.
     #
-    # A SUBSTRING, matching what `--camera` has always taken, and that is what makes
-    # `(default)` work: it resolves to `DEFAULT_CAMERA_NAME`, the same substring the
-    # sidecar falls back to with no `--camera`. Both sides therefore pick the same
+    # WHICH NAME. A chosen camera is looked up by its own name. `(default)` is
+    # whatever the ENGINE picks with no `--camera` - the built-in camera, by device
+    # type, which this TOP cannot see. So the engine's choice is read from
+    # `default_camera`, stored on the COMP by the control module whenever it
+    # enumerates: `Refresh Camera List`, the end of a build, and the first start on a
+    # machine other than the one that saved the file. Until that has happened here,
+    # the engine's own name fallbacks stand in, so a Mac whose camera is "FaceTime HD
+    # Camera" has a picture from the first frame. Both sides therefore pick the same
     # device, which is the property that matters - the overlay is drawn on this
     # picture, so a picture from a different camera than the tracking is worse than
-    # no picture.
+    # no picture. Storage is dependable, so the expression follows the stored name.
     #
-    # `''` ONLY when nothing matches. An empty device opens nothing: MEASURED, the
-    # TOP goes to a blank 128x128 and reports no error at all. It does NOT mean "let
-    # the engine pick", which is what this comment claimed until `(default)` was
-    # tried and the video output went empty.
+    # `''` ONLY when nothing matches. An empty device opens nothing: the TOP sits at a
+    # blank 128x128, and newer builds warn `Initializing` while it does. It does NOT
+    # mean "let the engine pick".
     video.par.device.expr = (
-        "next((token for token, label in zip(me.par.device.menuNames,"
-        " me.par.device.menuLabels)"
-        " if (op.Appletd.par.Camera.eval() if op.Appletd.par.Camera.eval() != %r"
-        " else %r) in label), '')" % (CAMERA_DEFAULT, DEFAULT_CAMERA_NAME))
+        "next((token for want in ([op.Appletd.par.Camera.eval()]"
+        " if op.Appletd.par.Camera.eval() != %r"
+        " else [op.Appletd.fetch('default_camera', '')] + list(%r))"
+        " if want"
+        " for token, label in zip(me.par.device.menuNames, me.par.device.menuLabels)"
+        " if want in label), '')" % (CAMERA_DEFAULT, DEFAULT_CAMERA_NAMES))
 
     # -- which picture ------------------------------------------------------
     # `Input Mode` decides, and the Switch is what makes `Output Video` mean the same
@@ -175,6 +181,8 @@ def main():
     out.par.connectorder = OUTPUT_ORDER[OUT]
 
     print("   %-11s active <- Output Video and Input Mode = Camera" % VIDEO_IN)
+    print("   %-11s device <- Camera; (default) follows the engine's stored choice"
+          % VIDEO_IN)
     print("   %-11s index <- Input Mode (camera, or the COMP's image input)" % SOURCE)
     print("   %-11s flipx <- Camera Flip (the ONE image Vision did not mirror)"
           % FLIP)

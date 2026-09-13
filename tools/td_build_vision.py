@@ -169,6 +169,15 @@ SIDECAR_LOG = "/tmp/appletd_sidecar.log"
 # than an empty string, because TouchDesigner refuses "" as a menu NAME at the C level -
 # a SystemError with no Python exception behind it. Mapped back to blank below.
 CAMERA_DEFAULT = "__default__"
+# What `--list-cameras` prints beside the device the engine picks for `(default)`.
+# appletd/streams.py owns the value; it is interpolated, not retyped.
+DEFAULT_MARK = %(default_mark)r
+# The launch is watched from here, once a second, until the process is gone or has sent
+# its first bundle - and no longer than the limit. A camera warms up in ~1.5 s; a cold
+# Core ML compile for depth can run for tens of seconds. `check_started` has the why.
+STARTUP_FIRST_CHECK_MS = 1200
+STARTUP_POLL_MS = 1000
+STARTUP_POLL_LIMIT = 60
 
 # Interpolated from the module-level REQUEST_TOGGLES below, NOT written out here.
 # One definition, so the launcher's loop and the builder's check cannot disagree -
@@ -656,8 +665,17 @@ def start():
     camera = "" if comp is None else str(comp.par.Camera.eval()).strip()
     if camera == CAMERA_DEFAULT:
         # "(default)" means don't pass --camera at all, so engine.py's own default
-        # decides.
+        # decides: the built-in camera, by device type.
         camera = ""
+        # AND `video_in` HAS TO FOLLOW THAT CHOICE, which it can only do by name. The
+        # name is stored by `list_cameras`, along with which machine stored it; a .tox
+        # saved on one Mac carries the other Mac's camera name until this runs here.
+        # Once per machine, so a start costs nothing after the first.
+        if (comp is not None
+                and comp.fetch("default_camera_home", "") != os.path.expanduser("~")):
+            print("[appletd] the default camera is not resolved on this machine - "
+                  "enumerating, so the picture follows the sidecar's choice")
+            refresh_cameras(comp)
     # The base port. Read from the COMP rather than baked in, so the OSC In CHOPs -
     # which bind it through an expression on the same parameter - and the process we
     # start cannot disagree about where the data goes.
@@ -747,6 +765,9 @@ def start():
         print("[appletd] could not open %%s (%%s) - starting without a log"
               %% (SIDECAR_LOG, problem))
         log = subprocess.DEVNULL
+    # Read BEFORE the launch: `check_started` calls the process live the moment this
+    # value moves, and it can only move because the new process sent something.
+    uptime_before = _uptime_now(comp)
     process = subprocess.Popen(
         argv, cwd=package_root(comp) or None, env=sidecar_environment(comp),
         # Line-buffered on the child's side already (`flush=True` at every print in
@@ -770,12 +791,15 @@ def start():
     # there (DESIGN.md 2.11), which a string is.
     if comp is not None:
         comp.store("launch_signature", launch_signature(comp))
+        comp.store("uptime_at_launch", uptime_before)
         comp.unstore("failure_reason")
         set_state(comp)
-        # AND ASK AGAIN IN A MOMENT. A process that rejects its arguments is alive
-        # now and gone in milliseconds; this is what turns that into a status.
+        # AND KEEP ASKING FOR A WHILE. A process that rejects its arguments is alive
+        # now and gone in milliseconds; one that finds no camera is gone in seconds.
+        # `check_started` re-schedules itself until the process has either gone or
+        # sent its first bundle - the only proof that it is really up.
         run("op(%(comp)r).op('sidecar_control').module.check_started()",
-            delayMilliSeconds=1200)
+            delayMilliSeconds=STARTUP_FIRST_CHECK_MS)
         # AND RE-TRIM ONCE THE NEW CHANNELS HAVE ARRIVED.
         #
         # The output trim is a Select with a KEEP LIST, and that list is rebuilt when
@@ -1023,20 +1047,53 @@ def list_cameras(comp=None):
         print("[appletd] --list-cameras exited %%d: %%s"
               %% (found.returncode, found.stderr.strip()[:400]))
         return []
-    names = []
+    names, default = _parse_camera_lines(found.stdout)
     print("[appletd] capture devices - put any part of a name in `Camera`:")
-    for line in found.stdout.splitlines():
-        name = line.split("\t")[0].strip()
-        if not name:
-            continue
-        names.append(name)
-        print("[appletd]    %%s" %% line.replace("\t", "   "))
+    for name in names:
+        print("[appletd]    %%s%%s" %% (name, "   <- (default)" if name == default else ""))
+    if names and comp is not None:
+        # THE ENGINE'S CHOICE, kept where `video_in` can read it. That TOP cannot see
+        # device types, only names, so `(default)` there means "the name marked here".
+        # The home directory records WHICH MACHINE answered, because a .tox carries
+        # its storage: opened on another Mac, the stored name is the other Mac's
+        # camera until `start()` sees the mismatch and enumerates again. Recorded ONLY
+        # when a device was marked: an installed sidecar older than the mark prints
+        # two columns, and a blank answer must not close the door - the next start
+        # asks again, and keeps asking until an install that can answer is in place.
+        comp.store("default_camera", default)
+        if default:
+            comp.store("default_camera_home", os.path.expanduser("~"))
+        else:
+            comp.unstore("default_camera_home")
     return names
+
+
+def _parse_camera_lines(text):
+    """`--list-cameras` output -> (device names in order, the default's name or "").
+
+    Pure, so the test suite can hold it to the sidecar's contract: `name`, a tab,
+    `uniqueID`, and a third column carrying DEFAULT_MARK on the device the engine
+    picks with no `--camera`. A line without a tab is not a device - the "(no video
+    capture devices found)" notice is one - and a two-column line from an older
+    sidecar is a device with no mark.
+    """
+    names = []
+    default = ""
+    for line in text.splitlines():
+        fields = [field.strip() for field in line.split("\t")]
+        if len(fields) < 2 or not fields[0]:
+            continue
+        names.append(fields[0])
+        if len(fields) > 2 and fields[2] == DEFAULT_MARK and not default:
+            default = fields[0]
+    return names, default
 
 
 def refresh_cameras(comp=None, want=None):
     """Re-enumerate the devices and put them in the `Camera` menu.
 
+    Also records the device the engine marks as its default, so `video_in` can show
+    the same camera `(default)` tracks with - see `list_cameras`.
     Contract: the CURRENT value survives even if the device has gone - it is kept as
               an entry rather than silently swapped for whatever is first. A camera
               unplugged should read as a camera unplugged, not as a different camera.
@@ -1120,7 +1177,8 @@ def failure_reason():
     "your python interpreter from there.", the tail of a wrapped numpy message, which
     is a sentence fragment and tells nobody anything.
 
-    A heartbeat line means the process is alive and this is not a failure at all.
+    A heartbeat line means the process is alive, and a `signal N; stopping` line means
+    it was stopped on purpose; neither is a failure at all.
     """
     try:
         with open(SIDECAR_LOG) as handle:
@@ -1128,27 +1186,60 @@ def failure_reason():
     except OSError:
         return ""
     summary = [line for line in lines if line.strip() and not line[0].isspace()]
-    if not summary or summary[-1].startswith("sends "):
+    if not summary or summary[-1].startswith(("sends ", "signal ")):
+        # A heartbeat means it was alive; a signal means it was told to stop. Neither
+        # is a reason it failed.
         return ""
     return summary[-1][:120]
 
 
-def check_started(comp=None):
-    """Did the sidecar survive its first second? Scheduled by `start`.
+def _uptime_now(comp):
+    """`sc_uptime_s` as the hands OSC In CHOP holds it, or -1.0 with no such channel.
 
-    WHY IT IS DELAYED rather than checked inline: `Popen` returns the moment the
-    process exists, and a process that rejects its arguments is alive for a few
-    milliseconds after that. Checking immediately would always say "Running".
+    The channel comes FROM the process, and an OSC In CHOP keeps the last value it
+    received - so a stopped sidecar leaves it frozen, and a value that has moved since
+    a launch can only mean the new process is sending.
+    """
+    osc = None if comp is None else comp.op("hands_osc")
+    chan = None if osc is None else osc["sc_uptime_s"]
+    return -1.0 if chan is None else float(chan)
+
+
+def check_started(comp=None, attempt=0):
+    """Did the sidecar survive its launch? Scheduled by `start`; re-schedules itself.
+
+    WHY IT POLLS rather than checking once: `Popen` returns the moment the process
+    exists. A process that rejects its arguments is gone milliseconds later; one that
+    finds no camera is gone about three seconds later, because it imports Vision first
+    and tears down properly after. A single check at 1.2 s caught the first and called
+    the second `Running` - with no process behind the light and the reason sitting in
+    the log. So this asks once a second until the process is gone, or until its first
+    bundle has arrived, which is the only proof it is really up, or until the limit.
+    pgrep once a second for the length of a start is nothing; per frame it would be
+    rude, which is why `set_state` is never on a timer.
     """
     comp = comp or op(%(comp)r)
-    if comp is None or running_pids():
+    if comp is None:
         return
-    reason = failure_reason()
-    if reason:
-        comp.store("failure_reason", reason)
-        print("[appletd] the sidecar exited at startup: %%s" %% reason)
-        print("[appletd]   full log: %%s" %% SIDECAR_LOG)
-    set_state(comp)
+    if not bool(comp.par.Active.eval()):
+        # Switched off while the launch was still being watched. A stop on purpose
+        # is not a failure, and the log's last line would say `signal 15; stopping`.
+        set_state(comp)
+        return
+    if not running_pids():
+        reason = failure_reason()
+        if reason:
+            comp.store("failure_reason", reason)
+            print("[appletd] the sidecar exited at startup: %%s" %% reason)
+            print("[appletd]   full log: %%s" %% SIDECAR_LOG)
+        set_state(comp)
+        return
+    landed = _uptime_now(comp) != comp.fetch("uptime_at_launch", -1.0)
+    if landed or attempt >= STARTUP_POLL_LIMIT:
+        set_state(comp)
+        return
+    run("op(%(comp)r).op('sidecar_control').module.check_started(attempt=%%d)"
+        %% (attempt + 1), delayMilliSeconds=STARTUP_POLL_MS)
 
 
 def set_state(comp=None):
@@ -1183,7 +1274,8 @@ def set_state(comp=None):
     Called on every launch-flag change and on every button. NOT on a timer: pgrep
     costs milliseconds, which is nothing on a change and rude every frame. So a
     process that dies on its own will read `Running` until something asks - and
-    `sc_uptime_s` freezing is the signal that catches that.
+    `sc_uptime_s` freezing is the signal that catches that. The one exception is a
+    launch, which `check_started` watches once a second until the first bundle lands.
     """
     comp = comp or op(%(comp)r)
     if comp is None:
@@ -1551,14 +1643,6 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # page to be explicit; the venv is still the documented development convention and is
 # what that parameter is for.
 
-# Which camera, as a substring of the device name. Matches
-# `appletd.engine.DEFAULT_CAMERA_NAME`, and the substring form is deliberate:
-# MEASURED on this machine, `--list-cameras` returns four devices - the built-in
-# camera plus an OBS virtual camera, a Camo camera and an iPhone - so "the first
-# device" would be the wrong answer more often than not, and a device INDEX would
-# change meaning whenever something was plugged in.
-DEFAULT_CAMERA = "MacBook"
-
 # The page reorganisation. The Sidecar page named an implementation
 # detail - a consumer of this COMP does not care that a separate process holds the
 # camera - so what was operational moved to Vision and what was diagnostic moved to
@@ -1687,6 +1771,7 @@ def main():
     from appletd.install import PYTHON_URL
     from appletd.sidecar import DEFAULT_DEPTH_PATH, DEFAULT_MASK_PATH
     from appletd.streams import (
+        DEFAULT_CAMERA_MARK,
         DEFAULT_SEGMENT_QUALITY,
         SEGMENT_QUALITIES,
         STATUS_PREFIX,
@@ -1825,14 +1910,6 @@ def main():
     par_active = page.appendToggle("Active", label="Active")[0]
     par_active.default = False
 
-    # Which camera, as a SUBSTRING of the device name - which is what the sidecar's
-    # `--camera` has always taken, so this parameter and the flag cannot disagree.
-    #
-    # A string and not a MENU, deliberately. A menu would have to be populated at
-    # build time, and this machine has an OBS virtual camera, a Camo camera and an
-    # iPhone alongside the built-in one: a baked list goes wrong the moment a device
-    # is unplugged, and a menu whose entries no longer exist is worse than a field
-    # that simply does not match. `Listcameras` prints what is actually there.
     # RESTART, beside Active. Pressing Active twice does the same thing - `start()`
     # stops first - but nobody knows that from looking at a toggle, and "restart to
     # apply" appears on nine labels on this page.
@@ -1891,12 +1968,10 @@ def main():
     # Python exception to catch. So the "use the engine's own default" entry needs a
     # real token, and `start()` maps it back to blank.
     par_camera = page.appendMenu("Camera", label="Camera")[0]
-    # Seeded with ONLY the default entry, and defaulting to it. `DEFAULT_CAMERA` is
-    # "MacBook" - a SUBSTRING, which was right for a text field matched with `in` and
-    # is wrong as a menu entry, because no device is called that. The real names arrive
+    # Seeded with ONLY the default entry, and defaulting to it. The real names arrive
     # from `refresh_cameras` at the end of the build; until then "(default)" is the
-    # honest option, and it behaves exactly as the old blank field did: no `--camera`
-    # is passed and engine.py's own default decides.
+    # honest option: no `--camera` is passed and engine.py picks the built-in camera,
+    # by device type, whatever this machine calls it.
     par_camera.menuNames = [CAMERA_DEFAULT]
     par_camera.menuLabels = ["(default)"]
     par_camera.default = CAMERA_DEFAULT
@@ -2462,7 +2537,7 @@ def main():
     control.text = SIDECAR_CONTROL_SOURCE % {
         "resolver": PACKAGE_ROOT_SOURCE, "port": OSC_PORT,
         "comp": comp.path, "request_toggles": REQUEST_TOGGLES,
-        "max_pins": MAX_PINS}
+        "max_pins": MAX_PINS, "default_mark": DEFAULT_CAMERA_MARK}
 
     callbacks = comp.create(td.parameterexecuteDAT, "sidecar_callbacks")
     callbacks.nodeX, callbacks.nodeY = master_xy("sidecar_callbacks")

@@ -1706,6 +1706,15 @@ Virtual Camera and a Continuity iPhone alongside the built-in camera. Defaulting
 to index 0 is a good way to debug black frames from OBS. Match on `uniqueID`,
 or on `localizedName` with an assertion.
 
+**And do not default to a name either.** "MacBook" held on exactly one machine: the
+built-in camera is "MacBook Pro Camera" here and "FaceTime HD Camera" on the first
+Mac that was not this one, where the sidecar exited at startup. With no name given,
+the default is the built-in camera by *device type*
+(`AVCaptureDeviceTypeBuiltInWideAngleCamera`), then a name containing `MacBook` or
+`FaceTime`; virtual cameras enumerate as external devices, which is what makes the
+type safe. The panel's `(default)` follows the sidecar's choice, which
+`--list-cameras` marks in a third column.
+
 **Camera warm-up.** The first frames off a cold camera are near-black while
 exposure ramps and detect nothing. Skip ~15 frames before counting anything —
 and note §2.7 measured the ramp at **~1.5 s**, so a short window opened at

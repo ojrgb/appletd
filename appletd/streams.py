@@ -170,15 +170,24 @@ def unpack_mask_people(aux: bytes) -> int:
 # pyobjc (DESIGN.md 2.7). They are EXIF orientation values and have been these
 # numbers since TIFF 6.0; `test_orientation.py` holds them against Quartz, where
 # pyobjc is available.
-# WHICH CAMERA "default" MEANS, as a SUBSTRING of the device name - the same thing
-# `--camera` takes, so a name works identically on the command line and in the panel.
+# WHICH CAMERA "default" MEANS: the built-in camera, found by DEVICE TYPE. Only when no
+# device carries that type does the name decide - the first device containing one of
+# these, tried in this order, each a substring like `--camera` takes. Never an index.
 #
-# HERE rather than in `engine.py`, which is where it used to live: the TouchDesigner
-# builders need it to resolve `(default)` for their own Video Device In TOP, and they
-# cannot import `engine` because it imports Vision (DESIGN.md 2.7). If the two sides
-# disagreed, the PICTURE and the TRACKING would come from different cameras and the
-# overlay would sit on the wrong one.
-DEFAULT_CAMERA_NAME: Final = "MacBook"
+# The type comes first because the name is not the same on every Mac: "MacBook Pro
+# Camera" on one, "FaceTime HD Camera" on another. A single name was a rule that held
+# on exactly one machine.
+#
+# HERE rather than in `engine.py`: the TouchDesigner builders need the same fallback
+# for their own Video Device In TOP, and they cannot import `engine` because it
+# imports Vision (DESIGN.md 2.7). That TOP cannot see device types either, so the
+# engine's actual choice reaches the panel through `--list-cameras`, which marks it
+# with DEFAULT_CAMERA_MARK; these names only stand in until that has run. If the two
+# sides disagreed, the PICTURE and the TRACKING would come from different cameras.
+DEFAULT_CAMERA_NAMES: Final[tuple[str, ...]] = ("MacBook", "FaceTime")
+# The third column of `--list-cameras`, on the one device the engine picks with no
+# `--camera`. Parsed by the builders' control module; nothing else reads it.
+DEFAULT_CAMERA_MARK: Final = "default"
 
 ORIENTATION_UP: Final = 1
 ORIENTATION_UP_MIRRORED: Final = 2

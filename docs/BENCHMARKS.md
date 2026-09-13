@@ -608,3 +608,18 @@ TOP-LEFT origin, unlike every channel this project publishes.
 **The first frame after a start produces no observation at all**, because flow is a
 comparison. That is not counted as a failure; anything downstream sees the first field
 arrive one frame late.
+
+## Sidecar startup — measured 2026-09-13
+
+M4 Pro, macOS 26.6, the venv interpreter, warm disk cache. Wall clock from the shell,
+not fixture replay: these are process lifetimes, and the only question they answer is
+how long the panel has to keep asking whether the process is still there.
+
+| run | wall clock |
+|---|---|
+| `--list-cameras`: imports plus enumeration, no device opened | 0.63 s |
+| `--camera <no such name>`: import Vision, fail in `pick_device`, tear down, exit 1 | 3.08 s, at 0.5 s poll granularity |
+
+The second figure is why `check_started` polls once a second until the first bundle
+lands, rather than checking once at 1.2 s: a single check there called a process that
+dies at 3 s `Running`.

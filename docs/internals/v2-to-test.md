@@ -157,8 +157,10 @@ of the mode.
 **Output Video follows the Camera choice.** Pick a device in `Camera` and the picture
 should change with it. The `device` parameter stores an opaque token
 (`V1|||<uuid>|||0|||0|||MacBook Pro Camera`), not the name, so the expression looks the
-name up in the menu - `(default)` and any name not in the list both give an empty
-device, which lets the engine pick.
+name up in the menu. `(default)` follows the device the sidecar marks in
+`--list-cameras`, stored on the COMP as `default_camera` by `Refresh Camera List` and by
+the first start on a machine other than the one that saved the file; a name not in the
+list gives an empty device and no picture.
 
 **Output Video is a second client on the camera.** The sidecar already has the device
 open; `video_in` opens it again. macOS has allowed that since Ventura, but it is worth

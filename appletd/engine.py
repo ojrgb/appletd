@@ -26,7 +26,7 @@ from __future__ import annotations
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Final
 
 import AVFoundation as AVF
@@ -43,7 +43,7 @@ from libdispatch import (
 
 from appletd.slots import SLOT_MODE_CHIRALITY, SlotAssigner
 from appletd.streams import (
-    DEFAULT_CAMERA_NAME as STREAMS_DEFAULT_CAMERA_NAME,
+    DEFAULT_CAMERA_NAMES as STREAMS_DEFAULT_CAMERA_NAMES,
 )
 from appletd.streams import ORIENTATION_UP, orientation_for
 from appletd.types import (
@@ -89,11 +89,12 @@ if TYPE_CHECKING:
 DEFAULT_WIDTH_PX = 1280
 DEFAULT_HEIGHT_PX = 720
 
-# Substring matched case-insensitively against localizedName(). NOT an index:
-# this machine enumerates Camo, OBS Virtual Camera and a Continuity iPhone
-# alongside the built-in camera, and index 0 moves between reboots (DESIGN.md 3).
-# Re-exported: `appletd/streams.py` owns it, so the builders can read it too.
-DEFAULT_CAMERA_NAME = STREAMS_DEFAULT_CAMERA_NAME
+# What `camera_name=None` means: the built-in camera by device type, then the first
+# device whose localizedName() contains one of these, case-insensitively. NOT an
+# index: a machine enumerates virtual cameras and a Continuity iPhone alongside the
+# built-in one, and index 0 moves between reboots (DESIGN.md 3). Re-exported:
+# `appletd/streams.py` owns it, so the builders can read it too.
+DEFAULT_CAMERA_NAMES = STREAMS_DEFAULT_CAMERA_NAMES
 
 # QOS_CLASS_USER_INITIATED. A default-QoS queue can be scheduled onto efficiency
 # cores, which was a large part of the run-to-run variance in the spike.
@@ -585,8 +586,30 @@ def require_camera_access() -> None:
         "> Privacy & Security > Camera, then start capture again." % status)
 
 
-def pick_device(name_substr: str) -> ObjCObject:
-    """Find a camera by name. Raises EngineError naming what IS available.
+def default_device(devices: Sequence[ObjCObject]) -> ObjCObject | None:
+    """The camera `camera_name=None` means, or None when nothing qualifies.
+
+    Contract: the first device whose type is the built-in wide-angle camera; failing
+              that, the first whose name contains one of DEFAULT_CAMERA_NAMES, the
+              names tried in that order, case-insensitively. Pure over the list, so
+              other machines' device lists can be checked without their hardware.
+    Traps:    a virtual camera - OBS, NDI, Camo - enumerates as an external device,
+              never as built-in, which is what makes the type a safe first rule.
+              `deviceType()` is an NSString and compares equal to the constant.
+    """
+    for device in devices:
+        if device.deviceType() == AVF.AVCaptureDeviceTypeBuiltInWideAngleCamera:
+            return device
+    for name in DEFAULT_CAMERA_NAMES:
+        for device in devices:
+            if name.lower() in device.localizedName().lower():
+                return device
+    return None
+
+
+def pick_device(name_substr: str | None) -> ObjCObject:
+    """Find a camera by name, or the default for None. Raises EngineError naming
+    what IS available.
 
     Why the error lists the alternatives: the single most likely first-run
     failure is a name that does not match, and an error that says "no match"
@@ -595,6 +618,13 @@ def pick_device(name_substr: str) -> ObjCObject:
     devices = discover_devices()
     if not devices:
         raise EngineError("no video capture devices found")
+    if name_substr is None:
+        device = default_device(devices)
+        if device is None:
+            raise EngineError("no built-in camera and no device named like %s - pick "
+                              "one of %s" % (list(DEFAULT_CAMERA_NAMES),
+                                             [d.localizedName() for d in devices]))
+        return device
     for device in devices:
         if name_substr.lower() in device.localizedName().lower():
             return device
@@ -797,7 +827,7 @@ class HandEngine:
     """
 
     def __init__(self, on_frame: Callable[[LandmarkFrame], None],
-                 camera_name: str = DEFAULT_CAMERA_NAME,
+                 camera_name: str | None = None,
                  width_px: int = DEFAULT_WIDTH_PX,
                  height_px: int = DEFAULT_HEIGHT_PX,
                  max_hands: int = MAX_HANDS,
@@ -825,6 +855,9 @@ class HandEngine:
         the hundreds. MEASURED: seq went 75 -> 2 across a reload, which silently
         defeats any downstream `seq > last_seq` freshness test until the new
         engine catches up.
+
+        `camera_name` is a substring of the device name, or None for the built-in
+        camera - `pick_device` has the rule.
         """
         # CAMERA FLIP, resolved once. Vision mirrors the image before it does
         # anything else, so this costs nothing per frame and every stream gets it:
