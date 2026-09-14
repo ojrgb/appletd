@@ -69,6 +69,7 @@ instead of building your own: [`examples/`](examples/).
 | `Streamsegment` + `Segquality` | person mask: `fast`, `balanced`, `accurate` |
 | `Streamflow` + `Flowaccuracy` | optical flow, as a TOP |
 | `Streamocr` + `Ocrlevel` `Ocrlanguage` | text recognition, as a Table DAT |
+| `Ocrmode` + `Ocrtrigger` | read every frame, or one frame per pulse and nothing between |
 | `Streamdepth` + `Depthpins` | depth, and the pins that make it metric |
 | `Coordstx` `Coordspx` | world-space and pixel-space channel sets |
 | `Facekeypoints` `Onefaceonly` `Fingertipsonly` | shorten the channel list |

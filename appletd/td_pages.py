@@ -104,7 +104,8 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
         ("", ("Streamflow", "Flowaccuracy")),
     ),
     "Text": (
-        ("", ("Streamocr", "Ocrlevel", "Ocrlanguage", "Ocrcorrect", "Ocrlines")),
+        ("", ("Streamocr", "Ocrmode", "Ocrtrigger")),
+        ("Request", ("Ocrlevel", "Ocrlanguage", "Ocrcorrect", "Ocrlines")),
         ("This frame", ("Ocrfound",)),
     ),
     "Advanced": (

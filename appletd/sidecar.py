@@ -37,6 +37,8 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import socket
+import struct
 import sys
 import time
 from collections.abc import Callable
@@ -51,6 +53,7 @@ from appletd.face_types import (
 from appletd.maskbuf import DTYPE_F16, DTYPE_F32, MaskWriter
 from appletd.osc import (
     datagram_socket,
+    decode_messages,
     encode_bundle_of,
     encode_channels,
     encode_typed_message,
@@ -67,16 +70,20 @@ from appletd.source import (
     TextSource,
 )
 from appletd.streams import (
+    CONTROL_OCR_MODE,
+    CONTROL_OCR_TRIGGER,
     DEFAULT_CAMERA_MARK,
     DEFAULT_CAMERA_NAMES,
     DEFAULT_FLOW_ACCURACY,
     DEFAULT_OCR_LANGUAGE,
     DEFAULT_OCR_LEVEL,
+    DEFAULT_OCR_MODE,
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
     FLOW_ACCURACIES,
     FLOW_COMPONENTS,
     OCR_LEVELS,
+    OCR_MODES,
     REQUEST_DEPTH,
     REQUEST_FLOW,
     REQUEST_NAMES,
@@ -86,6 +93,7 @@ from appletd.streams import (
     STREAM_FACE,
     STREAM_HANDS,
     STREAM_POSE,
+    control_port,
     format_streams,
     pack_mask_aux,
     parse_streams,
@@ -193,6 +201,7 @@ class Sidecar:
                  ocr_language: str = DEFAULT_OCR_LANGUAGE,
                  ocr_correction: bool = False,
                  ocr_lines: int = DEFAULT_TEXT_LINES,
+                 ocr_mode: str = DEFAULT_OCR_MODE,
                  flip: bool = False) -> None:
         """`source` is injectable so the send path can be tested with no camera.
 
@@ -247,6 +256,16 @@ class Sidecar:
         self.ocr_language = ocr_language
         self.ocr_correction = ocr_correction
         self.ocr_lines = ocr_lines
+        self.ocr_mode = ocr_mode
+        # THE CONTROL PORT, bound in `run()` rather than here: a test builds a
+        # sidecar on ephemeral ports and never runs it, and a bind at construction
+        # would make every such test fight over base + 4. None until then, and None
+        # again if the bind fails - the sidecar then runs on its launch flags alone
+        # and the log says so once.
+        self.control: socket.socket | None = None
+        self.n_control = 0              # messages applied, of any kind
+        self.n_triggers = 0             # of which /ocr/trigger
+        self.n_control_rejected = 0
         self.source = source if source is not None else InProcessSource(
             camera_name=camera_name, slot_mode=slot_mode, streams=streams,
             on_mask=self._write_mask if REQUEST_SEGMENT in streams else None,
@@ -259,7 +278,8 @@ class Sidecar:
             depth_pins=self.depth_pins, depth_drop_m=depth_drop_m,
             depth_compute=depth_compute,
             ocr_level=ocr_level, ocr_language=ocr_language,
-            ocr_correction=ocr_correction, ocr_lines=ocr_lines, flip=flip)
+            ocr_correction=ocr_correction, ocr_lines=ocr_lines, ocr_mode=ocr_mode,
+            flip=flip)
         # A source can implement one stream and not the other. Asked once, here,
         # rather than per send: with no pose support the pose bundle is sent from
         # a blank frame, which is the same zeros a disabled stream sends.
@@ -472,6 +492,9 @@ class Sidecar:
                         writer.close()
             finally:
                 self.socket.close()
+                if self.control is not None:
+                    self.control.close()
+                    self.control = None
 
     def _camera_revoked(self) -> bool:
         """True if this host no longer has camera access. Never raises.
@@ -626,6 +649,66 @@ class Sidecar:
         self._last_optional_seq[REQUEST_OCR] = frame.seq
         return is_new
 
+    def handle_control(self, datagram: bytes) -> int:
+        """Apply every control message in one datagram. Returns how many were applied.
+
+        Two verbs, both about text: `/ocr/mode auto|manual` and `/ocr/trigger`. An
+        unknown address or a malformed packet is COUNTED and dropped, never raised -
+        this runs inside the send loop, and a stray datagram on the control port must
+        not cost a tick of every stream.
+        Thread: the send loop's, which is also where `run()` polls the socket.
+        """
+        try:
+            messages = decode_messages(datagram)
+        except (ValueError, IndexError, struct.error):
+            self.n_control_rejected += 1
+            return 0
+        applied = 0
+        text = self.text_source
+        for address, args in messages:
+            if address == CONTROL_OCR_MODE and len(args) == 1 and args[0] in OCR_MODES:
+                self.ocr_mode = str(args[0])
+                if text is not None:
+                    text.set_text_mode(self.ocr_mode)
+                applied += 1
+            elif address == CONTROL_OCR_TRIGGER:
+                if text is not None:
+                    text.trigger_text()
+                self.n_triggers += 1
+                applied += 1
+            else:
+                self.n_control_rejected += 1
+        self.n_control += applied
+        return applied
+
+    def _bind_control(self) -> None:
+        """Listen on the control port. A failure is logged once and is not fatal."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.bind((self.host, control_port(self.port)))
+        except OSError as exc:
+            sock.close()
+            print("control port %d could not be bound (%s); running on the launch "
+                  "flags alone - Text Mode and Trigger will not reach this process"
+                  % (control_port(self.port), exc), file=sys.stderr, flush=True)
+            return
+        sock.setblocking(False)
+        self.control = sock
+
+    def _poll_control(self) -> None:
+        """Drain whatever arrived since the last tick. Never blocks, never raises."""
+        sock = self.control
+        if sock is None:
+            return
+        for _ in range(64):                  # bounded: a flood must not stall the tick
+            try:
+                datagram, _peer = sock.recvfrom(4096)
+            except BlockingIOError:
+                return
+            except OSError:
+                return
+            self.handle_control(datagram)
+
     def _age_of(self, frame: object,
                 fallback: Callable[[], float] | None) -> float:
         """How stale a frame is, in ms. Frame first, clock second.
@@ -728,10 +811,15 @@ class Sidecar:
                      if stream == STREAM_HANDS else "",
                      "" if stream in self.streams else "  (DISABLED - zeros)"),
                   flush=True)
-        print("  %-6s port %d  one /ocr message, %d slots%s"
+        print("  %-6s port %d  one /ocr message, %d slots, %s%s"
               % (REQUEST_OCR, port_for(REQUEST_OCR, self.port), self.ocr_lines,
+                 self.ocr_mode,
                  "" if REQUEST_OCR in self.streams else "  (DISABLED - blank)"),
               flush=True)
+        self._bind_control()
+        if self.control is not None:
+            print("  control port %d  <- /ocr/mode, /ocr/trigger (the one port that "
+                  "runs the other way)" % control_port(self.port), flush=True)
         if self.parent_pid:
             print("watching parent pid %d; will exit when it does" % self.parent_pid,
                   flush=True)
@@ -763,6 +851,7 @@ class Sidecar:
         try:
             while self.running:
                 now = time.monotonic()
+                self._poll_control()
 
                 if now >= next_send:
                     if self.send_once():
@@ -810,11 +899,14 @@ class Sidecar:
                     text = self.text_source
                     if text is not None and REQUEST_OCR in self.streams:
                         latest = text.latest_text()
-                        parts.append("text %d line%s%s @ %.1f ms" % (
+                        parts.append("text %d line%s%s @ %.1f ms%s" % (
                             latest.found, "" if latest.found == 1 else "s",
                             " (%d beyond the %d slots)"
                             % (latest.found - latest.slots, latest.slots)
-                            if latest.found > latest.slots else "", self._text_ms()))
+                            if latest.found > latest.slots else "", self._text_ms(),
+                            " [manual, %d trigger%s]" % (self.n_triggers,
+                                                         "" if self.n_triggers == 1 else "s")
+                            if self.ocr_mode == "manual" else ""))
                     # THE IMAGE STREAMS, which had no line of their own at all - which
                     # is precisely why "is depth even on?" could not be answered from
                     # this log. A count that climbs is the whole answer, and the
@@ -1000,6 +1092,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="apply Vision's language correction - a dictionary pass "
                              "over the result. Costs about 2.4 ms at `fast`; helps "
                              "on blurry text and not on clean signage. Off by default.")
+    parser.add_argument("--ocr-mode", default=DEFAULT_OCR_MODE, choices=list(OCR_MODES),
+                        help="`auto` reads text every frame; `manual` reads it once "
+                             "per /ocr/trigger on the control port and otherwise runs "
+                             "no text request at all. Switchable live over the same "
+                             "port. (default: %(default)s)")
     parser.add_argument("--ocr-lines", type=int, default=DEFAULT_TEXT_LINES,
                         metavar="N",
                         help="rows in the text table, 1..%d. Every frame carries "
@@ -1082,7 +1179,7 @@ def main(argv: list[str] | None = None) -> int:
                       depth_compute=args.depth_compute,
                       ocr_level=args.ocr_level, ocr_language=args.ocr_language,
                       ocr_correction=args.ocr_correct, ocr_lines=args.ocr_lines,
-                      flip=args.flip)
+                      ocr_mode=args.ocr_mode, flip=args.flip)
 
     def handle_signal(signum: int, frame: FrameType | None) -> None:
         # Only sets a flag. Doing the teardown here would run camera shutdown

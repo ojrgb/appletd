@@ -167,3 +167,53 @@ def encode_channels(names: Sequence[str], values: Sequence[float]) -> bytes:
                          % (len(names), len(values)))
     return encode_bundle(
         ("/" + name, value) for name, value in zip(names, values, strict=True))
+
+
+def _string_at(message: bytes, at: int) -> tuple[str, int]:
+    """A NUL-terminated string at `at`, and the 4-aligned offset after it."""
+    end = message.index(b"\x00", at)
+    return message[at:end].decode("utf-8"), (end // 4 + 1) * 4
+
+
+def decode_messages(datagram: bytes) -> list[tuple[str, list[float | str]]]:
+    """Every message in a datagram - bare or bundled - as (address, args).
+
+    The RECEIVING half, and the sidecar's only one: it exists for the control port,
+    where TouchDesigner sends a mode or a trigger. Floats, ints (widened to float)
+    and strings; anything else raises ValueError, as does a truncated or misaligned
+    datagram, so a malformed packet is refused rather than half-read.
+    """
+    if datagram.startswith(_BUNDLE_PREFIX):
+        out: list[tuple[str, list[float | str]]] = []
+        offset = len(_BUNDLE_PREFIX_PADDED) + len(_TIMETAG_IMMEDIATE)
+        while offset < len(datagram):
+            if offset + 4 > len(datagram):
+                raise ValueError("bundle element size truncated")
+            size = struct.unpack(">i", datagram[offset:offset + 4])[0]
+            element = datagram[offset + 4:offset + 4 + size]
+            if len(element) != size:
+                raise ValueError("bundle element truncated")
+            out.extend(decode_messages(element))
+            offset += 4 + size
+        return out
+    address, cursor = _string_at(datagram, 0)
+    if not address.startswith("/"):
+        raise ValueError("OSC address must start with '/': %r" % (address,))
+    tags, cursor = _string_at(datagram, cursor)
+    if not tags.startswith(","):
+        raise ValueError("type tag string must start with ',': %r" % (tags,))
+    args: list[float | str] = []
+    for tag in tags[1:]:
+        if tag == "f":
+            args.append(struct.unpack(">f", datagram[cursor:cursor + 4])[0])
+            cursor += 4
+        elif tag == "i":
+            args.append(float(struct.unpack(">i", datagram[cursor:cursor + 4])[0]))
+            cursor += 4
+        elif tag == "s":
+            value, cursor = _string_at(datagram, cursor)
+            args.append(value)
+        else:
+            raise ValueError("unsupported OSC type tag %r" % tag)
+    return [(address, args)]
+

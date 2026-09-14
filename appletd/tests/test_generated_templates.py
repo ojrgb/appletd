@@ -58,9 +58,13 @@ TEMPLATES: tuple[tuple[str, str, dict[str, Any]], ...] = (
     ("td_add_topinput.py", "WRITER_SOURCE",
      {"comp": "/project1/appletd", "resolver": "PACKAGE_ROOT"}),
     ("td_add_topinput.py", "PULL_SOURCE",
-     {"comp": "/project1/appletd", "writer": "frames_write"}),
+     {"comp": "/project1/appletd", "writer": "frames_write",
+      "stream_toggles": ("Streamhands",)}),
+    # Sends over the control port, so it carries the resolver and a `run()` string
+    # with `%%r` inside - the escaping this file exists to catch.
     ("td_add_ocr.py", "PAR_CALLBACK_SOURCE",
-     {"table": "ocr_table", "osc": "ocr_osc",
+     {"table": "ocr_table", "osc": "ocr_osc", "writer": "frames_write",
+      "comp": "/project1/appletd", "resolver": "PACKAGE_ROOT",
       "blank_row": ["", "0.0000", "0.0000", "0.0000", "0.0000", "0.0000"]}),
 )
 

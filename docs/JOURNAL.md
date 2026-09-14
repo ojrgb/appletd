@@ -5755,3 +5755,40 @@ out of the mapping and once into a `bytearray` for writability. A header-only
 `MaskReader.seq()` and a `read(writable=True)` that copies once took it to **40% and
 0.6 ms**. The TD side reads **1.2-1.3 ms** at 1080p on the natural gauge, from 15.7.
 
+## 2026-09-14 — Manual text, and the first message into a running sidecar
+
+Omer asked for `Automatic / Manual` on the Text page with a `Trigger` pulse: Manual
+reads one frame per pulse, and between pulses both sides should be as close to idle as
+they can be. A mode that costs a restart to switch and a trigger that IS a restart were
+both non-starters, so the sentence in DESIGN.md 6.4 - "there is no control channel into
+the sidecar and there is not going to be one" - gave way, narrowly: the sidecar binds
+`Oscport + 4`, drains it once per 60 Hz tick, and understands two messages. Everything
+the port can say is also a launch flag, so a sidecar that never hears one behaves as its
+command line said, and a stray datagram is counted and dropped inside the loop rather
+than raised.
+
+**What "minimum" turned out to mean on each side.** Sidecar: `_publish_text` returns
+before Vision in manual mode unless armed, and the arm is consumed before the request
+runs so a trigger landing mid-request is kept rather than lost. TouchDesigner: the
+`ocr_osc` callback already returns on an unchanged `seq`; the new cost was the TOP Input
+writer, which the puller now cooks only if some non-text stream is on or text is
+automatic - the toggle list is baked into the DAT at build, from the COMP, so a new
+stream cannot be missed.
+
+**The race, found on paper before it was found live.** On TOP Input a trigger has to
+produce its own frame. Send the trigger, cook the writer: the reader thread picks the
+frame up within 2 ms and Vision sees it before the send loop has polled the trigger up
+to 16 ms later - and in manual mode there is no next frame to catch up on. So the pulse
+arms first and cooks the frame 40 ms later, through `run(delayMilliSeconds=)`.
+
+**Measured, live, 1080p Text TOP on TOP Input.** Automatic: sidecar `cpu 43%`, writer
+at 30 fps. Switched to Manual over the control port: `cpu 7%`, `frames` frozen, the
+writer's cook count frozen, `ocr_osc` the only operator still cooking in the COMP at
+0.07 ms. One pulse: one frame written, one inference, and the table read the NEW sign.
+
+**Not on the first try.** The first trigger read the OLD sign. `numpyArray(delayed=True)`
+returns the frame from the PREVIOUS cook - invisible while cooking continuously, and
+exactly wrong for a one-shot after idling, because the previous cook was the old sign.
+The writer now reads non-delayed when it has not cooked for more than two frames, so a
+trigger pays the GPU sync once and gets the frame it was pulsed for.
+

@@ -17,7 +17,10 @@ now ships float32 untouched and Vision is told the rows are upside down (BENCHMA
 "TOP Input at 1080p") - the writer must never convert pixels on TD's main thread again. That run
 found and fixed a TOP Input defect - nothing pulled `frames_write`, so it never cooked
 headless; `frames_pull` (an Execute DAT) now asks for it each frame while capturing.
-Unverified: the live camera path, and real signage rather than rendered text.
+Text has `Ocrmode` (Automatic/Manual) and `Ocrtrigger`, live over a control port at
+`Oscport + 4` - the first message path INTO the sidecar (DESIGN.md 6.4 says what it
+may and may not carry). Unverified: the live camera path, and real signage rather than
+rendered text.
 
 ## Read these, in this order
 

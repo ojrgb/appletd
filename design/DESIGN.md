@@ -2052,11 +2052,21 @@ obvious alternative and is worse here:
 The cost is three OSC In CHOPs instead of one, and three port numbers to keep in
 step — which is why they are computed from one constant rather than typed twice.
 
-**Streams are launch flags.** `--streams hands,pose`, parsed once at startup. There
-is no control channel into the sidecar and there is not going to be one: the
+**Streams are launch flags.** `--streams hands,pose`, parsed once at startup. The
 process is started by a `Popen` from TouchDesigner (§8.2), so a toggle is an
 argument on that command line and takes effect on the next Start. The TD toggles
 say "restart to apply" for that reason.
+
+**One control port, and what it is for — added 2026-09-14.** The sentence that stood
+here read "there is no control channel into the sidecar and there is not going to be
+one", and it held for a year. It gave way for the text request's `Manual` mode: a
+trigger that costs a 1.5 s restart is not a trigger. So the sidecar binds
+`Oscport + 4` and reads OSC from it once a tick - `/ocr/mode auto|manual` and
+`/ocr/trigger`, nothing else. The rule that replaces the old one: a launch flag stays a
+launch flag unless applying it live is the whole point of the control, and everything
+the port can say is also a launch flag, so a sidecar that never hears a message
+behaves exactly as its command line said. It is one-way and unacknowledged; the
+result of a trigger arrives where results always did, on the text port.
 
 **The channel contract per stream is CONSTANT, whatever is enabled.** A disabled
 stream still sends its bundle, all zeros, at the send rate. This is not laziness

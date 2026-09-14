@@ -35,6 +35,7 @@ from appletd.slots import SLOT_MODE_CHIRALITY
 from appletd.streams import (
     DEFAULT_OCR_LANGUAGE,
     DEFAULT_OCR_LEVEL,
+    DEFAULT_OCR_MODE,
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
     REQUEST_DEPTH,
@@ -308,10 +309,18 @@ class FaceSource(Protocol):
 
 @runtime_checkable
 class TextSource(Protocol):
-    """The text half. `latest_text()` never blocks and is never None."""
+    """The text half. `latest_text()` never blocks and is never None.
+
+    `set_text_mode` and `trigger_text` are the control port's two verbs, and both
+    are fire-and-forget: a source with no engine yet records nothing and raises
+    nothing, because the sidecar's send loop must not care whether the camera has
+    warmed up.
+    """
 
     def latest_text(self) -> TextFrame: ...
     def text_age_ms(self) -> float: ...
+    def set_text_mode(self, mode: str) -> None: ...
+    def trigger_text(self) -> None: ...
 
 
 class InProcessSource:
@@ -343,6 +352,7 @@ class InProcessSource:
                  ocr_language: str = DEFAULT_OCR_LANGUAGE,
                  ocr_correction: bool = False,
                  ocr_lines: int = DEFAULT_TEXT_LINES,
+                 ocr_mode: str = DEFAULT_OCR_MODE,
                  flip: bool = False) -> None:
         """`streams` is which Vision requests to run - see appletd/streams.py.
 
@@ -394,6 +404,9 @@ class InProcessSource:
         self._ocr_language = ocr_language
         self._ocr_correction = ocr_correction
         self._ocr_lines = ocr_lines
+        # Held here as well as on the engine, so a mode set before `start()` - or
+        # across a restart - is what the next engine is built with.
+        self._ocr_mode = ocr_mode
         self.box = LatestFrameBox()
         # Always constructed, even with pose disabled, so `latest_pose()` has the
         # full fixed shape to publish from the first tick. A disabled stream sends
@@ -537,6 +550,7 @@ class InProcessSource:
                 on_face=self.face_box.publish if face_detector is not None else None,
                 text_detector=text_detector,
                 on_text=self.text_box.publish if text_detector is not None else None,
+                text_mode=self._ocr_mode,
                 segmentation_detector=seg_detector,
                 on_mask=self._on_mask if seg_detector is not None else None,
                 depth_detector=depth_detector,
@@ -746,6 +760,22 @@ class InProcessSource:
 
     def text_age_ms(self) -> float:
         return self.text_box.age_ms()
+
+    def set_text_mode(self, mode: str) -> None:
+        """Live, and remembered for the next engine too."""
+        self._ocr_mode = mode
+        engine = self._engine
+        if engine is not None:
+            engine.set_text_mode(mode)
+
+    def trigger_text(self) -> None:
+        engine = self._engine
+        if engine is not None:
+            engine.arm_text_once()
+
+    @property
+    def text_mode(self) -> str:
+        return self._ocr_mode
 
     @property
     def streams_started(self) -> tuple[str, ...]:

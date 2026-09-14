@@ -18,6 +18,7 @@ import struct
 import pytest
 
 from appletd.osc import (
+    decode_messages,
     encode_bundle,
     encode_bundle_of,
     encode_channels,
@@ -223,3 +224,27 @@ def test_bundle_of_wraps_messages_the_same_way_encode_bundle_does() -> None:
     assert wrapped[:8] == b"#bundle\x00"
     assert struct.unpack(">i", wrapped[16:20])[0] == len(typed)
     assert wrapped[20:] == typed
+
+
+# ---------------------------------------------------------------------------
+# Decoding, for the control port
+# ---------------------------------------------------------------------------
+def test_decode_round_trips_a_typed_message_and_a_bundle() -> None:
+    message = encode_typed_message("/ocr/mode", ["manual", 0.5, ""])
+    assert decode_messages(message) == [("/ocr/mode", ["manual", 0.5, ""])]
+    bundle = encode_bundle_of([encode_typed_message("/a", []),
+                               encode_typed_message("/b", ["x y", 2.0])])
+    assert decode_messages(bundle) == [("/a", []), ("/b", ["x y", 2.0])]
+    # The channel encoder's bundles decode too - the same wire, read back.
+    assert decode_messages(encode_bundle([("/seq", 3.0)])) == [("/seq", [3.0])]
+
+
+def test_decode_widens_an_int_and_refuses_what_it_does_not_know() -> None:
+    raw = b"/x\x00\x00,i\x00\x00" + struct.pack(">i", 7)
+    assert decode_messages(raw) == [("/x", [7.0])]
+    with pytest.raises(ValueError, match="type tag"):
+        decode_messages(b"/x\x00\x00,b\x00\x00" + struct.pack(">i", 0))
+    with pytest.raises(ValueError, match="must start with"):
+        decode_messages(b"x\x00\x00\x00,\x00\x00\x00")
+    with pytest.raises((ValueError, IndexError, struct.error)):
+        decode_messages(encode_typed_message("/ocr/mode", ["manual"])[:6])

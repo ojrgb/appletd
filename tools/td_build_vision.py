@@ -749,6 +749,12 @@ def start():
         argv += ["--ocr-level", str(comp.par.Ocrlevel.eval()),
                  "--ocr-language", str(comp.par.Ocrlanguage.eval()),
                  "--ocr-lines", str(int(comp.par.Ocrlines.eval()))]
+        # The MODE is passed at launch so a manual sidecar is quiet from its first
+        # frame, but it is NOT a launch flag: switching it reaches the running process
+        # over the control port, so it is deliberately absent from `launch_pars`.
+        mode = getattr(comp.par, "Ocrmode", None)
+        if mode is not None:
+            argv += ["--ocr-mode", str(mode.eval())]
         if bool(comp.par.Ocrcorrect.eval()):
             argv += ["--ocr-correct"]
     if "depth" in streams:

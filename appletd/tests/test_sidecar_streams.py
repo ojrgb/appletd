@@ -26,6 +26,7 @@ from collections.abc import Iterator
 import pytest
 
 from appletd.face_types import FaceFrame, blank_face_frame, face_channel_names
+from appletd.osc import encode_bundle_of, encode_typed_message
 from appletd.pose_types import PoseFrame, blank_pose_frame, pose_channel_names
 from appletd.sidecar import SEQ_MODULUS, Sidecar
 from appletd.source import (
@@ -39,6 +40,8 @@ from appletd.source import (
     TextSource,
 )
 from appletd.streams import (
+    CONTROL_OCR_MODE,
+    CONTROL_OCR_TRIGGER,
     REQUEST_OCR,
     STREAM_FACE,
     STREAM_HANDS,
@@ -119,6 +122,9 @@ class FakeStreamSource:
         self.text_box = LatestTextBox(slots=text_slots)
         self._streams = streams
         self._running = False
+        # What the control port told us, for the tests below.
+        self.text_mode = "auto"
+        self.triggers = 0
 
     # -- HandSource --------------------------------------------------------
     def start(self) -> None:
@@ -165,6 +171,12 @@ class FakeStreamSource:
 
     def text_age_ms(self) -> float:
         return self.text_box.age_ms()
+
+    def set_text_mode(self, mode: str) -> None:
+        self.text_mode = mode
+
+    def trigger_text(self) -> None:
+        self.triggers += 1
 
 
 @pytest.fixture
@@ -558,3 +570,49 @@ def test_a_source_with_no_text_support_still_sends_the_text_message(
     sidecar.send_once()
     (address, _args), = decode_typed_bundle(ports[3].recv(65535))
     assert address == TEXT_ADDRESS
+
+
+# ---------------------------------------------------------------------------
+# The control port: the one that runs the other way
+# ---------------------------------------------------------------------------
+def test_a_mode_message_reaches_the_source_and_the_sidecar(
+        ports: tuple[socket.socket, ...]) -> None:
+    sidecar, source = _sidecar(ports, streams=(*STREAM_NAMES, REQUEST_OCR))
+    assert sidecar.ocr_mode == "auto" and source.text_mode == "auto"
+    applied = sidecar.handle_control(encode_typed_message(CONTROL_OCR_MODE, ["manual"]))
+    assert applied == 1
+    assert sidecar.ocr_mode == "manual" and source.text_mode == "manual"
+    sidecar.handle_control(encode_typed_message(CONTROL_OCR_MODE, ["auto"]))
+    assert source.text_mode == "auto"
+
+
+def test_a_trigger_arms_the_source_once_per_message(
+        ports: tuple[socket.socket, ...]) -> None:
+    sidecar, source = _sidecar(ports, streams=(*STREAM_NAMES, REQUEST_OCR))
+    for _ in range(3):
+        sidecar.handle_control(encode_typed_message(CONTROL_OCR_TRIGGER, []))
+    assert source.triggers == 3
+    assert sidecar.n_control == 3 and sidecar.n_triggers == 3
+    sidecar.handle_control(encode_typed_message(CONTROL_OCR_MODE, ["manual"]))
+    assert sidecar.n_control == 4 and sidecar.n_triggers == 3   # a mode is not a trigger
+
+
+def test_a_bundle_of_control_messages_is_applied_in_order(
+        ports: tuple[socket.socket, ...]) -> None:
+    sidecar, source = _sidecar(ports, streams=(*STREAM_NAMES, REQUEST_OCR))
+    bundle = encode_bundle_of([encode_typed_message(CONTROL_OCR_MODE, ["manual"]),
+                               encode_typed_message(CONTROL_OCR_TRIGGER, [])])
+    assert sidecar.handle_control(bundle) == 2
+    assert source.text_mode == "manual" and source.triggers == 1
+
+
+def test_nonsense_on_the_control_port_is_counted_and_dropped(
+        ports: tuple[socket.socket, ...]) -> None:
+    """This runs inside the send loop. A stray datagram must not cost a tick."""
+    sidecar, source = _sidecar(ports, streams=(*STREAM_NAMES, REQUEST_OCR))
+    assert sidecar.handle_control(b"hello") == 0                      # not OSC
+    assert sidecar.handle_control(encode_typed_message("/ocr/mode", ["sideways"])) == 0
+    assert sidecar.handle_control(encode_typed_message("/unknown", [1.0])) == 0
+    assert sidecar.handle_control(encode_typed_message(CONTROL_OCR_MODE, ["manual"])[:6]) == 0
+    assert sidecar.n_control_rejected == 4
+    assert source.text_mode == "auto" and source.triggers == 0

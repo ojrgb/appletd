@@ -882,6 +882,7 @@ class HandEngine:
                  on_depth: Callable[[DepthFrame], None] | None = None,
                  text_detector: TextDetector | None = None,
                  on_text: Callable[[TextFrame], None] | None = None,
+                 text_mode: str = "auto",
                  flip: bool = False) -> None:
         """seq_start continues an existing frame sequence rather than restarting it.
 
@@ -929,6 +930,12 @@ class HandEngine:
         # image either: it publishes a TextFrame into a box exactly as pose does.
         self._text_detector = text_detector if on_text is not None else None
         self._on_text = on_text if text_detector is not None else None
+        # WHEN text runs: every frame, or once per trigger. Both written from the send
+        # loop's thread (a control message) and read on the capture queue; each is a
+        # single attribute store, so a reader sees the old value or the new one, and
+        # a trigger that lands mid-frame simply takes effect on the next.
+        self._text_mode = text_mode
+        self._text_armed = False
         self._camera_name = camera_name
         self._requested_px = (width_px, height_px)
         self._max_hands = max_hands
@@ -1267,6 +1274,25 @@ class HandEngine:
         self._mark_first_frame()
         publish(face_frame)
 
+    def set_text_mode(self, mode: str) -> None:
+        """`auto` runs text every frame; `manual` only after `arm_text_once()`.
+
+        Thread: any. One store; the capture queue picks it up on its next frame.
+        """
+        self._text_mode = mode
+
+    def arm_text_once(self) -> None:
+        """Run the text request on the next frame, whatever the mode. Thread: any."""
+        self._text_armed = True
+
+    @property
+    def text_mode(self) -> str:
+        return self._text_mode
+
+    @property
+    def text_armed(self) -> bool:
+        return self._text_armed
+
     def _publish_text(self, sample_buffer: ObjCObject, captured_at: float,
                        orientation: int) -> None:
         """Run the text request on the buffer the other streams have already seen.
@@ -1275,12 +1301,19 @@ class HandEngine:
         Contract: shares `_seq` and `captured_at` with the other streams' frames from
                   the same buffer. A frame with NO text is still published - the
                   table then reads blank, which is the truth, and it is what lets a
-                  sign leaving the frame clear the rows.
+                  sign leaving the frame clear the rows. In MANUAL mode nothing runs
+                  and nothing is published until a trigger arms it, so the last
+                  reading stands in the table until the next.
         Never raises: a text fault costs the text and nothing else.
         """
         detector, publish = self._text_detector, self._on_text
         if detector is None or publish is None:
             return
+        if self._text_mode == "manual" and not self._text_armed:
+            return
+        # Consumed BEFORE the request runs, so a trigger arriving during the 10 ms
+        # it takes is kept for the next frame rather than lost.
+        self._text_armed = False
         width_px, height_px = self.delivered_px or self._requested_px
         try:
             text_frame = detector.detect_sample_buffer(

@@ -654,7 +654,12 @@ all Vision can use — so at TouchDesigner's 60 the readback runs every other fr
 | sidecar `read` gauge | — | 0.6 ms |
 | sidecar `wrap` gauge | — | 0.08 ms |
 
-The first run after the change read **55%** and `read 1.2 ms`, and both were the
+**Manual text mode**, same rig, measured live: `cpu 7%` against Automatic's 43%, the
+writer's cook count frozen, and one pulse costing one frame (read 2-4 ms cold, against
+0.6 warm) and one 11 ms inference. The 7 that remain are the 60 Hz send loop encoding
+three streams of zeros plus the text message, and the poll.
+
+The first run after the float change read **55%** and `read 1.2 ms`, and both were the
 reader's poll loop: `MaskReader.read()` copied the whole 33 MB payload every 2 ms to
 find out whether `seq` had moved, and `frames.py` copied it again into a `bytearray`.
 `MaskReader.seq()` now peeks at the header, and `read(writable=True)` copies once —

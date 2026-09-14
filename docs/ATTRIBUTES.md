@@ -668,6 +668,8 @@ a TOP, because what `VNRecognizeTextRequest` returns is strings.
 | parameter | default | what it does |
 |---|---|---|
 | `Streamocr` | off | the text request. A launch flag |
+| `Ocrmode` | `Automatic` | `Automatic` reads every frame. `Manual` reads **nothing until `Ocrtrigger` is pulsed**, then one frame, and the table holds that reading. Live — no restart |
+| `Ocrtrigger` | pulse | read one frame now, in either mode. Live |
 | `Ocrlevel` | `fast` | `fast` (5.9 ms) or `accurate` (48 ms). A launch flag |
 | `Ocrlanguage` | `en-US` | the language(s) to read, as BCP 47 tags, comma-separated. **Empty means detect**, which is the slow path. A launch flag |
 | `Ocrcorrect` | off | Vision's language correction — a dictionary pass over the result, +2.4 ms. Helps blurry text, not clean signage. A launch flag |
@@ -695,6 +697,12 @@ The table has a header row and then exactly `Ocrlines` rows, always:
   nothing downstream.
 - The text arrives on `Oscport + 3` as one OSC message a frame; `ocr_osc`'s callback
   writes the table. The DAT's own table is not the output and is kept to one line.
+- **Manual mode costs nothing between triggers**, on either side: the sidecar runs no
+  text request, and on TOP Input the frame writer stops cooking unless another stream
+  wants frames. `Ocrmode` and `Ocrtrigger` reach the running sidecar over
+  `Oscport + 4`, the one message path into it; a trigger on TOP Input arms the sidecar
+  and then cooks one frame 40 ms later. Measured: 7% of a core in Manual against 43% in
+  Automatic, for a 1080p input.
 
 ---
 

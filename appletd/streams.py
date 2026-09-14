@@ -111,6 +111,16 @@ DEFAULT_OCR_LEVEL: Final = "fast"
 # - and an empty string means "detect it", which is the slow path.
 DEFAULT_OCR_LANGUAGE: Final = "en-US"
 
+# WHEN the text request runs. `auto` is every frame, like every other request.
+# `manual` runs it ONCE per `/ocr/trigger` and otherwise not at all - so a sign that
+# is read once and then left alone costs nothing after the reading, on either side.
+# The mode is a launch flag AND a control message: the flag so a sidecar started in
+# manual mode is quiet from its first frame, the message so switching needs no restart.
+OCR_MODE_AUTO: Final = "auto"
+OCR_MODE_MANUAL: Final = "manual"
+OCR_MODES: Final[tuple[str, ...]] = (OCR_MODE_AUTO, OCR_MODE_MANUAL)
+DEFAULT_OCR_MODE: Final = OCR_MODE_AUTO
+
 # The optical flow accuracy levels, IN COST ORDER, and here for exactly the reason the
 # segmentation qualities below are: `sidecar.py` needs them for its command line and
 # must stay importable with no pyobjc, and `tools/td_add_flow.py` needs them for a menu
@@ -298,6 +308,25 @@ def port_for(stream: str, base_port: int = BASE_PORT) -> int:
 
 
 # ---------------------------------------------------------------------------
+# The control port - the one that runs the OTHER way
+# ---------------------------------------------------------------------------
+# Streams are launch flags and the sidecar has never listened to anything after
+# starting (DESIGN.md 6.4). This is the deliberate exception: a UDP port the SIDECAR
+# binds, on which TouchDesigner sends the few things that must not cost a restart -
+# today the text request's mode and its trigger. Nothing here changes what is on the
+# wire to TouchDesigner, and a sidecar that never hears a message behaves exactly as
+# its launch flags said.
+CONTROL_PORT_OFFSET: Final = 4
+CONTROL_OCR_MODE: Final = "/ocr/mode"          # one string: an OCR_MODES name
+CONTROL_OCR_TRIGGER: Final = "/ocr/trigger"    # no arguments: run text once
+
+
+def control_port(base_port: int = BASE_PORT) -> int:
+    """Where the sidecar listens. Base plus the offset after the last stream port."""
+    return base_port + CONTROL_PORT_OFFSET
+
+
+# ---------------------------------------------------------------------------
 # The launch flag
 # ---------------------------------------------------------------------------
 def parse_streams(text: str) -> tuple[str, ...]:
@@ -429,6 +458,12 @@ def _self_check() -> None:
     if DEFAULT_OCR_LEVEL not in OCR_LEVELS:
         raise RuntimeError("the default text level %r is not one of %s"
                            % (DEFAULT_OCR_LEVEL, OCR_LEVELS))
+    if DEFAULT_OCR_MODE not in OCR_MODES:
+        raise RuntimeError("the default text mode %r is not one of %s"
+                           % (DEFAULT_OCR_MODE, OCR_MODES))
+    if CONTROL_PORT_OFFSET in PORT_OFFSETS.values():
+        raise RuntimeError("the control port collides with a stream's port: the "
+                           "sidecar would bind a port it also sends to")
     if DEFAULT_SEGMENT_QUALITY not in SEGMENT_QUALITIES:
         raise RuntimeError("the default segmentation quality %r is not one of %s"
                            % (DEFAULT_SEGMENT_QUALITY, SEGMENT_QUALITIES))
