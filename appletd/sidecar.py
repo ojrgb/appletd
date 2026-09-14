@@ -388,6 +388,11 @@ class Sidecar:
                      aux=frame.fit.pack())
         self.n_depth_written += 1
 
+    def _text_ms(self) -> float:
+        """The most recent text inference, in ms. A gauge, on `_depth_ms`'s terms."""
+        engine = getattr(self.source, "_engine", None)
+        return float(getattr(engine, "text_inference_ms", 0.0)) if engine else 0.0
+
     def _depth_ms(self) -> float:
         """The most recent depth inference, in ms. A GAUGE, not a measurement.
 
@@ -747,6 +752,13 @@ class Sidecar:
         next_parent_check = time.monotonic() + PARENT_CHECK_INTERVAL_S
         frames_at_last_status = 0
         new_frames = 0
+        # For the `cpu` figure on the status line: this process's CPU time over the
+        # interval, every thread included, against the wall clock. It is the one
+        # number that says what a transport or a request costs THIS side, measured
+        # rather than argued - the TOP Input path was moved off TouchDesigner's main
+        # thread on the strength of it.
+        cpu_at_last_status = time.process_time()
+        wall_at_last_status = time.monotonic()
 
         try:
             while self.running:
@@ -777,8 +789,13 @@ class Sidecar:
                     # `age` has the same problem and the same fix: it is the HANDS
                     # box's age, so it is only shown when hands is on.
                     sends = (new_frames - frames_at_last_status) / STATUS_INTERVAL_S
+                    cpu_now, wall_now = time.process_time(), time.monotonic()
+                    cpu_pct = 100.0 * (cpu_now - cpu_at_last_status) / max(
+                        1e-6, wall_now - wall_at_last_status)
+                    cpu_at_last_status, wall_at_last_status = cpu_now, wall_now
                     pose, face = self.pose_source, self.face_source
-                    parts = ["sends %5.1f/s | sent %d" % (sends, self.n_sent)]
+                    parts = ["sends %5.1f/s | sent %d | cpu %3.0f%%"
+                             % (sends, self.n_sent, cpu_pct)]
                     if STREAM_HANDS in self.streams:
                         parts.append("age %6.1f ms | hands %d"
                                      % (self.source.age_ms(),
@@ -793,11 +810,11 @@ class Sidecar:
                     text = self.text_source
                     if text is not None and REQUEST_OCR in self.streams:
                         latest = text.latest_text()
-                        parts.append("text %d line%s%s" % (
+                        parts.append("text %d line%s%s @ %.1f ms" % (
                             latest.found, "" if latest.found == 1 else "s",
                             " (%d beyond the %d slots)"
                             % (latest.found - latest.slots, latest.slots)
-                            if latest.found > latest.slots else ""))
+                            if latest.found > latest.slots else "", self._text_ms()))
                     # THE IMAGE STREAMS, which had no line of their own at all - which
                     # is precisely why "is depth even on?" could not be answered from
                     # this log. A count that climbs is the whole answer, and the
@@ -809,7 +826,12 @@ class Sidecar:
                     reader = getattr(self.source, "frame_reader", None)
                     if reader is not None:
                         if reader.frames_read:
-                            parts.append("frames %d" % reader.frames_read)
+                            # What THIS side pays per frame for the transport: the
+                            # copy out of the seqlock and the wrap for Vision. Both
+                            # gauges; both should read well under a millisecond.
+                            parts.append("frames %d @ read %.2f wrap %.2f ms"
+                                         % (reader.frames_read, reader.last_read_ms,
+                                            reader.last_wrap_ms))
                             if reader.frames_skipped:
                                 parts[-1] += " (skipped %d)" % reader.frames_skipped
                         else:

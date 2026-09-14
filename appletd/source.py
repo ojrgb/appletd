@@ -609,7 +609,7 @@ class InProcessSource:
         submitting = threading.Lock()
 
         def pump() -> None:
-            from appletd.frames import sample_buffer_from_bgra
+            from appletd.streams import orientation_for
             while not stop_event.is_set():
                 try:
                     newest = reader.latest()
@@ -625,7 +625,9 @@ class InProcessSource:
                     # than a spin, and short enough not to add latency of its own.
                     stop_event.wait(0.002)
                     continue
-                pixels, captured_at = newest
+                # The frame says how it is to be read; the flip is the user's. Both
+                # become one orientation on the request - no pixel is touched here.
+                orientation = orientation_for(self._flip, upside_down=newest.upside_down)
                 # THE ONE CALL THAT REACHES INTO THE ENGINE, and the only thing the
                 # lock covers. Re-checking `stop_event` INSIDE it is what makes the
                 # barrier a barrier: a teardown that has set the event and taken the
@@ -636,8 +638,10 @@ class InProcessSource:
                     if stop_event.is_set():
                         break
                     try:
-                        engine.submit_sample_buffer(
-                            sample_buffer_from_bgra(pixels, captured_at))
+                        wrap_started_s = time.perf_counter()
+                        sample = newest.to_sample_buffer()
+                        reader.last_wrap_ms = (time.perf_counter() - wrap_started_s) * 1e3
+                        engine.submit_sample_buffer(sample, orientation)
                     except Exception as exc:           # noqa: BLE001
                         self._retained_errors.append("frame submit failed: %s" % exc)
                         stop_event.wait(0.25)

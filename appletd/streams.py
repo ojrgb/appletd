@@ -219,10 +219,21 @@ DEFAULT_CAMERA_MARK: Final = "default"
 
 ORIENTATION_UP: Final = 1
 ORIENTATION_UP_MIRRORED: Final = 2
+# Rotated 180 degrees, and flipped about the horizontal axis. The TOP Input path
+# needs the second: TouchDesigner hands a frame back with the BOTTOM row first, and
+# telling Vision so costs nothing where turning 33 MB of pixels over on
+# TouchDesigner's main thread cost 3.4 ms a frame. Mirror plus upside-down is a
+# half turn, which is the first.
+ORIENTATION_DOWN: Final = 3
+ORIENTATION_DOWN_MIRRORED: Final = 4
 
 
-def orientation_for(flip: bool) -> int:
+def orientation_for(flip: bool, upside_down: bool = False) -> int:
     """The EXIF orientation a `Camera Flip` setting asks Vision for.
+
+    `upside_down` is the TOP Input path only: its frames arrive bottom row first,
+    and this is where that fact becomes a flag on the request rather than a pass
+    over the pixels. The camera path never sets it.
 
     WHAT MOVES WITH IT, and it is everything: Vision reports landmark coordinates
     in the ORIENTED image, and returns its image outputs - the segmentation mask,
@@ -239,6 +250,8 @@ def orientation_for(flip: bool) -> int:
     the honest answer for an overlay drawn on a mirrored image, and the wrong one
     for asking which of the user's actual hands is raised.
     """
+    if upside_down:
+        return ORIENTATION_DOWN if flip else ORIENTATION_DOWN_MIRRORED
     return ORIENTATION_UP_MIRRORED if flip else ORIENTATION_UP
 
 # What runs when nobody says otherwise: exactly what ran before there was a

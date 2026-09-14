@@ -12,7 +12,9 @@ chain has been run against the open project, so the live `.toe` has the Text pag
 `outtext` on connector 5 — but the file has NOT been saved or re-exported; that is
 Omer's step. The installed package under `~/Library/Application Support/appletd` is
 two modules short (`ocr`, `text_types`) until Install is pressed, and the panel says so.
-Verified in Omer's project: TOP Input with a Text TOP reads into `outtext`. That run
+Verified in Omer's project: TOP Input with a Text TOP reads into `outtext`. TOP Input
+now ships float32 untouched and Vision is told the rows are upside down (BENCHMARKS,
+"TOP Input at 1080p") - the writer must never convert pixels on TD's main thread again. That run
 found and fixed a TOP Input defect - nothing pulled `frames_write`, so it never cooked
 headless; `frames_pull` (an Execute DAT) now asks for it each frame while capturing.
 Unverified: the live camera path, and real signage rather than rendered text.

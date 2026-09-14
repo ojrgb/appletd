@@ -604,6 +604,53 @@ GPU sync, so a frame that arrives mid-render stalls - 3.3 ms at 720p, 10 ms at 1
 costs one frame of latency and removes the spike. For a capture path already one frame
 behind, that is the right trade.
 
+## TOP Input at 1080p — the float path, measured 2026-09-14
+
+Found by Omer: a 1920×1080 Text TOP into `Input Mode = TOP Input` put **15.7 ms** on
+TouchDesigner's main thread per frame (`frames_write`, natural gauge, 8-bit RGBA
+input). The readback was 0.57 of it. The rest was the conversion to BGRA bytes, because
+`numpyArray()` returns **float32 whatever the TOP's format** — 33 MB a frame — and the
+writer walked it five times.
+
+The same array, pass by pass, in the sidecar's venv (best of 15, M4 Pro):
+
+| pass over 33 MB float32 | ms |
+|---|---|
+| flip + BGRA swizzle (fancy index) | 3.36 |
+| clip | 2.12 |
+| ×255 + 0.5 | 1.12 |
+| cast to uint8 | 2.35 |
+| contiguous copy + `tobytes` | 4.51 |
+| **whole chain, as it ran in TouchDesigner** | **14.16** |
+| cast-first, no clip (the best reordering) | 10.47 |
+
+So reordering could not fix it; the float→uint8 cast of 33 MB is the floor while the
+cast happens at all.
+
+**What replaced it.** The float array goes into the buffer untouched, and Vision reads
+it as it is — a `128RGBAFloat` pixel buffer, with the bottom-first row order given to
+the request as an orientation (`DownMirrored`; `Down` when `Camera Flip` is on too).
+Verified: text at 1080p read correctly with the flag and as garbage without it, which
+is `test_ocr.py`'s job to keep true.
+
+| | ms per frame at 1080p |
+|---|---|
+| TD: readback, `numpyArray(delayed=True)` | 0.57 (measured 2026-09-07) |
+| TD: memcpy into the buffer, through a memoryview | **0.48** |
+| TD: the same through `.tobytes()` first | 1.01 — which is why the writer does not |
+| sidecar: copy out of the seqlock | 0.49 |
+| sidecar: conversion | **none** |
+| sidecar: the conversion, had it moved here instead | 9.59 |
+
+The writer is also paced to **30 fps** by `frames_pull` — the camera path's rate, and
+all Vision can use — so at TouchDesigner's 60 the readback runs every other frame.
+
+**How to see the sidecar's share on a running system:** the status line now carries
+`cpu NN%` (this process's CPU time over the interval, every thread, against the wall
+clock), `frames N @ read X wrap Y ms` (the two transport gauges above, live), and each
+enabled request's inference gauge. All gauges, none of them measurements; the table
+above is the measurement.
+
 ## Optical flow — measured 2026-09-07
 
 `VNTrackOpticalFlowRequest`, reference M4 Pro, synthetic textured frames shifted a known

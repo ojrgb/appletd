@@ -53,7 +53,10 @@ TEMPLATES: tuple[tuple[str, str, dict[str, Any]], ...] = (
     ("td_add_ocr.py", "CALLBACK_SOURCE",
      {"address": "/ocr", "table": "ocr_table",
       "columns": ("text", "conf", "x1", "y1", "x2", "y2"), "header": 3, "per_slot": 6}),
-    # The TOP Input puller: one `run`-free Execute DAT, but a template all the same.
+    # The TOP Input writer and its puller. The writer's body has a `%%`-formatted
+    # print, which is the escaping this file exists to catch.
+    ("td_add_topinput.py", "WRITER_SOURCE",
+     {"comp": "/project1/appletd", "resolver": "PACKAGE_ROOT"}),
     ("td_add_topinput.py", "PULL_SOURCE",
      {"comp": "/project1/appletd", "writer": "frames_write"}),
     ("td_add_ocr.py", "PAR_CALLBACK_SOURCE",

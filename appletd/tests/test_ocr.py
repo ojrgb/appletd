@@ -20,8 +20,13 @@ Image = pytest.importorskip("PIL.Image")
 ImageDraw = pytest.importorskip("PIL.ImageDraw")
 ImageFont = pytest.importorskip("PIL.ImageFont")
 
-from appletd.engine import EngineError, pixel_buffer_from_bgra  # noqa: E402
+from appletd.engine import (  # noqa: E402
+    EngineError,
+    pixel_buffer_from_bgra,
+    pixel_buffer_from_rgba_float,
+)
 from appletd.ocr import TextDetector, parse_languages, supported_languages  # noqa: E402
+from appletd.streams import ORIENTATION_DOWN_MIRRORED, ORIENTATION_UP  # noqa: E402
 from appletd.text_types import BLANK_LINE  # noqa: E402
 
 LINES = ("EXIT", "Platform 4", "No entry after 22:00", "Mind the gap")
@@ -109,3 +114,26 @@ def test_bad_arguments_are_refused_by_name() -> None:
         TextDetector(level="quick")
     with pytest.raises(EngineError, match="slots must be"):
         TextDetector(slots=0)
+
+
+def test_a_float_frame_the_wrong_way_up_reads_correctly_once_vision_is_told() -> None:
+    """THE CONTRACT THE TOP INPUT PATH RESTS ON. TouchDesigner hands frames back as
+    float32 RGBA with the bottom row first; nothing converts them. Vision must take
+    that buffer as it is, and the row order must be fixable by orientation alone -
+    otherwise the 14 ms conversion comes back."""
+    bgra = _frame()
+    rgba = numpy.ascontiguousarray(
+        bgra[::-1, :, [2, 1, 0, 3]].astype(numpy.float32) / 255.0)   # bottom row first
+    buffer = pixel_buffer_from_rgba_float(rgba)
+    detector = TextDetector(slots=8)
+    told = detector.detect_pixel_buffer(buffer, 1, time.monotonic(), 1280, 720,
+                                        orientation=ORIENTATION_DOWN_MIRRORED)
+    assert [line.text for line in told.lines if line.found] == list(LINES)
+    # And the box is reported in the UPRIGHT image: the first line drawn near the
+    # top sits near y = 1, exactly as on the uint8 path.
+    assert told.lines[0].y1 > 0.8
+    # Read as "up", the same buffer is upside down and Vision reads little or
+    # nothing that matches - which is the proof the flag is doing the work.
+    untold = detector.detect_pixel_buffer(buffer, 2, time.monotonic(), 1280, 720,
+                                          orientation=ORIENTATION_UP)
+    assert [line.text for line in untold.lines if line.found] != list(LINES)

@@ -5716,3 +5716,33 @@ One thing left as found: on the TOP path the engine still records "camera delive
 256x256, requested 1280x720" as an error every status line. It is the size assertion
 doing its job on the wrong input, and it is noise in this mode.
 
+## 2026-09-14 — 15.7 ms at 1080p, and the conversion that was never needed
+
+Omer bumped the TOP Input source to 1920x1080 and `frames_write` went to **15.7 ms** on
+TouchDesigner's main thread. The readback was 0.57 of it. Everything else was turning
+TouchDesigner's float32 RGBA - `numpyArray()` returns float32 whatever the TOP's format,
+33 MB a frame - into BGRA bytes: five passes, **14.16 ms** measured in the venv on the
+same array. Reordering the passes could get it to 10.5; the cast alone is over 2.
+
+**Moving the conversion to the sidecar was the obvious answer and only half right.** It
+would take 9.6 ms a frame off TouchDesigner and put it on the sidecar's reader thread -
+a third of a core at 30 fps, and 10 ms of latency. Measured before deciding, which is
+what made the second question worth asking: does Vision need the conversion at all? It
+does not. A `128RGBAFloat` pixel buffer wrapped straight round the float array, with the
+bottom-first row order given as `kCGImagePropertyOrientationDownMirrored`, read all
+three test lines at 1080p in 12 ms; the same buffer told it was upright read garbage.
+So the pixels are now touched by nobody: TouchDesigner copies 33 MB once (0.48 ms
+through a memoryview - `tobytes` first would have doubled it), the sidecar copies once
+out of the seqlock (0.49) and hands the array to Vision with a flag.
+
+**Kept to the TOP path, deliberately.** The camera path is untouched: `orientation_for`
+gained an `upside_down` argument the camera never passes, the engine takes an
+orientation per submitted frame and defaults to the camera's, and the
+delivered-versus-requested size assertion now applies only when there is a camera to
+lie. `frames_pull` paces the writer to 30 fps, which is what Vision could use anyway.
+
+**How the sidecar's side is measured now.** The status line carries `cpu NN%` for the
+whole process, and on the frames path `read X wrap Y ms` - the two gauges of what the
+transport costs there. `test_ocr.py` pins the contract itself: a float frame the wrong
+way up reads correctly once Vision is told, and does not otherwise.
+

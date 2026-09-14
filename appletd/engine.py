@@ -511,6 +511,38 @@ def pixel_buffer_from_bgra(bgra: Any) -> ObjCObject:
     return pixel_buffer
 
 
+# `'RGfA'`: four float32 components a pixel. Quartz spells it
+# kCVPixelFormatType_128RGBAFloat; the literal is here so a build whose bindings lack
+# the name still agrees with Vision about what the bytes are.
+PIXEL_FORMAT_128_RGBA_FLOAT: Final = 0x52476641
+
+
+def pixel_buffer_from_rgba_float(rgba: Any) -> ObjCObject:
+    """Wrap a contiguous HxWx4 float32 RGBA buffer as a CVPixelBuffer, without copying.
+
+    The TOP Input path: TouchDesigner's `numpyArray` hands back float32 whatever the
+    TOP's format, and Vision accepts that buffer as it is (MEASURED - text at 1080p
+    read correctly), so no pass over the pixels happens anywhere. Rows arrive bottom
+    first; that is told to Vision as an ORIENTATION by the caller, not fixed here.
+    Same lifetime and shape rules as `pixel_buffer_from_bgra`.
+    """
+    if getattr(rgba, "ndim", None) != 3 or rgba.shape[2] != 4:
+        raise EngineError("expected an HxWx4 RGBA float array, got shape %r"
+                          % (getattr(rgba, "shape", None),))
+    if str(getattr(rgba, "dtype", "")) != "float32":
+        raise EngineError("expected float32, got %s" % getattr(rgba, "dtype", "?"))
+    if not rgba.flags["C_CONTIGUOUS"]:
+        raise EngineError("array must be C-contiguous; use np.ascontiguousarray")
+    height_px, width_px = rgba.shape[:2]
+    rc, pixel_buffer = Quartz.CVPixelBufferCreateWithBytes(
+        None, width_px, height_px, PIXEL_FORMAT_128_RGBA_FLOAT,
+        rgba, rgba.strides[0],
+        None, None, None, None)
+    if rc != 0:
+        raise EngineError("CVPixelBufferCreateWithBytes failed: %d" % rc)
+    return pixel_buffer
+
+
 # ---------------------------------------------------------------------------
 # Capture
 # ---------------------------------------------------------------------------
@@ -959,6 +991,9 @@ class HandEngine:
         # exact instant.
         self._stopping = False
         self._running = False
+        # True between `start_frames_only()` and the next `start()`: frames come from
+        # TouchDesigner, and nothing about a camera applies to them.
+        self._frames_only = False
 
         self._seq = seq_start
         # ASSIGNED HERE, one line each, so a type checker can see them and so the
@@ -1006,12 +1041,19 @@ class HandEngine:
         if len(self.errors) < MAX_RECORDED_ERRORS:
             self.errors.append(message)
 
-    def _on_sample_buffer(self, sample_buffer: ObjCObject) -> None:
-        """One delivered camera buffer -> at most one published LandmarkFrame.
+    def _on_sample_buffer(self, sample_buffer: ObjCObject,
+                          orientation: int | None = None) -> None:
+        """One delivered buffer -> at most one published frame per stream.
 
         Thread: capture queue only. Called from the delegate, inside its
-                exception guard.
+                exception guard - or from the frame reader, which is the one other
+                caller and the only one that passes `orientation`.
+        Contract: `orientation` is the EXIF orientation Vision is told for THIS
+                buffer; None means the camera's (`Camera Flip`). The TOP Input path
+                passes its own because its frames arrive bottom row first.
         """
+        if orientation is None:
+            orientation = self._orientation
         self.n_delivered += 1
 
         # captured_at is taken HERE, as close to delivery as we can get, because
@@ -1037,7 +1079,9 @@ class HandEngine:
             # rather than raised: the frames are still usable, they are just not
             # the size any measurement assumed, and a benchmark quoting them
             # would be quoting a different resolution's numbers.
-            if self.delivered_px != self._requested_px:
+            # CAMERA ONLY. On the TOP Input path the "requested" size is nothing this
+            # engine asked for, and a 256x256 TOP is not a lying camera.
+            if self.delivered_px != self._requested_px and not self._frames_only:
                 self._record_error(
                     "camera delivered %dx%d, requested %dx%d - any performance "
                     "number from this run is not comparable"
@@ -1053,15 +1097,15 @@ class HandEngine:
         # Running pose after the hands code's early returns lets a single failed hand
         # inference take the pose stream down with it for that frame: two streams
         # sharing a callback must not share its control flow.
-        self._publish_hands(sample_buffer, captured_at)
+        self._publish_hands(sample_buffer, captured_at, orientation)
         # AFTER hands, deliberately. Both requests run on this one serial queue,
         # so whichever goes second adds its inference to the other's latency, and
         # hands is what a live TouchDesigner project is reading (DESIGN.md 6.4).
         # The consequence to know: with pose enabled, the camera's frame interval
         # has to cover BOTH inferences or AVFoundation starts dropping buffers,
         # which shows up as n_delivered falling rather than as anything failing.
-        self._publish_pose(sample_buffer, captured_at)
-        self._publish_face(sample_buffer, captured_at)
+        self._publish_pose(sample_buffer, captured_at, orientation)
+        self._publish_face(sample_buffer, captured_at, orientation)
         # LAST, and by some distance the most expensive of the four: 2.21 ms at
         # `fast` and 30.73 at `accurate` (DESIGN.md 2.18), against hands' 3.41. On
         # this one serial queue that is added to everything else's latency, so it
@@ -1069,26 +1113,27 @@ class HandEngine:
         # `accurate` selected the camera's frame interval cannot cover the total and
         # AVFoundation starts dropping buffers, which shows up as n_delivered
         # falling rather than as anything failing - the same trade pose has.
-        self._publish_mask(sample_buffer, captured_at)
+        self._publish_mask(sample_buffer, captured_at, orientation)
         # TEXT after the mask and before depth, in cost order: 5.92 ms at `fast` with
         # the language pinned (docs/BENCHMARKS.md), against the mask's 2.21 and
         # depth's 23.00.
-        self._publish_text(sample_buffer, captured_at)
+        self._publish_text(sample_buffer, captured_at, orientation)
         # LAST of all, and it is in a class of its own for cost: 23.00 ms MEASURED,
         # which on a 30 fps camera is most of the frame interval on its own. With
         # depth enabled AVFoundation will drop buffers - visible as `n_delivered`
         # falling, not as anything failing - and that is the honest trade rather than
         # a fault. Everything a live project reads has already been published by the
         # time this runs.
-        self._publish_depth(sample_buffer, captured_at)
+        self._publish_depth(sample_buffer, captured_at, orientation)
         # AND FLOW LAST OF ALL, for the same reason: MEASURED 16.2 ms at `low` and
         # 30.1 at `high` (docs/BENCHMARKS.md), so it is in depth's class rather than
         # in the streams a live project reads. After depth because depth was here
         # first and reordering two expensive requests changes which one loses a frame
         # when the camera cannot keep up - a change worth making deliberately if ever.
-        self._publish_flow(sample_buffer, captured_at)
+        self._publish_flow(sample_buffer, captured_at, orientation)
 
-    def _publish_hands(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+    def _publish_hands(self, sample_buffer: ObjCObject, captured_at: float,
+                        orientation: int) -> None:
         """Run the hand request and publish the result. Never raises.
 
         Thread: capture queue only, from `_on_sample_buffer`.
@@ -1103,7 +1148,7 @@ class HandEngine:
         try:
             frame = detector.detect_sample_buffer(
                 sample_buffer, self._seq, captured_at,
-                orientation=self._orientation)
+                orientation=orientation)
         except EngineError as exc:
             # Caught here, not left to the delegate's blanket guard, so that a
             # failing inference COUNTS. Left to the blanket guard, five
@@ -1154,7 +1199,8 @@ class HandEngine:
         if not self.first_frame.is_set():
             self.first_frame.set()
 
-    def _publish_pose(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+    def _publish_pose(self, sample_buffer: ObjCObject, captured_at: float,
+                       orientation: int) -> None:
         """Run the body-pose request on a buffer hands has already been read from.
 
         Thread: capture queue only, called at the end of `_on_sample_buffer`.
@@ -1178,7 +1224,7 @@ class HandEngine:
         try:
             pose_frame = detector.detect_sample_buffer(
                 sample_buffer, self._seq, captured_at, width_px, height_px,
-                orientation=self._orientation)
+                orientation=orientation)
         except EngineError as exc:
             self.n_pose_dropped += 1
             self._record_error("pose: %s" % exc)
@@ -1193,7 +1239,8 @@ class HandEngine:
         self._mark_first_frame()
         publish(pose_frame)
 
-    def _publish_face(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+    def _publish_face(self, sample_buffer: ObjCObject, captured_at: float,
+                       orientation: int) -> None:
         """Run the face request on the buffer the other streams have already seen.
 
         Thread: capture queue only, from `_on_sample_buffer`.
@@ -1211,7 +1258,7 @@ class HandEngine:
         try:
             face_frame = detector.detect_sample_buffer(
                 sample_buffer, self._seq, captured_at, width_px, height_px,
-                orientation=self._orientation)
+                orientation=orientation)
         except EngineError as exc:
             self.n_face_dropped += 1
             self._record_error("face: %s" % exc)
@@ -1220,7 +1267,8 @@ class HandEngine:
         self._mark_first_frame()
         publish(face_frame)
 
-    def _publish_text(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+    def _publish_text(self, sample_buffer: ObjCObject, captured_at: float,
+                       orientation: int) -> None:
         """Run the text request on the buffer the other streams have already seen.
 
         Thread: capture queue only, from `_on_sample_buffer`.
@@ -1237,7 +1285,7 @@ class HandEngine:
         try:
             text_frame = detector.detect_sample_buffer(
                 sample_buffer, self._seq, captured_at, width_px, height_px,
-                orientation=self._orientation)
+                orientation=orientation)
         except EngineError as exc:
             self.n_text_dropped += 1
             self._record_error("ocr: %s" % exc)
@@ -1246,7 +1294,8 @@ class HandEngine:
         self._mark_first_frame()
         publish(text_frame)
 
-    def _publish_mask(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+    def _publish_mask(self, sample_buffer: ObjCObject, captured_at: float,
+                       orientation: int) -> None:
         """Run the segmentation request on the buffer the other streams have seen.
 
         Thread: capture queue only, from `_on_sample_buffer`.
@@ -1265,7 +1314,7 @@ class HandEngine:
         try:
             mask = detector.detect_sample_buffer(
                 sample_buffer, self._seq, captured_at,
-                orientation=self._orientation)
+                orientation=orientation)
         except EngineError as exc:
             self.n_mask_dropped += 1
             self._record_error("segment: %s" % exc)
@@ -1290,7 +1339,8 @@ class HandEngine:
         self.n_mask_published += 1
         self._mark_first_frame()
 
-    def _publish_flow(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+    def _publish_flow(self, sample_buffer: ObjCObject, captured_at: float,
+                       orientation: int) -> None:
         """Run optical flow on the buffer the other streams have already seen.
 
         Thread: capture queue only, from `_on_sample_buffer`.
@@ -1307,7 +1357,7 @@ class HandEngine:
         try:
             field = detector.detect_sample_buffer(
                 sample_buffer, self._seq, captured_at,
-                orientation=self._orientation)
+                orientation=orientation)
         except EngineError as exc:
             self.n_flow_dropped += 1
             self._record_error("flow: %s" % exc)
@@ -1323,7 +1373,8 @@ class HandEngine:
         self.n_flow_published += 1
         self._mark_first_frame()
 
-    def _publish_depth(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+    def _publish_depth(self, sample_buffer: ObjCObject, captured_at: float,
+                        orientation: int) -> None:
         """Run the depth model on the buffer the other streams have already seen.
 
         Thread: capture queue only, from `_on_sample_buffer`.
@@ -1338,7 +1389,7 @@ class HandEngine:
         try:
             frame = detector.detect_sample_buffer(
                 sample_buffer, self._seq, captured_at,
-                orientation=self._orientation)
+                orientation=orientation)
         except EngineError as exc:
             self.n_depth_dropped += 1
             self._record_error("depth: %s" % exc)
@@ -1436,8 +1487,14 @@ class HandEngine:
         # old one by the proximity fallback.
         self._slots.reset()
 
-    def submit_sample_buffer(self, sample_buffer: ObjCObject) -> None:
+    def submit_sample_buffer(self, sample_buffer: ObjCObject,
+                             orientation: int | None = None) -> None:
         """One frame from somewhere that is not this engine's camera.
+
+        `orientation` is how the frame is to be read - `streams.orientation_for`
+        with `upside_down` for a float frame from TouchDesigner - or None for the
+        camera's own. It travels with the frame rather than living on the engine
+        because it is a property of the frame.
 
         `Input Mode = TOP Input` uses this: `appletd/frames.py` turns the pixels
         TouchDesigner published into a `CMSampleBuffer` and hands it here, so a frame
@@ -1449,7 +1506,7 @@ class HandEngine:
                 camera path guarantees serial delivery by using a serial queue; the
                 reader thread is the only caller here for the same reason.
         """
-        self._on_sample_buffer(sample_buffer)
+        self._on_sample_buffer(sample_buffer, orientation)
 
     def start_frames_only(self) -> None:
         """Ready to receive frames, without opening a camera.
@@ -1462,6 +1519,7 @@ class HandEngine:
         if self._running:
             return
         self._reset_session_state()
+        self._frames_only = True
         self._running = True
 
     def start(self) -> None:
@@ -1567,6 +1625,7 @@ class HandEngine:
             del session, output, delegate, queue
             raise EngineError("startRunning failed: %r" % (exc,)) from exc
 
+        self._frames_only = False
         self._running = True
 
     def stop(self) -> None:

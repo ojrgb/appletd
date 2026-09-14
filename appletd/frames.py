@@ -17,11 +17,16 @@ So this module does the smallest possible thing instead: it turns bytes into a
 from a TOP is then indistinguishable from a frame from a camera, everywhere after this
 file.
 
-WHAT TOUCHDESIGNER SENDS. BGRA, 8 bits a channel, top row first, through
-`appletd/maskbuf.py` - which is a generic seqlock image buffer despite its name, and
-already carries the width, height and component count in its header. Reading a 720p
-TOP back to the CPU costs 0.26 ms on TD's main thread, which is what makes this
-affordable at all (docs/BENCHMARKS.md).
+WHAT TOUCHDESIGNER SENDS. RGBA float32, BOTTOM row first - exactly what its
+`numpyArray` hands back, untouched - through `appletd/maskbuf.py`, which is a generic
+seqlock image buffer despite its name and carries width, height, components and dtype
+in its header. Nothing here converts it: Vision takes a float RGBA pixel buffer as it
+is, and the row order is told to it as an orientation. That is what makes 1080p
+affordable - MEASURED, the conversion that used to run on TD's main thread was 14 ms
+a frame at 1080p and the memcpy that replaced it is 0.5 (docs/BENCHMARKS.md).
+
+An 8-bit BGRA buffer, top row first, is still accepted - it is what the tests and the
+probes write - and is read as the camera's frames are.
 
 Thread: `read_into` runs on the sidecar's reader thread and touches no TouchDesigner
         object. The pyobjc objects it creates never cross back.
@@ -31,13 +36,13 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import CoreMedia
 import numpy
 
-from appletd.engine import pixel_buffer_from_bgra
-from appletd.maskbuf import MaskReader
+from appletd.engine import pixel_buffer_from_bgra, pixel_buffer_from_rgba_float
+from appletd.maskbuf import DTYPE_F32, DTYPE_U8, MaskReader
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from objc import ObjCObject
@@ -55,6 +60,32 @@ class FrameError(RuntimeError):
     """A frame arrived that cannot be turned into something Vision accepts."""
 
 
+class TopFrame(NamedTuple):
+    """One frame out of the buffer, with how it is to be read.
+
+    Contract: `pixels` is HxWx4 and writable. uint8 is BGRA with the top row first,
+              as a camera delivers; float32 is RGBA with the BOTTOM row first, as
+              TouchDesigner's `numpyArray` returns it, and `upside_down` says so.
+              The caller turns that flag into an orientation on the Vision request
+              (`streams.orientation_for`); nothing flips a pixel.
+    """
+
+    pixels: Any
+    captured_at: float
+    upside_down: bool
+
+    def to_sample_buffer(self) -> ObjCObject:
+        if self.upside_down:
+            return sample_buffer_from_rgba_float(self.pixels, self.captured_at)
+        return sample_buffer_from_bgra(self.pixels, self.captured_at)
+
+
+def sample_buffer_from_rgba_float(rgba: Any, captured_at: float) -> ObjCObject:
+    """Wrap a contiguous HxWx4 float32 RGBA array as a ready `CMSampleBuffer`."""
+    return _ready_sample_buffer(pixel_buffer_from_rgba_float(rgba), captured_at,
+                                getattr(rgba, "shape", "?"))
+
+
 def sample_buffer_from_bgra(bgra: Any, captured_at: float) -> ObjCObject:
     """Wrap a contiguous HxWx4 BGRA array as a ready `CMSampleBuffer`.
 
@@ -68,12 +99,17 @@ def sample_buffer_from_bgra(bgra: Any, captured_at: float) -> ObjCObject:
     timestamp sits on a different clock and mixing the two produces an age that is
     confidently wrong. It is passed here only so the value is not invented twice.
     """
-    pixel_buffer = pixel_buffer_from_bgra(bgra)
+    return _ready_sample_buffer(pixel_buffer_from_bgra(bgra), captured_at,
+                                getattr(bgra, "shape", "?"))
+
+
+def _ready_sample_buffer(pixel_buffer: ObjCObject, captured_at: float,
+                         shape: Any) -> ObjCObject:
     status, description = CoreMedia.CMVideoFormatDescriptionCreateForImageBuffer(
         None, pixel_buffer, None)
     if status != 0 or description is None:
         raise FrameError("could not describe a %r frame for Vision: status %d"
-                         % (getattr(bgra, "shape", "?"), status))
+                         % (shape, status))
     # A duration of "invalid" and one sample. Vision does not sequence on these, and
     # claiming a frame rate we do not know would be worse than declining to.
     timing = CoreMedia.CMSampleTimingInfo(
@@ -112,6 +148,11 @@ class FrameBufferReader:
         self._last_seq = -1
         self.frames_read = 0
         self.frames_skipped = 0
+        # GAUGES for the status line, so the cost of this path can be read off a
+        # running sidecar rather than argued about: the last read out of the seqlock
+        # (a copy), and the last wrap into a sample buffer (set by the caller).
+        self.last_read_ms = 0.0
+        self.last_wrap_ms = 0.0
         # How many times `latest()` found nothing to open. A gauge, so "no frames
         # are arriving" can be told from "the writer has never run".
         self.waits_for_writer = 0
@@ -141,8 +182,8 @@ class FrameBufferReader:
             self._reader.close()
             self._reader = None
 
-    def latest(self) -> tuple[Any, float] | None:
-        """The newest unseen frame as an HxWx4 BGRA array, or None.
+    def latest(self) -> TopFrame | None:
+        """The newest unseen frame, or None.
 
         None means "nothing new", which is the common case: TouchDesigner writes at
         its frame rate and this is polled faster, so most reads have nothing to do.
@@ -152,6 +193,7 @@ class FrameBufferReader:
         reader = self._opened()
         if reader is None:
             return None
+        started_s = time.perf_counter()
         frame = reader.read()
         if frame is None:
             return None
@@ -170,9 +212,14 @@ class FrameBufferReader:
         # Vision a quarter of an image and no error.
         if frame.components != 4:
             raise FrameError(
-                "TOP Input expects BGRA, four components - this buffer says %d. The "
+                "TOP Input expects four components - this buffer says %d. The "
                 "Script TOP writing it is publishing a mask, not a frame."
                 % frame.components)
+        if frame.dtype not in (DTYPE_U8, DTYPE_F32):
+            raise FrameError("TOP Input expects uint8 BGRA or float32 RGBA, not dtype %d"
+                             % frame.dtype)
+        upside_down = frame.dtype == DTYPE_F32
+        dtype = numpy.float32 if upside_down else numpy.uint8
         # `bytearray` and not `bytes`, which is the whole reason this line has a
         # comment: `numpy.frombuffer` over an immutable `bytes` gives a READ-ONLY
         # array, and `CVPixelBufferCreateWithBytes` refuses one - "buffer source
@@ -184,11 +231,12 @@ class FrameBufferReader:
         # that is accepted rather than optimised: `pixel_buffer_from_bgra` PINS the
         # array it wraps for the lifetime of the pixel buffer, so handing it a view
         # of the shared buffer would hold the writer's memory hostage.
-        pixels = numpy.frombuffer(bytearray(frame.pixels), dtype=numpy.uint8)
+        pixels = numpy.frombuffer(bytearray(frame.pixels), dtype=dtype)
         expected = frame.width * frame.height * frame.components
         if pixels.size != expected:
             raise FrameError(
-                "a %dx%d BGRA frame is %d bytes, got %d"
+                "a %dx%d frame is %d values, got %d"
                 % (frame.width, frame.height, expected, pixels.size))
-        return (pixels.reshape((frame.height, frame.width, frame.components)),
-                time.monotonic())
+        self.last_read_ms = (time.perf_counter() - started_s) * 1e3
+        return TopFrame(pixels.reshape((frame.height, frame.width, frame.components)),
+                        time.monotonic(), upside_down)
