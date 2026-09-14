@@ -645,6 +645,22 @@ is `test_ocr.py`'s job to keep true.
 The writer is also paced to **30 fps** by `frames_pull` — the camera path's rate, and
 all Vision can use — so at TouchDesigner's 60 the readback runs every other frame.
 
+**In the live project, after** (natural gauge, the same 1080p Text TOP, `Streamocr` on):
+
+| | before | after |
+|---|---|---|
+| `frames_write`, TD main thread | 15.7 ms | **1.2–1.3 ms** |
+| sidecar CPU, whole process | — | **40%** of one core, of which text at 1080p is 30 |
+| sidecar `read` gauge | — | 0.6 ms |
+| sidecar `wrap` gauge | — | 0.08 ms |
+
+The first run after the change read **55%** and `read 1.2 ms`, and both were the
+reader's poll loop: `MaskReader.read()` copied the whole 33 MB payload every 2 ms to
+find out whether `seq` had moved, and `frames.py` copied it again into a `bytearray`.
+`MaskReader.seq()` now peeks at the header, and `read(writable=True)` copies once —
+which is what the 55 → 40 and 1.2 → 0.6 are. The 30 points that remain are Vision
+reading 1080p text, which no transport can remove; a Fit TOP to 720p halves it.
+
 **How to see the sidecar's share on a running system:** the status line now carries
 `cpu NN%` (this process's CPU time over the interval, every thread, against the wall
 clock), `frames N @ read X wrap Y ms` (the two transport gauges above, live), and each

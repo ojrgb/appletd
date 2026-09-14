@@ -41,18 +41,22 @@ def test_a_written_frame_comes_back_the_same_shape(tmp_path: pathlib.Path) -> No
         reader.close()
 
 
-def test_the_same_frame_is_only_delivered_once(tmp_path: pathlib.Path) -> None:
+def test_the_same_frame_is_only_delivered_once_and_not_copied_again(
+        tmp_path: pathlib.Path) -> None:
     """The reader is polled faster than TouchDesigner writes, so "nothing new" is the
-    common case and has to be cheap and unambiguous."""
+    common case and has to be cheap: a peek at the header, not a copy of 33 MB."""
     path = str(tmp_path / "frames.buf")
     with MaskWriter(path, 8, 8, components=4) as writer:
         writer.write(_bgra(8, 8, 1))
         reader = FrameBufferReader(path)
         assert reader.latest() is not None
-        assert reader.latest() is None
+        for _ in range(10):
+            assert reader.latest() is None
+        assert reader._reader is not None and reader._reader.n_reads == 1
         writer.write(_bgra(8, 8, 2))
         assert reader.latest() is not None
         assert reader.frames_read == 2
+        assert reader._reader.n_reads == 2
         reader.close()
 
 

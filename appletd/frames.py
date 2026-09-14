@@ -193,8 +193,14 @@ class FrameBufferReader:
         reader = self._opened()
         if reader is None:
             return None
+        # PEEK before copying. This is polled every 2 ms and TouchDesigner writes at
+        # 30 fps, so most polls find the same frame - and `read()` copies 33 MB at
+        # 1080p before it can say so. MEASURED: the peek took the sidecar from 55% of
+        # a core to the cost of Vision alone (docs/BENCHMARKS.md).
+        if reader.seq() == self._last_seq:
+            return None
         started_s = time.perf_counter()
-        frame = reader.read()
+        frame = reader.read(writable=True)
         if frame is None:
             return None
         if frame.seq == self._last_seq:
@@ -220,18 +226,15 @@ class FrameBufferReader:
                              % frame.dtype)
         upside_down = frame.dtype == DTYPE_F32
         dtype = numpy.float32 if upside_down else numpy.uint8
-        # `bytearray` and not `bytes`, which is the whole reason this line has a
-        # comment: `numpy.frombuffer` over an immutable `bytes` gives a READ-ONLY
-        # array, and `CVPixelBufferCreateWithBytes` refuses one - "buffer source
-        # array is read-only". A test built on `numpy.zeros` never sees it, because
-        # that array is writable; this was found by reading a frame TouchDesigner had
-        # actually written.
-        #
-        # It is a copy of a copy - `MaskReader` already copied out of the mmap - and
-        # that is accepted rather than optimised: `pixel_buffer_from_bgra` PINS the
-        # array it wraps for the lifetime of the pixel buffer, so handing it a view
-        # of the shared buffer would hold the writer's memory hostage.
-        pixels = numpy.frombuffer(bytearray(frame.pixels), dtype=dtype)
+        # WRITABLE, which is why `read(writable=True)` above: `numpy.frombuffer` over
+        # immutable `bytes` gives a READ-ONLY array, and `CVPixelBufferCreateWithBytes`
+        # refuses one - "buffer source array is read-only". A test built on
+        # `numpy.zeros` never sees it; this was found on a frame TouchDesigner had
+        # actually written. The bytearray is the one copy out of the mapping, and a
+        # copy there IS wanted: `pixel_buffer_from_*` PINS the array it wraps for the
+        # pixel buffer's lifetime, so a view of the shared buffer would hold the
+        # writer's memory hostage.
+        pixels = numpy.frombuffer(frame.pixels, dtype=dtype)
         expected = frame.width * frame.height * frame.components
         if pixels.size != expected:
             raise FrameError(

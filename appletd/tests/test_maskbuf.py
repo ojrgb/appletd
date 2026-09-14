@@ -518,3 +518,43 @@ def test_two_processes_and_every_accepted_frame_is_whole(
     # workload-dependent and a threshold here would be a flaky test.
     print("accepted %d frames, %d misses, %d written by the child"
           % (accepted, total_misses, int(stdout.strip() or 0)))
+
+
+def test_seq_peeks_at_the_header_without_copying(tmp_path: Path) -> None:
+    """The poll path: a reader that asks `seq()` first copies nothing while the
+    frame it has is still the frame there is. `read()` counts its copies so this
+    can be asserted rather than inferred."""
+    path = str(tmp_path / "peek.buf")
+    with MaskWriter(path, 8, 8) as writer:
+        reader = MaskReader(path)
+        assert reader.seq() == 0                    # nothing published
+        writer.write(bytes(64))
+        first = reader.seq()
+        assert first > 0 and first % 2 == 0
+        got = reader.read()
+        assert got is not None and got.seq == first
+        assert reader.n_reads == 1
+        for _ in range(5):
+            assert reader.seq() == first
+        assert reader.n_reads == 1                  # peeking copied nothing
+        writer.write(bytes(64))
+        assert reader.seq() == first + 2            # two per publication
+        reader.close()
+
+
+def test_a_writable_read_is_a_bytearray_equal_to_what_was_written(tmp_path: Path) -> None:
+    path = str(tmp_path / "writable.buf")
+    payload = bytes(range(64))
+    with MaskWriter(path, 8, 8) as writer:
+        writer.write(payload)
+        reader = MaskReader(path)
+        got = reader.read(writable=True)
+        assert got is not None
+        assert isinstance(got.pixels, bytearray)
+        assert got.pixels == payload
+        got.pixels[0] = 255                         # ours to change
+        again = reader.read()
+        assert again is not None and again.pixels == payload
+        # And the mapping can still be closed: the peek's memoryview was released.
+        reader.close()
+

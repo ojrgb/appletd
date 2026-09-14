@@ -5746,3 +5746,12 @@ whole process, and on the frames path `read X wrap Y ms` - the two gauges of wha
 transport costs there. `test_ocr.py` pins the contract itself: a float frame the wrong
 way up reads correctly once Vision is told, and does not otherwise.
 
+**Then the sidecar's own gauge earned its keep.** First run: `cpu 55%`, `read 1.2 ms`
+- against a 0.5 ms memcpy and 10 ms of Vision at 30 fps, which is 30%. The rest was
+the poll: `FrameBufferReader` asked `MaskReader.read()` every 2 ms, and `read()` copies
+the whole payload before it can say whether `seq` moved - up to 500 copies of 33 MB a
+second for a frame that arrives 30 times. And each real frame was copied twice, once
+out of the mapping and once into a `bytearray` for writability. A header-only
+`MaskReader.seq()` and a `read(writable=True)` that copies once took it to **40% and
+0.6 ms**. The TD side reads **1.2-1.3 ms** at 1080p on the natural gauge, from 15.7.
+
