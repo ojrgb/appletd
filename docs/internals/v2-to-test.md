@@ -146,13 +146,12 @@ compensated instead.
 happen for three seconds, then one restart. Flip four toggles quickly: still **one**
 restart, three seconds after the last.
 
-**TOP Input through Vision.** `Input Mode` = TOP Input, wire a movie or a render into the
-COMP's image input, restart. Hands should be found in the TOP's content. **No camera
-permission prompt should appear and no camera light should come on** - that is the point
-of the mode.
-
-  * The transport is proven byte for byte (a constant TOP came out as the right BGRA),
-    but the sidecar has never actually run in this mode.
+**TOP Input through Vision — VERIFIED 2026-09-13**, with text rather than hands: a
+256x256 Text TOP reading `derivative` wired into the COMP, `Streamocr` on, `outtext`
+showed the word and its box while the sidecar log counted frames. It needed a fix first:
+nothing pulled `frames_write`, so with the network editor closed it had cooked 4 times in
+3,700 frames. `frames_pull` now cooks it every frame while capturing. Still to see: hands
+or a face through a movie, and that no camera light comes on.
 
 **Output Video follows the Camera choice.** Pick a device in `Camera` and the picture
 should change with it. The `device` parameter stores an opaque token

@@ -5668,7 +5668,7 @@ still has to pick a device by name — the error now says so and lists them.
 the surface question had to be settled first: recognised lines as a Table DAT and nothing
 else; OSC on its own port rather than a fifth `/tmp` buffer or a JSON file; fixed slots
 plus a count rather than a table that changes shape; DAT-only, with no `ocr_*` channels
-on `out1`. docs/BUILD_PLAN.md step 28 has them in order.
+on `out1`. docs/BUILD_PLAN.md step 32 has them in order.
 
 **The stock OSC In DAT was tried before the design was final, and that changed the
 message shape.** Sent a bundle of two string messages at a scratch DAT in the live
@@ -5699,4 +5699,20 @@ Then the REAL sidecar on the TOP Input path — `--streams ocr --frames-path` on
 20000, synthetic frames written the way `frames_write` writes them — `sc_ocr` 1, three
 lines, a blank fourth slot, exit 0. **Unverified: the live camera path**, and real
 signage rather than rendered text.
+
+**Then Omer ran it, and the first two attempts failed for two different reasons.** The
+first was the install: the sidecar runs the INSTALLED package, which was two modules
+short and rejected `--ocr-level` outright - and `Capturestate` said exactly that, which
+is the 2026-09-13 fix paying for itself. Install, confirm the files, restart. The second
+was older: with the network editor closed, `frames_write` had cooked **4 times in 3,700
+frames**. Its `Tick` expression marks it dirty, but TouchDesigner cooks an operator when
+something downstream ASKS, and nothing did - `video_source` reads `in_frames` directly,
+and a DAT consumer pulls no TOP. TOP Input had only ever worked with a viewer open on the
+writer. `frames_pull`, an Execute DAT, now cooks it once a frame while `Active` is on in
+TOP Input mode. With it, a 256x256 Text TOP reading `derivative` came through
+`outtext` with its box.
+
+One thing left as found: on the TOP path the engine still records "camera delivered
+256x256, requested 1280x720" as an error every status line. It is the size assertion
+doing its job on the wrong input, and it is noise in this mode.
 

@@ -20,7 +20,7 @@ Q5.3), not started. The architectural question in Q5.0 — whether each new mode
 own stream with its own toggle, or one "extras" stream — was never answered and decides
 the shape of the work.
 
-**Text recognition as a DAT — BUILT 2026-09-13** (docs/BUILD_PLAN.md step 28). OSC on
+**Text recognition as a DAT — BUILT 2026-09-13** (docs/BUILD_PLAN.md step 32). OSC on
 base + 3 into an OSC In DAT callback, fixed slots, `outtext` on connector 5. Verified
 against the live project with frames from the package's own encoder; the live camera
 path is still to be run.

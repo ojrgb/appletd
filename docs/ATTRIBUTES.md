@@ -457,7 +457,7 @@ On `General`, above the smoothing controls.
 | `Restartcapture` | pulse | stop and start in one press |
 | `Freeze` | pulse | hold the current outputs and stop capturing |
 | `Capturestate` | read-only | `Running` / `Stopped` / `Requires Restart`, a countdown while an action is pending, and `Stopped - <reason>` when the sidecar failed to start |
-| `Inputmode` | Camera | `Camera`, or `TOP Input` to take frames from the COMP's image input |
+| `Inputmode` | Camera | `Camera`, or `TOP Input` to take frames from the COMP's image input. Frames are written every frame while `Active` is on, whether or not anything downstream reads the video |
 | `Camera` | `(default)` | a menu of the real devices. `(default)` is the built-in camera, whatever this Mac calls it |
 | `Cameraflip` | off | mirror the image on X **before Vision sees it**. Restarts by itself |
 | `Listcameras` | pulse | re-enumerate and repopulate the menu |

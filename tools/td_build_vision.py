@@ -1613,6 +1613,7 @@ OTHER_BUILDERS_OWN = {
     "in_frames": "td_add_topinput.py",
     "frames_write": "td_add_topinput.py",
     "frames_callbacks": "td_add_topinput.py",
+    "frames_pull": "td_add_topinput.py",
     "depth_map": "td_add_depth.py",
     "depth_fit": "td_add_depth.py",
     "outdepth": "td_add_depth.py",

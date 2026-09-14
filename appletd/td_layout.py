@@ -153,6 +153,9 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "in_frames": (-3 * COL_W, -1 * ROW_H),
     "frames_write": (-2 * COL_W, -1 * ROW_H),
     "frames_callbacks": (-1 * COL_W, -1 * ROW_H),
+    # The per-frame puller, at the end of the same row: it exists because nothing
+    # downstream asks the writer to cook (tools/td_add_topinput.py).
+    "frames_pull": (0 * COL_W, -1 * ROW_H),
     # The camera passthrough, and the overlay composite that sits on top of it.
     "video_in": (COL_W, -4 * ROW_H),
     # WHICH PICTURE, following `Input Mode`: the camera, or the frames TouchDesigner

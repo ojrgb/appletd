@@ -1,17 +1,20 @@
 # Handoff
 
-**842 tests**, `ruff check appletd/ tools/` and `mypy appletd` clean. Branch
+**843 tests**, `ruff check appletd/ tools/` and `mypy appletd` clean. Branch
 **feat/ocr-text-dat**, off `main` — nothing pushed; a push has to be asked for.
 
 `tools/vision_landmarks.py` and `tools/vision_landmarks_live.py` are the user's own
 untracked files. Leave them alone; `ruff` at the repo root fails on one of them, so
 lint `appletd/ tools/` instead.
 
-**Just built: text recognition as a Table DAT** (docs/BUILD_PLAN.md step 28). The
+**Just built: text recognition as a Table DAT** (docs/BUILD_PLAN.md step 32). The
 chain has been run against the open project, so the live `.toe` has the Text page and
 `outtext` on connector 5 — but the file has NOT been saved or re-exported; that is
 Omer's step. The installed package under `~/Library/Application Support/appletd` is
 two modules short (`ocr`, `text_types`) until Install is pressed, and the panel says so.
+Verified in Omer's project: TOP Input with a Text TOP reads into `outtext`. That run
+found and fixed a TOP Input defect - nothing pulled `frames_write`, so it never cooked
+headless; `frames_pull` (an Execute DAT) now asks for it each frame while capturing.
 Unverified: the live camera path, and real signage rather than rendered text.
 
 ## Read these, in this order

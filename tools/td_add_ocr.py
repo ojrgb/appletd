@@ -23,7 +23,7 @@ frame's `seq` moves and a cell actually changed - a static sign costs nothing do
 THE ROW COUNT FOLLOWS THE SIDECAR. `Ocrlines` is a launch flag; the table takes its
 shape from the first frame that arrives after a restart, so the two cannot disagree.
 
-Ref: appletd/text_types.py, appletd/ocr.py, DESIGN.md 6.4, docs/BUILD_PLAN.md step 28.
+Ref: appletd/text_types.py, appletd/ocr.py, DESIGN.md 6.4, docs/BUILD_PLAN.md step 32.
 """
 
 import os

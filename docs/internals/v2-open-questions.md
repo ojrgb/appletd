@@ -104,7 +104,7 @@ last, because each needs a new output KIND or a seeding story.
 where nothing was read, plus `Ocrfound` for the count - so the table never changes shape.
 Transport is OSC on base + 3, one typed message a frame, into an OSC In DAT's callback
 (its own table splits strings on whitespace). DAT-only: `sc_ocr` in the status channels
-and nothing on `out1`. docs/BUILD_PLAN.md step 28 has the decisions in order.
+and nothing on `out1`. docs/BUILD_PLAN.md step 32 has the decisions in order.
 
 **Q5.2 — what seeds `VNTrackObjectRequest`?** Tracking needs a starting rectangle.
 **Assumed** four parameters (x, y, w, h) plus a `Track` pulse to arm it, so it works

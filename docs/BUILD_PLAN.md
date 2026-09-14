@@ -2483,7 +2483,7 @@ and it had already caused one silent failure by resetting them from a deferred c
 (2.17). The preset half of the generated callback went with it, along with six comments
 that referred to it.
 
-## Step 28 — text recognition, and the first DAT output — DONE 2026-09-13
+## Step 32 — text recognition, and the first DAT output — DONE 2026-09-13
 
 `VNRecognizeTextRequest` returns strings, and nothing this component had could carry
 one: OSC fed CHOPs and the shared buffers carried images. So this step is a new output
