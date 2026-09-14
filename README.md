@@ -68,6 +68,7 @@ instead of building your own: [`examples/`](examples/).
 | `Streamhands` `Streampose` `Streamface` | one Vision request each |
 | `Streamsegment` + `Segquality` | person mask: `fast`, `balanced`, `accurate` |
 | `Streamflow` + `Flowaccuracy` | optical flow, as a TOP |
+| `Streamocr` + `Ocrlevel` `Ocrlanguage` | text recognition, as a Table DAT |
 | `Streamdepth` + `Depthpins` | depth, and the pins that make it metric |
 | `Coordstx` `Coordspx` | world-space and pixel-space channel sets |
 | `Facekeypoints` `Onefaceonly` `Fingertipsonly` | shorten the channel list |
@@ -81,6 +82,7 @@ Separate outputs, because `out1` cannot be both a CHOP and a TOP:
     outdepth    TOP    the depth map, raw or in metres
     outflow     TOP    optical flow, x and y displacement in pixels
     outvideo    TOP    the camera image, with any overlays composited on
+    outtext     DAT    recognised text: one row per line, with confidence and box
 
 The sidecar is also a normal CLI, with no TouchDesigner involved:
 
@@ -107,6 +109,7 @@ hands_distance      hands_center_x      hands_angle_z
     mask     person segmentation, three qualities
     depth    Depth Anything V2 Small via Core ML, in metres if you pin it
     flow     optical flow, per pixel, in input pixels
+    text     recognised lines with their boxes, 30 languages, as a table
 
 An absent hand reports **zeros with all channels still present** — a CHOP whose
 channels vanish breaks every downstream reference silently.
@@ -151,6 +154,7 @@ M4 Pro, macOS 26.5. Every figure depends on the Neural Engine.
 | segmentation `fast` | 2.21 ms | 256 × 192 |
 | segmentation `accurate` | 30.73 ms | 2016 × 1512 |
 | depth | **23.00 ms** | 518 × 392 fp16 |
+| text `fast`, language pinned | 5.92 ms | up to 32 rows |
 
 
 Method and every other figure: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). MediaPipe

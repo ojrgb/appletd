@@ -99,10 +99,12 @@ useful), then optical flow (a TOP, self-contained, no contract change), then hum
 rectangles as pose-stream channels rather than a new stream. Text and the two trackers
 last, because each needs a new output KIND or a seeding story.
 
-**Q5.1 — text has no home.** `VNRecognizeTextRequest` returns STRINGS, and a CHOP
-cannot carry one. This component has never had a DAT output. **Assumed** a Table DAT
-output (`outtext`), one row per observation: text, confidence, and the four bbox
-numbers.
+**Q5.1 — ANSWERED 2026-09-13, by Omer, and BUILT.** Text is a Table DAT output
+(`outtext`): one row per SLOT rather than per observation - `Ocrlines` fixed rows, blank
+where nothing was read, plus `Ocrfound` for the count - so the table never changes shape.
+Transport is OSC on base + 3, one typed message a frame, into an OSC In DAT's callback
+(its own table splits strings on whitespace). DAT-only: `sc_ocr` in the status channels
+and nothing on `out1`. docs/BUILD_PLAN.md step 28 has the decisions in order.
 
 **Q5.2 — what seeds `VNTrackObjectRequest`?** Tracking needs a starting rectangle.
 **Assumed** four parameters (x, y, w, h) plus a `Track` pulse to arm it, so it works

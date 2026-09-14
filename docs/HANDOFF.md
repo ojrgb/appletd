@@ -1,16 +1,23 @@
 # Handoff
 
-**696 tests**, `ruff check appletd/ tools/` clean. Branch **V2**, 32 commits, nothing
-pushed — a push has to be asked for.
+**842 tests**, `ruff check appletd/ tools/` and `mypy appletd` clean. Branch
+**feat/ocr-text-dat**, off `main` — nothing pushed; a push has to be asked for.
 
 `tools/vision_landmarks.py` and `tools/vision_landmarks_live.py` are the user's own
 untracked files. Leave them alone; `ruff` at the repo root fails on one of them, so
 lint `appletd/ tools/` instead.
 
+**Just built: text recognition as a Table DAT** (docs/BUILD_PLAN.md step 28). The
+chain has been run against the open project, so the live `.toe` has the Text page and
+`outtext` on connector 5 — but the file has NOT been saved or re-exported; that is
+Omer's step. The installed package under `~/Library/Application Support/appletd` is
+two modules short (`ocr`, `text_types`) until Install is pressed, and the panel says so.
+Unverified: the live camera path, and real signage rather than rendered text.
+
 ## Read these, in this order
 
-1. **`docs/internals/v2-next.md`** — the eight things Omer asked for on 2026-09-08,
-   which is the current work queue.
+1. **`docs/internals/v2-progress.md`** — what is unfinished. `v2-next.md` is the
+   2026-09-08 batch, all done.
 2. **`docs/internals/v2-to-test.md`** — what needs a camera, a person, or an opinion,
    and what he has already verified.
 3. **`docs/JOURNAL.md`**, last few entries — what went wrong recently and why the
@@ -25,7 +32,8 @@ it as historical.
 ## The shape of the thing
 
 A TouchDesigner COMP that talks to a **sidecar process** over OSC, with images passing
-through a file-backed `mmap`. The sidecar runs Apple's Vision and Core ML; TouchDesigner's
+through a file-backed `mmap` and text arriving as one typed OSC message a frame into an
+OSC In DAT's callback. The sidecar runs Apple's Vision and Core ML; TouchDesigner's
 own Python cannot load pyobjc, which is why the process is separate at all.
 
     appletd/     the runtime package. Pure Python + pyobjc, no TouchDesigner imports.
@@ -45,7 +53,9 @@ code — silently, because the install is internally consistent.
 
 **A new stream must be added to every list that names streams.** This has been missed
 three times: `RUNTIME_MODULES`, `STREAM_CHANNELS`, and the engine's no-streams guard.
-`test_engine_streams.py` now covers the last of those.
+`test_engine_streams.py` now covers the last of those. Text added two more places a
+request lives: `PORT_OFFSETS` (a port with no channels) and `OUTPUT_CHAIN` in the
+control module, which has to know an output's FAMILY to recreate it.
 
 **Never commit on `main`, and ask before every push.**
 

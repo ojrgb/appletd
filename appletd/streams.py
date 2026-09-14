@@ -10,6 +10,7 @@ sides of a UDP socket, and the two sides are written by different tools.
   * The IMAGE requests - segment, depth, flow - have NO port. `port_for` refuses them
     by name rather than returning a plausible number; they publish through a shared
     buffer instead.
+  * TEXT has a port and no channels: one typed OSC message a frame, into a DAT.
   * A status channel per request, so a panel showing a stream as on after somebody
     flipped it without restarting is not left lying.
 
@@ -78,10 +79,37 @@ REQUEST_DEPTH: Final = "depth"
 # and enabling it is a decision.
 REQUEST_FLOW: Final = "flow"
 
-# What `--streams` accepts. STREAM_NAMES plus the requests that have no port, in the
-# order they RUN on the capture queue: the cheap ones a live project reads first.
-REQUEST_NAMES: Final[tuple[str, ...]] = (*STREAM_NAMES, REQUEST_SEGMENT,
+# TEXT RECOGNITION. A port like the streams and no channels like the images: what
+# `VNRecognizeTextRequest` returns is strings, which a CHOP cannot carry, so the
+# result is one typed OSC message a frame into a Table DAT (appletd/text_types.py,
+# DESIGN.md 6.4). It is a REQUEST rather than a STREAM here because everything that
+# iterates STREAM_NAMES builds an OSC In CHOP and a channel COMP, and text has
+# neither.
+#
+# MEASURED at 1280x720, six lines: 5.92 ms at `fast` with the language pinned and
+# correction off, 60.6 ms at `accurate` with the defaults (docs/BENCHMARKS.md). It
+# runs after the mask and before depth, in cost order.
+REQUEST_OCR: Final = "ocr"
+
+# What `--streams` accepts. STREAM_NAMES plus the requests that have no channels, in
+# the order they RUN on the capture queue: the cheap ones a live project reads first.
+REQUEST_NAMES: Final[tuple[str, ...]] = (*STREAM_NAMES, REQUEST_SEGMENT, REQUEST_OCR,
                                          REQUEST_DEPTH, REQUEST_FLOW)
+# The requests whose output is an IMAGE through a shared buffer. Named as a set because
+# `port_for` refuses exactly these, and the message it refuses with says where the
+# image actually goes.
+IMAGE_REQUESTS: Final[frozenset[str]] = frozenset((REQUEST_SEGMENT, REQUEST_DEPTH,
+                                                   REQUEST_FLOW))
+
+# The text recognition levels, IN COST ORDER, here for the same boundary reason the
+# flow accuracies are. Vision's own default is `accurate`; ours is `fast`, because at
+# 60 ms a frame `accurate` cannot share a 33 ms frame interval with anything.
+OCR_LEVELS: Final[tuple[str, ...]] = ("fast", "accurate")
+DEFAULT_OCR_LEVEL: Final = "fast"
+# The language pinned when nobody says otherwise, as a BCP 47 tag Vision accepts.
+# Pinning one is the single biggest lever on cost - 8.6 ms to 5.9 with correction off
+# - and an empty string means "detect it", which is the slow path.
+DEFAULT_OCR_LANGUAGE: Final = "en-US"
 
 # The optical flow accuracy levels, IN COST ORDER, and here for exactly the reason the
 # segmentation qualities below are: `sidecar.py` needs them for its command line and
@@ -232,19 +260,22 @@ PORT_OFFSETS: Final[dict[str, int]] = {
     STREAM_HANDS: 0,
     STREAM_POSE: 1,
     STREAM_FACE: 2,
+    # Text: a port with no OSC In CHOP behind it. TouchDesigner's OSC In DAT listens
+    # here (tools/td_add_ocr.py).
+    REQUEST_OCR: 3,
 }
 
 
 def port_for(stream: str, base_port: int = BASE_PORT) -> int:
     """The UDP port a stream is sent to.
 
-    Contract: `stream` must be one of STREAM_NAMES; anything else raises rather
-              than returning a plausible number, because a wrong port is a
-              silent failure at the far end - TouchDesigner shows an OSC In CHOP
-              with no channels and no error.
+    Contract: `stream` must be one of STREAM_NAMES or REQUEST_OCR; anything else
+              raises rather than returning a plausible number, because a wrong port
+              is a silent failure at the far end - TouchDesigner shows an OSC In
+              CHOP with no channels and no error.
     """
     if stream not in PORT_OFFSETS:
-        if stream in (REQUEST_SEGMENT, REQUEST_DEPTH, REQUEST_FLOW):
+        if stream in IMAGE_REQUESTS:
             raise ValueError(
                 "%r has no UDP port - it publishes an IMAGE through a shared buffer, "
                 "not channels over OSC (appletd/maskbuf.py)" % (stream,))
@@ -365,9 +396,10 @@ N_STATUS_CHANNELS: Final = 1 + len(REQUEST_NAMES) + 2
 # python -O and these are contract checks (the same reasoning as types.py).
 # ---------------------------------------------------------------------------
 def _self_check() -> None:
-    if set(PORT_OFFSETS) != set(STREAM_NAMES):
-        raise RuntimeError("PORT_OFFSETS and STREAM_NAMES disagree: %s vs %s"
-                           % (sorted(PORT_OFFSETS), sorted(STREAM_NAMES)))
+    if set(PORT_OFFSETS) != set(STREAM_NAMES) | {REQUEST_OCR}:
+        raise RuntimeError("PORT_OFFSETS must be exactly STREAM_NAMES plus the text "
+                           "request: %s vs %s" % (sorted(PORT_OFFSETS),
+                                                  sorted(STREAM_NAMES)))
     if len(set(PORT_OFFSETS.values())) != len(PORT_OFFSETS):
         raise RuntimeError("two streams share a port offset - they would collide "
                            "on one socket and interleave silently")
@@ -377,10 +409,13 @@ def _self_check() -> None:
     for name in DEFAULT_STREAMS:
         if name not in REQUEST_NAMES:
             raise RuntimeError("%r is not in REQUEST_NAMES" % (name,))
-    if (set(REQUEST_NAMES) - set(STREAM_NAMES)
-            - {REQUEST_SEGMENT, REQUEST_DEPTH, REQUEST_FLOW}):
-        raise RuntimeError("a request without a port was added to REQUEST_NAMES "
-                           "without teaching `port_for` to refuse it by name")
+    if set(REQUEST_NAMES) - set(PORT_OFFSETS) - IMAGE_REQUESTS:
+        raise RuntimeError("a request was added to REQUEST_NAMES with neither a port "
+                           "nor a place in IMAGE_REQUESTS, so `port_for` can neither "
+                           "answer for it nor refuse it by name")
+    if DEFAULT_OCR_LEVEL not in OCR_LEVELS:
+        raise RuntimeError("the default text level %r is not one of %s"
+                           % (DEFAULT_OCR_LEVEL, OCR_LEVELS))
     if DEFAULT_SEGMENT_QUALITY not in SEGMENT_QUALITIES:
         raise RuntimeError("the default segmentation quality %r is not one of %s"
                            % (DEFAULT_SEGMENT_QUALITY, SEGMENT_QUALITIES))

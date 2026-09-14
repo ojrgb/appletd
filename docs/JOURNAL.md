@@ -5661,3 +5661,42 @@ undiagnosable from the panel.
 **Unverified:** the reporter has not yet run the fix. The device-type rule is checked
 against their list with fakes, not their hardware, and a Mac with no built-in camera
 still has to pick a device by name — the error now says so and lists them.
+
+## 2026-09-13 — text recognition, and the first output that is neither a CHOP nor a TOP
+
+**Four decisions were Omer's, taken before anything was built**, because ROADMAP §7 said
+the surface question had to be settled first: recognised lines as a Table DAT and nothing
+else; OSC on its own port rather than a fifth `/tmp` buffer or a JSON file; fixed slots
+plus a count rather than a table that changes shape; DAT-only, with no `ocr_*` channels
+on `out1`. docs/BUILD_PLAN.md step 28 has them in order.
+
+**The stock OSC In DAT was tried before the design was final, and that changed the
+message shape.** Sent a bundle of two string messages at a scratch DAT in the live
+project: bundles and UTF-8 fine, and every string argument SPLIT ON WHITESPACE into
+separate columns — `"line two"` was two cells. The DAT's `onReceiveOSC` callback gets the
+typed `args` intact. So the consumer is the callback, the DAT's own table is kept to one
+line, and the sidecar sends ONE message per frame with every slot in it rather than one
+per line: one callback a frame, and a frame is atomic without tracking a bundle boundary.
+
+**Measured before choosing the defaults.** Synthetic 1280×720, six lines: `accurate` with
+Vision's defaults 60.6 ms; `fast` with defaults 8.6; `fast` with `en-US` pinned and
+correction off **5.9**. The lever is the language, not the level — there is no smaller
+English model, the two levels are the two models; correction is a dictionary pass and
+detection a second pass over the image. `fast` reports a flat 0.5 confidence for every
+line, which the `conf` column now says out loud. Both levels misread `£5.50`.
+
+**What surprised.** `port_for` had two categories — a stream with a port and channels,
+or an image with neither — and text is a third: a port and no channels. `STREAM_NAMES`
+could not take it, because everything that iterates that tuple builds an OSC In CHOP and
+a channel COMP; `IMAGE_REQUESTS` could not either. So `PORT_OFFSETS` grew an entry that
+is not a stream and the self-check states the new rule. And the sidecar's socket-failure
+test counted three sends a tick for a year; it is four now.
+
+**Verified two ways without a camera.** Frames from the package's own encoder into the
+built network: three lines in reading order with `£` intact, `outtext` mirroring the
+table, `Ocrfound` reading 9 for nine lines and eight slots, the toggle blanking the rows.
+Then the REAL sidecar on the TOP Input path — `--streams ocr --frames-path` on port
+20000, synthetic frames written the way `frames_write` writes them — `sc_ocr` 1, three
+lines, a blank fourth slot, exit 0. **Unverified: the live camera path**, and real
+signage rather than rendered text.
+

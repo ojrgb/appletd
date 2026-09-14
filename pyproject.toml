@@ -75,6 +75,7 @@ ignore = [
 "tools/td_add_video.py" = ["F821"]
 "tools/td_add_overlay.py" = ["F821"]
 "tools/td_add_flow.py" = ["F821"]
+"tools/td_add_ocr.py" = ["F821"]
 "tools/probe_m1_in_td.py" = [
     "E402",
     # The probe's entire purpose is to survive a failing stage and report which
@@ -106,7 +107,7 @@ show_error_codes = true
 # Vision file, and CoreML ships no py.typed marker at all. `appletd.pins` is NOT
 # here - it is arithmetic over numpy and stays fully strict, which is the point of
 # having it as a separate module.
-module = ["appletd.engine", "appletd.depth", "appletd.td.*", "tools.*",
+module = ["appletd.engine", "appletd.depth", "appletd.ocr", "appletd.td.*", "tools.*",
           "probe_m1_in_td", "record_fixture"]
 disallow_untyped_calls = false
 disallow_any_expr = false

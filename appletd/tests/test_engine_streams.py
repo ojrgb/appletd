@@ -41,6 +41,7 @@ STREAMS: tuple[tuple[dict[str, object], str], ...] = (
     ({"hands": False, "segmentation_detector": _Stub(),
       "on_mask": _nothing}, "segment"),
     ({"hands": False, "flow_detector": _Stub(), "on_flow": _nothing}, "flow"),
+    ({"hands": False, "text_detector": _Stub(), "on_text": _nothing}, "ocr"),
     ({"hands": False, "depth_detector": _Stub(), "on_depth": _nothing}, "depth"),
 )
 

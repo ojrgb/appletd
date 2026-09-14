@@ -75,9 +75,11 @@ if TYPE_CHECKING:
     from appletd.face import FaceDetector
     from appletd.face_types import FaceFrame
     from appletd.flow import FlowDetector, FlowImage
+    from appletd.ocr import TextDetector
     from appletd.pose import PoseDetector
     from appletd.pose_types import PoseFrame
     from appletd.segmentation import MaskDetector, MaskImage
+    from appletd.text_types import TextFrame
 
 # ---------------------------------------------------------------------------
 # Constants. Every value has a reason; see the referenced measurement.
@@ -801,6 +803,7 @@ SESSION_COUNTERS: Final[tuple[str, ...]] = (
     "n_mask_published", "n_mask_dropped", "n_mask_empty",
     "n_depth_published", "n_depth_dropped", "n_depth_empty",
     "n_flow_published", "n_flow_dropped",
+    "n_text_published", "n_text_dropped",
 )
 
 
@@ -845,6 +848,8 @@ class HandEngine:
                  on_mask: Callable[[MaskImage], None] | None = None,
                  depth_detector: DepthDetector | None = None,
                  on_depth: Callable[[DepthFrame], None] | None = None,
+                 text_detector: TextDetector | None = None,
+                 on_text: Callable[[TextFrame], None] | None = None,
                  flip: bool = False) -> None:
         """seq_start continues an existing frame sequence rather than restarting it.
 
@@ -888,6 +893,10 @@ class HandEngine:
         # nowhere to publish would spend most of the frame budget and drop the result.
         self._depth_detector = depth_detector if on_depth is not None else None
         self._on_depth = on_depth if depth_detector is not None else None
+        # TEXT, on the same both-or-neither terms. Strings, not channels, and not an
+        # image either: it publishes a TextFrame into a box exactly as pose does.
+        self._text_detector = text_detector if on_text is not None else None
+        self._on_text = on_text if text_detector is not None else None
         self._camera_name = camera_name
         self._requested_px = (width_px, height_px)
         self._max_hands = max_hands
@@ -914,6 +923,7 @@ class HandEngine:
             "pose": self._pose_detector,
             "face": self._face_detector,
             "segment": self._seg_detector,
+            "ocr": self._text_detector,
             "flow": self._flow_detector,
             "depth": self._depth_detector,
         }
@@ -972,6 +982,8 @@ class HandEngine:
         self.n_depth_empty = 0      # frames Core ML returned no observation for
         self.n_flow_published = 0   # flow fields that reached on_flow
         self.n_flow_dropped = 0     # fields lost to a Vision or a buffer failure
+        self.n_text_published = 0   # text frames that reached on_text
+        self.n_text_dropped = 0     # buffers where the text request failed
         self.delivered_px: tuple[int, int] | None = None
         self.errors: list[str] = []
         # Set on the first delivered frame. Lets a caller confirm liveness by
@@ -1058,6 +1070,10 @@ class HandEngine:
         # AVFoundation starts dropping buffers, which shows up as n_delivered
         # falling rather than as anything failing - the same trade pose has.
         self._publish_mask(sample_buffer, captured_at)
+        # TEXT after the mask and before depth, in cost order: 5.92 ms at `fast` with
+        # the language pinned (docs/BENCHMARKS.md), against the mask's 2.21 and
+        # depth's 23.00.
+        self._publish_text(sample_buffer, captured_at)
         # LAST of all, and it is in a class of its own for cost: 23.00 ms MEASURED,
         # which on a 30 fps camera is most of the frame interval on its own. With
         # depth enabled AVFoundation will drop buffers - visible as `n_delivered`
@@ -1204,6 +1220,32 @@ class HandEngine:
         self._mark_first_frame()
         publish(face_frame)
 
+    def _publish_text(self, sample_buffer: ObjCObject, captured_at: float) -> None:
+        """Run the text request on the buffer the other streams have already seen.
+
+        Thread: capture queue only, from `_on_sample_buffer`.
+        Contract: shares `_seq` and `captured_at` with the other streams' frames from
+                  the same buffer. A frame with NO text is still published - the
+                  table then reads blank, which is the truth, and it is what lets a
+                  sign leaving the frame clear the rows.
+        Never raises: a text fault costs the text and nothing else.
+        """
+        detector, publish = self._text_detector, self._on_text
+        if detector is None or publish is None:
+            return
+        width_px, height_px = self.delivered_px or self._requested_px
+        try:
+            text_frame = detector.detect_sample_buffer(
+                sample_buffer, self._seq, captured_at, width_px, height_px,
+                orientation=self._orientation)
+        except EngineError as exc:
+            self.n_text_dropped += 1
+            self._record_error("ocr: %s" % exc)
+            return
+        self.n_text_published += 1
+        self._mark_first_frame()
+        publish(text_frame)
+
     def _publish_mask(self, sample_buffer: ObjCObject, captured_at: float) -> None:
         """Run the segmentation request on the buffer the other streams have seen.
 
@@ -1319,6 +1361,13 @@ class HandEngine:
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def text_inference_ms(self) -> float:
+        """Cost of the most recent TEXT inference, or 0.0 with it off. A gauge, not a
+        measurement, on the same terms as `depth_inference_ms`."""
+        detector = self._text_detector
+        return detector.last_inference_ms if detector is not None else 0.0
 
     @property
     def depth_inference_ms(self) -> float:

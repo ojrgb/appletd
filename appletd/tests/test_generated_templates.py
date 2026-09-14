@@ -48,6 +48,14 @@ TEMPLATES: tuple[tuple[str, str, dict[str, Any]], ...] = (
      {"resolver": "PACKAGE_ROOT", "port": 10000, "comp": "/project1/appletd",
       "request_toggles": (("hands", "Streamhands"),), "max_pins": 8,
       "default_mark": "default"}),
+    # The text receiver, whose body carries a copy of a package function and a
+    # `format()` call chosen precisely so no `%` has to be escaped in it.
+    ("td_add_ocr.py", "CALLBACK_SOURCE",
+     {"address": "/ocr", "table": "ocr_table",
+      "columns": ("text", "conf", "x1", "y1", "x2", "y2"), "header": 3, "per_slot": 6}),
+    ("td_add_ocr.py", "PAR_CALLBACK_SOURCE",
+     {"table": "ocr_table", "osc": "ocr_osc",
+      "blank_row": ["", "0.0000", "0.0000", "0.0000", "0.0000", "0.0000"]}),
 )
 
 

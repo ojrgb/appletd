@@ -49,7 +49,12 @@ from appletd.face_types import (
     face_channel_values,
 )
 from appletd.maskbuf import DTYPE_F16, DTYPE_F32, MaskWriter
-from appletd.osc import datagram_socket, encode_channels
+from appletd.osc import (
+    datagram_socket,
+    encode_bundle_of,
+    encode_channels,
+    encode_typed_message,
+)
 from appletd.pins import parse_pins
 from appletd.pose_types import blank_pose_frame, pose_channel_names, pose_channel_values
 from appletd.slots import SLOT_MODE_CHIRALITY, SLOT_MODES
@@ -59,18 +64,23 @@ from appletd.source import (
     HandSource,
     InProcessSource,
     PoseSource,
+    TextSource,
 )
 from appletd.streams import (
     DEFAULT_CAMERA_MARK,
     DEFAULT_CAMERA_NAMES,
     DEFAULT_FLOW_ACCURACY,
+    DEFAULT_OCR_LANGUAGE,
+    DEFAULT_OCR_LEVEL,
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
     FLOW_ACCURACIES,
     FLOW_COMPONENTS,
+    OCR_LEVELS,
     REQUEST_DEPTH,
     REQUEST_FLOW,
     REQUEST_NAMES,
+    REQUEST_OCR,
     REQUEST_SEGMENT,
     SEGMENT_QUALITIES,
     STREAM_FACE,
@@ -82,6 +92,13 @@ from appletd.streams import (
     port_for,
     status_channel_names,
     status_channel_values,
+)
+from appletd.text_types import (
+    DEFAULT_TEXT_LINES,
+    MAX_TEXT_LINES,
+    TEXT_ADDRESS,
+    blank_text_frame,
+    pack_text_args,
 )
 from appletd.types import channel_names, channel_values
 
@@ -172,6 +189,10 @@ class Sidecar:
                  depth_pins: str = "",
                  depth_drop_m: float = 0.5,
                  depth_compute: str = "all",
+                 ocr_level: str = DEFAULT_OCR_LEVEL,
+                 ocr_language: str = DEFAULT_OCR_LANGUAGE,
+                 ocr_correction: bool = False,
+                 ocr_lines: int = DEFAULT_TEXT_LINES,
                  flip: bool = False) -> None:
         """`source` is injectable so the send path can be tested with no camera.
 
@@ -218,6 +239,14 @@ class Sidecar:
         self.depth_drop_m = depth_drop_m
         self._depth_writer: MaskWriter | None = None
         self.n_depth_written = 0
+        # TEXT. No buffer and no writer: it goes out on the socket like the channel
+        # streams, one typed message a tick, to a port of its own. The slot count is
+        # kept here as well as in the detector because the blank frame a DISABLED
+        # stream sends has to be the same shape as a live one.
+        self.ocr_level = ocr_level
+        self.ocr_language = ocr_language
+        self.ocr_correction = ocr_correction
+        self.ocr_lines = ocr_lines
         self.source = source if source is not None else InProcessSource(
             camera_name=camera_name, slot_mode=slot_mode, streams=streams,
             on_mask=self._write_mask if REQUEST_SEGMENT in streams else None,
@@ -228,7 +257,9 @@ class Sidecar:
             on_flow=self._write_flow if REQUEST_FLOW in streams else None,
             on_depth=self._write_depth if REQUEST_DEPTH in streams else None,
             depth_pins=self.depth_pins, depth_drop_m=depth_drop_m,
-            depth_compute=depth_compute, flip=flip)
+            depth_compute=depth_compute,
+            ocr_level=ocr_level, ocr_language=ocr_language,
+            ocr_correction=ocr_correction, ocr_lines=ocr_lines, flip=flip)
         # A source can implement one stream and not the other. Asked once, here,
         # rather than per send: with no pose support the pose bundle is sent from
         # a blank frame, which is the same zeros a disabled stream sends.
@@ -236,6 +267,8 @@ class Sidecar:
             self.source if isinstance(self.source, PoseSource) else None)
         self.face_source: FaceSource | None = (
             self.source if isinstance(self.source, FaceSource) else None)
+        self.text_source: TextSource | None = (
+            self.source if isinstance(self.source, TextSource) else None)
         # UDP: this is a stream of the most recent state, and a retransmitted
         # stale frame is worth less than the next fresh one. Loss on loopback is
         # not a practical concern, and `seq` makes any loss visible downstream.
@@ -503,7 +536,8 @@ class Sidecar:
         # is short-circuited away: a stream that stopped being SENT would make its
         # channels vanish from TouchDesigner, which is the whole point of
         # DESIGN.md 6.4.
-        fresh = [self._send_hands(), self._send_pose(), self._send_face()]
+        fresh = [self._send_hands(), self._send_pose(), self._send_face(),
+                 self._send_text()]
         # Any stream counts as news. With hands disabled, testing only the hands
         # seq would report 0 fps in the status line while pose frames were arriving
         # perfectly well.
@@ -567,6 +601,26 @@ class Sidecar:
             STREAM_FACE, self.face_names,
             face_channel_values(frame, age_ms, n_faces), frame.seq)
 
+    def _send_text(self) -> bool:
+        """The text frame, as ONE typed message to the text port. Blank when off.
+
+        Sent every tick like the channel streams, and for the same reason turned
+        the other way round: a disabled or restarted stream must leave the far
+        side's table BLANK rather than holding the last sign it saw. The receiver
+        rewrites its rows only when `seq` moves, so a 60 Hz tick over a 30 Hz
+        request costs it nothing (tools/td_add_ocr.py).
+        """
+        source = self.text_source
+        frame = (blank_text_frame(slots=self.ocr_lines) if source is None
+                 else source.latest_text())
+        # Wrapped for float32 exactness, exactly as every `*_seq` channel is.
+        payload = encode_bundle_of([encode_typed_message(
+            TEXT_ADDRESS, pack_text_args(frame, frame.seq % SEQ_MODULUS))])
+        self._send_payload(payload, port_for(REQUEST_OCR, self.port))
+        is_new = self._last_optional_seq.get(REQUEST_OCR, -1) != frame.seq
+        self._last_optional_seq[REQUEST_OCR] = frame.seq
+        return is_new
+
     def _age_of(self, frame: object,
                 fallback: Callable[[], float] | None) -> float:
         """How stale a frame is, in ms. Frame first, clock second.
@@ -616,7 +670,10 @@ class Sidecar:
         another joint's channel (DESIGN.md 7). Catching it alongside socket errors
         would swallow exactly the bug it was written to surface.
         """
-        payload = encode_channels(names, values)
+        self._send_payload(encode_channels(names, values), port)
+
+    def _send_payload(self, payload: bytes, port: int) -> None:
+        """Put one encoded bundle on the wire. Never raises; counts what it could not."""
         try:
             self.socket.sendto(payload, (self.host, port))
             self.n_sent += 1
@@ -666,6 +723,10 @@ class Sidecar:
                      if stream == STREAM_HANDS else "",
                      "" if stream in self.streams else "  (DISABLED - zeros)"),
                   flush=True)
+        print("  %-6s port %d  one /ocr message, %d slots%s"
+              % (REQUEST_OCR, port_for(REQUEST_OCR, self.port), self.ocr_lines,
+                 "" if REQUEST_OCR in self.streams else "  (DISABLED - blank)"),
+              flush=True)
         if self.parent_pid:
             print("watching parent pid %d; will exit when it does" % self.parent_pid,
                   flush=True)
@@ -729,6 +790,14 @@ class Sidecar:
                     if face is not None and STREAM_FACE in self.streams:
                         parts.append("faces %d" % sum(
                             1 for f in face.latest_face().faces if f.found))
+                    text = self.text_source
+                    if text is not None and REQUEST_OCR in self.streams:
+                        latest = text.latest_text()
+                        parts.append("text %d line%s%s" % (
+                            latest.found, "" if latest.found == 1 else "s",
+                            " (%d beyond the %d slots)"
+                            % (latest.found - latest.slots, latest.slots)
+                            if latest.found > latest.slots else ""))
                     # THE IMAGE STREAMS, which had no line of their own at all - which
                     # is precisely why "is depth even on?" could not be answered from
                     # this log. A count that climbs is the whole answer, and the
@@ -894,6 +963,27 @@ def main(argv: list[str] | None = None) -> int:
                         help="optical flow accuracy. MEASURED per frame at 1280x720: "
                              "low 16.2 ms, medium 18.9, high 30.1 - all of it on the "
                              "same serial queue as hands' 3.41. (default: %(default)s)")
+    parser.add_argument("--ocr-level", default=DEFAULT_OCR_LEVEL,
+                        choices=list(OCR_LEVELS),
+                        help="text recognition level. MEASURED at 1280x720 over six "
+                             "lines: fast 5.92 ms with a language pinned, accurate "
+                             "47.9 - and 60.6 with Vision's own defaults. "
+                             "(default: %(default)s)")
+    parser.add_argument("--ocr-language", default=DEFAULT_OCR_LANGUAGE,
+                        metavar="TAG[,TAG]",
+                        help="the language(s) to read, as BCP 47 tags. Pinning one is "
+                             "the biggest lever on cost; an EMPTY string means detect "
+                             "it, which is the slow path. (default: %(default)s)")
+    parser.add_argument("--ocr-correct", action="store_true",
+                        help="apply Vision's language correction - a dictionary pass "
+                             "over the result. Costs about 2.4 ms at `fast`; helps "
+                             "on blurry text and not on clean signage. Off by default.")
+    parser.add_argument("--ocr-lines", type=int, default=DEFAULT_TEXT_LINES,
+                        metavar="N",
+                        help="rows in the text table, 1..%d. Every frame carries "
+                             "exactly this many, blank where nothing was read; lines "
+                             "beyond it are dropped lowest-confidence first. "
+                             "(default: %%(default)s)" % MAX_TEXT_LINES)
     parser.add_argument("--frames-path", default=None,
                         help="take frames from this shared buffer instead of opening "
                              "a camera - what `Input Mode = TOP Input` uses. "
@@ -948,6 +1038,9 @@ def main(argv: list[str] | None = None) -> int:
         # and can never fire. Negative pids are process groups too.
         parser.error("--parent-pid must be a positive pid, got %d" % args.parent_pid)
 
+    if not 1 <= args.ocr_lines <= MAX_TEXT_LINES:
+        parser.error("--ocr-lines must be 1..%d, got %d" % (MAX_TEXT_LINES, args.ocr_lines))
+
     try:
         streams = parse_streams(args.streams)
     except ValueError as exc:
@@ -964,7 +1057,10 @@ def main(argv: list[str] | None = None) -> int:
                       flow_path=args.flow_path, flow_accuracy=args.flow_accuracy,
                       depth_path=args.depth_path, depth_pins=args.depth_pins,
                       depth_drop_m=args.depth_drop,
-                      depth_compute=args.depth_compute, flip=args.flip)
+                      depth_compute=args.depth_compute,
+                      ocr_level=args.ocr_level, ocr_language=args.ocr_language,
+                      ocr_correction=args.ocr_correct, ocr_lines=args.ocr_lines,
+                      flip=args.flip)
 
     def handle_signal(signum: int, frame: FrameType | None) -> None:
         # Only sets a flag. Doing the teardown here would run camera shutdown

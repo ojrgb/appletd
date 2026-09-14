@@ -290,7 +290,7 @@ AUTOREFRESH_MS = 3000
 
 # The outputs a freeze holds. Everything this COMP publishes, in the order somebody
 # meets them: the merged CHOP, then the two image outputs.
-FROZEN_OUTPUTS = ("out1", "outmask", "outdepth", "outvideo", "outflow")
+FROZEN_OUTPUTS = ("out1", "outmask", "outdepth", "outvideo", "outflow", "outtext")
 
 # The outputs, IN CONNECTOR ORDER, with what feeds each. Connector order is
 # ALPHABETICAL BY OPERATOR NAME and an Out OP has no index parameter to override it,
@@ -299,7 +299,8 @@ OUTPUT_CHAIN = (("out1", "trim_empty"),
                 ("outdepth", "depth_fit"),
                 ("outmask", "seg_fit"),
                 ("outvideo", "video_over"),
-                ("outflow", "flow_map"))
+                ("outflow", "flow_map"),
+                ("outtext", "ocr_table"))
 
 
 def _output_wanted(comp, name):
@@ -307,6 +308,9 @@ def _output_wanted(comp, name):
     if name == "outflow":
         return bool(getattr(comp.par, "Streamflow", None)
                     and comp.par.Streamflow.eval())
+    if name == "outtext":
+        return bool(getattr(comp.par, "Streamocr", None)
+                    and comp.par.Streamocr.eval())
     if name == "outvideo":
         return bool(getattr(comp.par, "Outputvideo", None)
                     and comp.par.Outputvideo.eval())
@@ -402,7 +406,9 @@ def apply_output_visibility(comp=None):
         target = comp.op(name)
         if wanted and target is None:
             feed = comp.op(source)
-            kind = td.outCHOP if name == "out1" else td.outTOP
+            # Three families of output, one Out operator each. A DAT out created as a
+            # TOP out would connect to nothing and report no error.
+            kind = {"out1": td.outCHOP, "outtext": td.outDAT}.get(name, td.outTOP)
             target = comp.create(kind, name)
             target.nodeX, target.nodeY = master_xy(name)
             target.par.connectorder = OUTPUT_ORDER[name]
@@ -737,6 +743,14 @@ def start():
     if "flow" in streams:
         argv += ["--flow-path", str(comp.par.Flowbuffer.eval()),
                  "--flow-accuracy", str(comp.par.Flowaccuracy.eval())]
+    if "ocr" in streams:
+        # All four are launch flags: the level and the language configure the request
+        # once, and the row count sizes every frame the sidecar sends.
+        argv += ["--ocr-level", str(comp.par.Ocrlevel.eval()),
+                 "--ocr-language", str(comp.par.Ocrlanguage.eval()),
+                 "--ocr-lines", str(int(comp.par.Ocrlines.eval()))]
+        if bool(comp.par.Ocrcorrect.eval()):
+            argv += ["--ocr-correct"]
     if "depth" in streams:
         argv += ["--depth-path", str(comp.par.Depthbuffer.eval())]
         # The pins, off the Depth page's rows. Built HERE rather than read from one
@@ -1146,6 +1160,7 @@ def launch_pars(comp):
     names = ["Camera", "Cameraflip", "Inputmode", "Framesbuffer",
              "Slotassign", "Oscport", "Segquality", "Multiperson",
              "Flowaccuracy", "Flowbuffer",
+             "Ocrlevel", "Ocrlanguage", "Ocrcorrect", "Ocrlines",
              "Maskbuffer", "Depthbuffer", "Depthpinson", "Depthpincount"]
     names += [par_name for _n, par_name in REQUEST_TOGGLES]
     # `%(max_pins)d`, not a 9 typed here. Three files had that 9 and one had the
@@ -1542,6 +1557,7 @@ COMP_NAME = "appletd"
 # Nothing complained; only `sc_depth` reading 0 said anything.
 REQUEST_TOGGLES = (("hands", "Streamhands"), ("pose", "Streampose"),
                    ("face", "Streamface"), ("segment", "Streamsegment"),
+                   ("ocr", "Streamocr"),
                    ("flow", "Streamflow"),
                    ("depth", "Streamdepth"))
 
@@ -1582,6 +1598,13 @@ OTHER_BUILDERS_OWN = {
     "flow_map": "td_add_flow.py",
     "flow_callbacks": "td_add_flow.py",
     "outflow": "td_add_flow.py",
+    # Text. `outtext` is an output connector like `outmask`, so destroying it would
+    # disconnect whatever a project had wired to it.
+    "ocr_osc": "td_add_ocr.py",
+    "ocr_callbacks": "td_add_ocr.py",
+    "ocr_par_callbacks": "td_add_ocr.py",
+    "ocr_table": "td_add_ocr.py",
+    "outtext": "td_add_ocr.py",
     "video_in": "td_add_video.py",
     "video_source": "td_add_video.py",
     "video_flip": "td_add_video.py",
@@ -2552,6 +2575,7 @@ def main():
                "Camera", "Cameraflip", "Inputmode", "Framesbuffer",
                "Slotassign", "Oscport", "Segquality", "Multiperson",
                "Flowaccuracy", "Flowbuffer",
+               "Ocrlevel", "Ocrlanguage", "Ocrcorrect", "Ocrlines",
                "Maskbuffer", "Depthbuffer"]
     watched += [par_name for _n, par_name in REQUEST_TOGGLES]
     # The depth pins live on a page tools/td_add_depth.py owns, so they may not exist

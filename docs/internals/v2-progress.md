@@ -20,18 +20,17 @@ Q5.3), not started. The architectural question in Q5.0 — whether each new mode
 own stream with its own toggle, or one "extras" stream — was never answered and decides
 the shape of the work.
 
-**Text recognition as a DAT.** `VNRecognizeTextRequest` returns STRINGS, and nothing in
-the current transport carries a string: OSC feeds CHOPs and the shared buffers carry
-images. It needs a third channel — most likely a small JSON file the sidecar writes and
-a DAT reads, the way the image buffers work. **That is a decision, not just work**, and
-Q5.1 has the options.
+**Text recognition as a DAT — BUILT 2026-09-13** (docs/BUILD_PLAN.md step 28). OSC on
+base + 3 into an OSC In DAT callback, fixed slots, `outtext` on connector 5. Verified
+against the live project with frames from the package's own encoder; the live camera
+path is still to be run.
 
 ## Open questions nobody has answered
 
 `v2-open-questions.md` — the live ones are Q1.1 (should auto-refresh restart when a
 stream goes OFF), Q2.2 (publish a people count for the mask), Q3.2 (what the sidecar
-should do when a TOP input stops updating), and Q5.0/Q5.1 above. Each currently has an
-assumption recorded in that file; none has been confirmed.
+should do when a TOP input stops updating), and Q5.0 above. Each currently has an
+assumption recorded in that file; none has been confirmed. Q5.1 is answered.
 
 ## Loose end worth an hour
 

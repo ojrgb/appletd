@@ -63,13 +63,43 @@ results. The one live observation that *is* recorded is a latency, at the bottom
 | segmentation, `balanced` | **8.54 ms** | 512 × 384 | feathered |
 | segmentation, `accurate` | **30.73 ms** | 2016 × 1512 | cannot hold 30 fps on its own |
 | depth, Depth Anything V2 Small | **23.00 ms** | 518 × 392 fp16 | p95 23.27, max 23.33 |
+| text, `fast`, `en-US`, no correction | **5.92 ms** | up to `--ocr-lines` rows | max 7.88 — synthetic, see below |
 
 A 30 fps frame interval is **33.3 ms**. Depth alone is 69% of it; depth plus hands is
 79%; depth plus `accurate` segmentation is ~162% and cannot work.
 
 Requests run in this order on the one capture queue — cheapest and most-read first, so
-whatever is dropped is dropped from the end: `hands`, `pose`, `face`, `segment`,
-`depth`.
+whatever is dropped is dropped from the end: `hands`, `pose`, `face`, `segment`, `ocr`,
+`depth`, `flow`.
+
+### Text recognition — synthetic replay, 2026-09-13
+
+Not the fixture: it has no text in it. A 1280×720 frame with six lines of 44 px text
+drawn by Pillow, one `CVPixelBuffer` wrapped once, 24 timed calls after a discarded
+first. macOS 26.6.2, pyobjc 12.2.2, request revision 3.
+
+| configuration | median | max | read correctly |
+|---|---|---|---|
+| `accurate`, Vision's defaults | 60.63 ms | 72.32 | 6 of 6 |
+| `accurate`, `en-US`, correction off | 47.94 ms | 50.75 | 6 of 6 |
+| `fast`, Vision's defaults | 8.55 ms | 9.69 | 6 of 6 |
+| `fast`, `en-US`, correction ON | 8.32 ms | 10.38 | 6 of 6 |
+| `fast`, `en-US`, correction off | **5.92 ms** | 7.88 | 6 of 6 |
+
+Two things worth having from it:
+
+- **The lever is the language, not the level.** Pinning `en-US` and switching
+  correction off is 2.3× on `fast` and 1.3× on `accurate`. There is no separate
+  English-only model to download — the two levels are the two models; correction is a
+  dictionary pass over the result, autodetection a second pass over the image.
+- **`fast` reports a flat 0.5 confidence** for every line; `accurate` reported 1.0.
+  The `conf` column means something only at `accurate`.
+
+Both levels misread the pound sign in `Tickets £5.50` (`75.50` and `05.50`); the
+other five lines were exact. Clean synthetic text is the easy case — real signage is
+UNMEASURED.
+
+Vision lists **30 recognition languages** on this machine.
 
 ### Two facts about the depth output worth having
 

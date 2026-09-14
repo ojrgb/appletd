@@ -1,11 +1,13 @@
 """Minimal OSC encoding. No dependencies, no pyobjc, no TouchDesigner.
 
-Just enough OSC to send named floats to TouchDesigner's OSC In CHOP, which is the whole
-transport. Hand-rolled rather than taking a dependency: the encoding is twenty lines,
-and this sits between two processes - a version skew in a third-party library would
-present as landmarks quietly arriving in the wrong channels.
+Just enough OSC to send named floats to TouchDesigner's OSC In CHOP, and one typed
+message of floats and strings to its OSC In DAT, which is the whole transport.
+Hand-rolled rather than taking a dependency: the encoding is twenty lines, and this
+sits between two processes - a version skew in a third-party library would present as
+landmarks quietly arriving in the wrong channels.
 
     message   address (padded to 4)  ",f" (padded to 4)  float32 big-endian
+    typed     address (padded to 4)  ",fs..." (padded)   each argument in turn
     bundle    "#bundle" (padded)     timetag (8 bytes)   [size][message]...
 
 Big-endian throughout, every part padded to a multiple of 4 bytes with NULs, addresses
@@ -33,6 +35,11 @@ _BUNDLE_PREFIX = b"#bundle"
 # A single float argument. The comma is part of the type-tag string, not a
 # separator we chose.
 _TYPETAG_FLOAT = b",f"
+# The two argument types the typed message carries. Ints are deliberately absent:
+# every number on this wire is a float32 so the receiver has one numeric type, and a
+# sequence number is wrapped by the sender rather than widened here.
+_TAG_FLOAT = b"f"
+_TAG_STRING = b"s"
 
 
 # The send buffer every sender sets, and the number is the whole point of the
@@ -97,6 +104,42 @@ def encode_message(address: str, value: float) -> bytes:
     return _pad(address.encode("ascii")) + _pad(_TYPETAG_FLOAT) + struct.pack(">f", value)
 
 
+def encode_typed_message(address: str, args: Sequence[float | str]) -> bytes:
+    """One OSC message carrying floats and strings, in the order given.
+
+    Contract: floats go as float32, strings as UTF-8 padded to 4 bytes. Anything else
+              raises rather than being coerced - a bool or an int silently sent as
+              a float is a type the receiver cannot tell from a real measurement.
+    Why UTF-8: the OSC 1.0 text says ASCII; every receiver that matters, including
+              TouchDesigner's OSC In DAT (MEASURED: `£` and `ü` arrived intact),
+              passes the bytes through, and recognised text is not ASCII.
+    """
+    if not address.startswith("/"):
+        raise ValueError("OSC address must start with '/': %r" % (address,))
+    tags = bytearray(b",")
+    body = bytearray()
+    for value in args:
+        if isinstance(value, str):
+            tags += _TAG_STRING
+            body += _pad(value.encode("utf-8"))
+        elif isinstance(value, float):
+            tags += _TAG_FLOAT
+            body += struct.pack(">f", value)
+        else:
+            raise TypeError("typed message arguments are float or str, not %s"
+                            % type(value).__name__)
+    return _pad(address.encode("ascii")) + _pad(bytes(tags)) + bytes(body)
+
+
+def encode_bundle_of(messages: Iterable[bytes]) -> bytes:
+    """One OSC bundle around already-encoded messages."""
+    parts = [_BUNDLE_PREFIX_PADDED, _TIMETAG_IMMEDIATE]
+    for message in messages:
+        parts.append(struct.pack(">i", len(message)))
+        parts.append(message)
+    return b"".join(parts)
+
+
 def encode_bundle(pairs: Iterable[tuple[str, float]]) -> bytes:
     """One OSC bundle carrying many messages.
 
@@ -108,12 +151,7 @@ def encode_bundle(pairs: Iterable[tuple[str, float]]) -> bytes:
           face 12640 (387). The face bundle is the one to watch, and the limit is
           NOT 16 KB, which is the usual guess: see `datagram_socket`.
     """
-    parts = [_BUNDLE_PREFIX_PADDED, _TIMETAG_IMMEDIATE]
-    for address, value in pairs:
-        message = encode_message(address, value)
-        parts.append(struct.pack(">i", len(message)))
-        parts.append(message)
-    return b"".join(parts)
+    return encode_bundle_of(encode_message(address, value) for address, value in pairs)
 
 
 def encode_channels(names: Sequence[str], values: Sequence[float]) -> bytes:

@@ -147,6 +147,9 @@ RUNTIME_MODULES: Final[tuple[str, ...]] = (
     # that. Guarded now by test_install.py, which reads the imports back out of the
     # generated DAT sources rather than trusting this list to be complete.
     "motion",
+    # Text recognition: the detector and its wire contract. Both imported by the
+    # sidecar whenever `ocr` is in --streams.
+    "ocr",
     "osc",
     "pins",
     "pose",
@@ -158,6 +161,7 @@ RUNTIME_MODULES: Final[tuple[str, ...]] = (
     "spaces",
     "streams",
     "td_layout",
+    "text_types",
     "types",
 )
 

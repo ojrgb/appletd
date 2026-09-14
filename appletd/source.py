@@ -33,15 +33,19 @@ from appletd.face_types import FaceFrame, blank_face_frame
 from appletd.pose_types import PoseFrame, blank_pose_frame
 from appletd.slots import SLOT_MODE_CHIRALITY
 from appletd.streams import (
+    DEFAULT_OCR_LANGUAGE,
+    DEFAULT_OCR_LEVEL,
     DEFAULT_SEGMENT_QUALITY,
     DEFAULT_STREAMS,
     REQUEST_DEPTH,
     REQUEST_FLOW,
+    REQUEST_OCR,
     REQUEST_SEGMENT,
     STREAM_FACE,
     STREAM_HANDS,
     STREAM_POSE,
 )
+from appletd.text_types import DEFAULT_TEXT_LINES, TextFrame, blank_text_frame
 from appletd.types import LandmarkFrame, blank_frame
 
 if TYPE_CHECKING:
@@ -51,6 +55,7 @@ if TYPE_CHECKING:
     from appletd.depth import DepthFrame
     from appletd.engine import HandEngine
     from appletd.flow import FlowImage
+    from appletd.ocr import TextDetector
 
     # `pins` imports numpy AT MODULE SCOPE, and this module promises to be importable
     # with neither pyobjc nor numpy present - `appletd/__init__.py` says the core
@@ -261,6 +266,14 @@ class LatestFaceBox(LatestBox[FaceFrame]):
         super().__init__(blank_face_frame())
 
 
+class LatestTextBox(LatestBox[TextFrame]):
+    """The text box. Its blank frame carries the SLOT COUNT the sidecar was launched
+    with, so a disabled stream still sends a table of the right shape."""
+
+    def __init__(self, slots: int = DEFAULT_TEXT_LINES) -> None:
+        super().__init__(blank_text_frame(slots=slots))
+
+
 @runtime_checkable
 class PoseSource(Protocol):
     """The body-pose half of a source, kept separate from `HandSource`.
@@ -293,6 +306,14 @@ class FaceSource(Protocol):
     def face_age_ms(self) -> float: ...
 
 
+@runtime_checkable
+class TextSource(Protocol):
+    """The text half. `latest_text()` never blocks and is never None."""
+
+    def latest_text(self) -> TextFrame: ...
+    def text_age_ms(self) -> float: ...
+
+
 class InProcessSource:
     """A HandSource and PoseSource backed by the camera and Vision.
 
@@ -318,6 +339,10 @@ class InProcessSource:
                  depth_pins: tuple[Pin, ...] = (),
                  depth_drop_m: float = 0.5,
                  depth_compute: str = "all",
+                 ocr_level: str = DEFAULT_OCR_LEVEL,
+                 ocr_language: str = DEFAULT_OCR_LANGUAGE,
+                 ocr_correction: bool = False,
+                 ocr_lines: int = DEFAULT_TEXT_LINES,
                  flip: bool = False) -> None:
         """`streams` is which Vision requests to run - see appletd/streams.py.
 
@@ -364,6 +389,11 @@ class InProcessSource:
         self._depth_pins = depth_pins
         self._depth_drop_m = depth_drop_m
         self._depth_compute = depth_compute
+        # TEXT's knobs, held for start(). Launch flags like everything else here.
+        self._ocr_level = ocr_level
+        self._ocr_language = ocr_language
+        self._ocr_correction = ocr_correction
+        self._ocr_lines = ocr_lines
         self.box = LatestFrameBox()
         # Always constructed, even with pose disabled, so `latest_pose()` has the
         # full fixed shape to publish from the first tick. A disabled stream sends
@@ -371,6 +401,9 @@ class InProcessSource:
         # come from.
         self.pose_box = LatestPoseBox()
         self.face_box = LatestFaceBox()
+        # Sized to the launch flag, so the blank frame a disabled stream sends has as
+        # many slots as the table the far side was built to expect.
+        self.text_box = LatestTextBox(slots=ocr_lines)
         # Guards start()/stop() against each other. It is NEVER taken by
         # latest() or age_ms() - the read path stays lock-free, which is the
         # whole point of this module. This only stops two callers building two
@@ -424,6 +457,15 @@ class InProcessSource:
             if STREAM_FACE in self._streams:
                 from appletd.face import FaceDetector
                 face_detector = FaceDetector()
+            # Text publishes into a box like pose and face rather than to an injected
+            # destination like the images, so it needs no `on_*` to be worth building.
+            text_detector: TextDetector | None = None
+            if REQUEST_OCR in self._streams:
+                from appletd.ocr import TextDetector
+                text_detector = TextDetector(level=self._ocr_level,
+                                             language=self._ocr_language,
+                                             correction=self._ocr_correction,
+                                             slots=self._ocr_lines)
             # Built only when it has somewhere to publish. `REQUEST_SEGMENT` in the
             # streams with no `on_mask` would be a request that costs 2.21 ms a frame
             # and throws the result away, so it is treated as off - and `errors`
@@ -493,6 +535,8 @@ class InProcessSource:
                 on_pose=self.pose_box.publish if pose_detector is not None else None,
                 face_detector=face_detector,
                 on_face=self.face_box.publish if face_detector is not None else None,
+                text_detector=text_detector,
+                on_text=self.text_box.publish if text_detector is not None else None,
                 segmentation_detector=seg_detector,
                 on_mask=self._on_mask if seg_detector is not None else None,
                 depth_detector=depth_detector,
@@ -525,6 +569,8 @@ class InProcessSource:
                 self.pose_box.mark_started()
             if face_detector is not None:
                 self.face_box.mark_started()
+            if text_detector is not None:
+                self.text_box.mark_started()
             try:
                 if self._frames_path:
                     # No camera. The engine is made ready to RECEIVE frames and a
@@ -689,6 +735,13 @@ class InProcessSource:
 
     def face_age_ms(self) -> float:
         return self.face_box.age_ms()
+
+    def latest_text(self) -> TextFrame:
+        """The most recent text frame, or the blank one with text disabled."""
+        return self.text_box.latest()
+
+    def text_age_ms(self) -> float:
+        return self.text_box.age_ms()
 
     @property
     def streams_started(self) -> tuple[str, ...]:

@@ -320,7 +320,7 @@ appears on in an unmirrored image is UNMEASURED.
 
 ---
 
-## Sidecar status — 9 channels
+## Sidecar status — 10 channels
 
 On the hands port, so they arrive whatever else is enabled. Read them off the
 `housekeeping` Null CHOP beside `out1`.
@@ -328,7 +328,7 @@ On the hands port, so they arrive whatever else is enabled. Read them off the
 | channel | meaning |
 |---|---|
 | `sc_uptime_s` | seconds since the sidecar started sending. **FROZEN means the process is gone** |
-| `sc_hands`, `sc_pose`, `sc_face`, `sc_segment`, `sc_depth`, `sc_flow` | 1 when the sidecar really started that stream |
+| `sc_hands`, `sc_pose`, `sc_face`, `sc_segment`, `sc_ocr`, `sc_depth`, `sc_flow` | 1 when the sidecar really started that stream |
 | `sc_src_w`, `sc_src_h` | the frame size the sidecar is actually capturing |
 
 `sc_uptime_s` is what tells "sidecar dead" apart from "stream switched off". The `sc_*`
@@ -657,6 +657,44 @@ in the previous frame, not where it is going.
 
 Costs 16-30 ms a frame depending on accuracy, and 7.2 MB per frame at 720p — enough
 that the camera will drop buffers with this and depth both on.
+
+---
+
+## Text page
+
+`outtext` is a **Table DAT**, not channels — the only output that is neither a CHOP nor
+a TOP, because what `VNRecognizeTextRequest` returns is strings.
+
+| parameter | default | what it does |
+|---|---|---|
+| `Streamocr` | off | the text request. A launch flag |
+| `Ocrlevel` | `fast` | `fast` (5.9 ms) or `accurate` (48 ms). A launch flag |
+| `Ocrlanguage` | `en-US` | the language(s) to read, as BCP 47 tags, comma-separated. **Empty means detect**, which is the slow path. A launch flag |
+| `Ocrcorrect` | off | Vision's language correction — a dictionary pass over the result, +2.4 ms. Helps blurry text, not clean signage. A launch flag |
+| `Ocrlines` | 8 | rows in the table, 1 to 32. A launch flag |
+| `Ocrfound` | read-only | lines Vision saw this frame. **More than `Ocrlines` means some were dropped** |
+
+The table has a header row and then exactly `Ocrlines` rows, always:
+
+| column | meaning |
+|---|---|
+| `text` | the line, as recognised |
+| `conf` | Vision's confidence for it. **A flat 0.5 at `fast`**; a real 0..1 only at `accurate` |
+| `x1`, `y1` | the box's bottom-left corner, normalised, origin bottom-left — like `h0_bbox_x1/_y1` |
+| `x2`, `y2` | its top-right corner |
+
+- **Rows read top of image first**, then left to right. Lines beyond `Ocrlines` are
+  dropped lowest-confidence first.
+- **The shape never changes.** A slot with nothing in it is an empty `text` and zeros,
+  so a cell reference downstream keeps meaning what it meant — the zeros rule applied
+  to text. Switching `Streamocr` off blanks the rows.
+- **Pinning the language is the lever.** `fast` with the defaults is 8.6 ms; with
+  `en-US` pinned and correction off, 5.9. There is no smaller English model — the two
+  levels are the two models.
+- **Cells update only when something changed**, so a sign that is not moving cooks
+  nothing downstream.
+- The text arrives on `Oscport + 3` as one OSC message a frame; `ocr_osc`'s callback
+  writes the table. The DAT's own table is not the output and is kept to one line.
 
 ---
 

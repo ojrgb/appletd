@@ -2172,6 +2172,40 @@ paths every callback names, and the `--slots` plumbing, in exchange for tidiness
 The trigger for doing it is a second thing needing to control the process — a
 `visionpose` COMP wanting its own Start — not the current asymmetry.
 
+**A request with a PORT and NO CHANNELS: text.** `VNRecognizeTextRequest` returns
+strings, and a CHOP cannot carry one. So `ocr` is the first request whose output is a
+**DAT**: `outtext`, a Table DAT with one row per slot - `text`, `conf`, `x1`, `y1`,
+`x2`, `y2`, the box normalised with a bottom-left origin exactly like `h{i}_bbox_*`.
+
+  * **OSC, on its own port** (base + 3), like the channel streams and unlike the
+    images. A frame of text is a few hundred bytes, so the datagram question does not
+    arise, and the alternative - a text sibling of `maskbuf` plus a Script DAT - was
+    a fifth `/tmp` buffer and a second seqlock for something the socket already does.
+    `osc.py` gains the `s` type tag; nothing else on the wire changes.
+  * **One message per frame**, `/ocr`, carrying every slot as typed arguments, rather
+    than one message per line. MEASURED in TouchDesigner: the stock OSC In DAT's own
+    table SPLITS STRING ARGUMENTS ON WHITESPACE into separate columns, so the raw table
+    is unusable for text. Its `onReceiveOSC` callback receives the typed arguments
+    intact - spaces, UTF-8, empty strings - and writes a Table DAT. One message per
+    frame is one callback per frame, and it makes a frame atomic without a bundle
+    boundary.
+  * **Fixed slots and a count**, which is the zeros rule applied to text: every frame
+    carries exactly `--ocr-lines` rows, blank where nothing was read, so the table
+    never changes shape and a cell reference downstream never breaks. Lines beyond
+    the slot count are dropped lowest-confidence first; `Ocrfound` says how many
+    Vision saw, so a project can tell when that happened.
+  * **DAT-only.** No `ocr_*` channels on `out1`; `sc_ocr` in the status channels is
+    the liveness signal, as for every other request. A CHOP presence was priced and
+    declined - it needs a second receiver on the port and entries in every trim list.
+  * **Pinning the language is the lever.** MEASURED, synthetic 1280x720, six lines:
+    `accurate` with defaults 60.6 ms, `fast` with defaults 8.6 ms, `fast` with `en-US`
+    pinned and language correction OFF **5.9 ms**. There is no English-only model to
+    fetch - the two `recognitionLevel`s are the two models - but correction is a
+    dictionary pass over the result, and autodetection is a second pass over the
+    image. Defaults are therefore `fast`, `en-US`, correction off, which is the row a
+    live project can afford beside hands' 3.41 ms. `fast` reports a flat 0.5
+    confidence for every line; only `accurate` gives a real one.
+
 ---
 
 ### 6.5 The TouchDesigner side — one COMP, three streams, one output
