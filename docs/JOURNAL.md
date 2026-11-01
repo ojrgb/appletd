@@ -5872,3 +5872,9 @@ The user's Camera input / MacBook Pro Camera selection was applied on restoratio
 Final gate: 878 passed, 1 skipped; ruff and mypy clean; correctness review found no blockers.
 The rebuilt .tox retains package source hash e01dd6af60cf because this fix is in the
 installer DAT builder, not the embedded sidecar package. Nothing pushed; .toe unsaved.
+
+## Manual acceptance — 2026-11-01
+
+User confirmed hand tracking, loss/recovery, restart, and project reopening passed.
+User saved the tested appletd.tox and appletd.toe and approved committing and pushing.
+Other-Mac verification remains unconfirmed.

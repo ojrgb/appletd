@@ -1,3 +1,8 @@
+# Manual acceptance passed
+
+User verified tracking, recovery, restart, and reopening, then saved the tested
+appletd.tox and appletd.toe for commit and push. Other-Mac testing remains unconfirmed.
+
 # Latest correction — runtime cache reload
 
 The release was updated after the user's start attempt exposed a lost DAT-local
