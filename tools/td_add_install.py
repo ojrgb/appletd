@@ -83,7 +83,9 @@ once and TouchDesigner said it may terminate (DESIGN.md 2.8).
 
 import os
 import subprocess
+import sys
 import tempfile
+import types
 
 COMP_PATH = %(comp)r
 SRC_PATH = COMP_PATH + "/src"
@@ -95,7 +97,11 @@ POLL_FRAMES = 30
 # not something to write into a project file.
 _process = None
 _step = ""
-_runtime_cache = {}
+# DAT modules reload when a component moves. Keep verification process-local,
+# shared by install root, without serializing it into a .tox or .toe.
+_runtime_module = sys.modules.setdefault(
+    "_appletd_verified_runtimes_v1", types.ModuleType("_appletd_verified_runtimes_v1"))
+_runtime_cache = _runtime_module.__dict__.setdefault("runtimes", {})
 
 
 def _install_module():
@@ -145,6 +151,8 @@ def runtime_python(comp=None, root=None, verify=False):
     if not verify:
         if cached and cached[1] == _runtime_fingerprint(root, cached[0]):
             return cached[0]
+        comp.par.Installstate = "Runtime verification needed - press Install"
+        comp.par.Install.enable = True
         raise RuntimeError("Runtime not verified or changed - press Install to repair")
     _runtime_cache.pop(key, None)
     checked = module.find_interpreter(root, override=override)

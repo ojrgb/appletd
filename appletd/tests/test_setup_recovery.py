@@ -186,6 +186,26 @@ def test_launch_reuses_verified_runtime_and_invalidates_changed_files(tmp_path: 
     assert len(calls) == 1
 
 
+def test_runtime_verification_survives_dat_module_reload(tmp_path: Path) -> None:
+    scope = panel()
+    python = tmp_path / "python"
+    python.touch()
+    module = SimpleNamespace(
+        DEFAULT_INSTALL_ROOT=str(tmp_path),
+        find_interpreter=lambda *a, **kw: install.InterpreterCheck(str(python), True, ""))
+    comp = SimpleNamespace(par=Pars(Installroot="", Sidecarpython=""),
+                           op=lambda name: None)
+    scope["_install_module"] = lambda: module
+    assert scope["runtime_python"](comp, verify=True) == str(python)
+    reloaded = panel()
+    reloaded["_install_module"] = lambda: module
+    assert reloaded["runtime_python"](comp) == str(python)
+    python.write_text("changed runtime")
+    with pytest.raises(RuntimeError, match="changed"):
+        reloaded["runtime_python"](comp)
+    assert comp.par.Installstate.eval() == "Runtime verification needed - press Install"
+
+
 def test_runtime_cache_uses_the_actual_development_root(tmp_path: Path) -> None:
     scope = panel()
     dev = str(tmp_path / "checkout")

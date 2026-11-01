@@ -5853,3 +5853,22 @@ gating; the final network has no operator errors. This existing verification war
 is not a confirmed output defect. No public release or push was performed.
 
 Final gate: **877 passed, 1 skipped**, ruff and mypy clean.
+
+
+## Runtime verification after component restoration — 2026-11-01
+
+The user's first startup after release preparation failed with Runtime not verified
+while Install still said Installed-ready. The live DAT cache was empty: renaming the
+component during release isolation recompiled its module and discarded verification.
+Re-verification restored capture, confirming the dependencies themselves were valid.
+Verification now lives in a process-local, versioned module, without entering saved
+component storage. Cache misses re-enable Install and report verification needed.
+
+Regression tests cover DAT reexecution and file invalidation. Live rename/restore
+preserved the verified interpreter; clearing the process cache and recompiling the DAT
+then invoking project-open setup repopulated it. The reloaded artifact ran capture.
+This simulates an empty process cache, not a complete TouchDesigner application restart.
+The user's Camera input / MacBook Pro Camera selection was applied on restoration.
+Final gate: 878 passed, 1 skipped; ruff and mypy clean; correctness review found no blockers.
+The rebuilt .tox retains package source hash e01dd6af60cf because this fix is in the
+installer DAT builder, not the embedded sidecar package. Nothing pushed; .toe unsaved.

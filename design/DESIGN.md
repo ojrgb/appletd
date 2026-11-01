@@ -2508,3 +2508,10 @@ which action repairs them. A diagnostics report exposes configuration and camera
 OSC state without starting capture. Low-space and unsupported-platform failures are
 reported before writing the package. The disk reserve is a conservative estimate,
 not a measured installation size.
+
+Runtime verification is held in a private, versioned Python module for the lifetime
+of the TouchDesigner process, keyed by resolved package root and interpreter override.
+DAT recompilation or component renaming must not discard that result. It is never
+serialized into component storage. Launch still checks file fingerprints without a
+native import probe. An absent or invalidated result enables Install and clears the
+misleading Installed-ready status; project-open setup primes a new process's cache.

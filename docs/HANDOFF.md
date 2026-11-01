@@ -1,3 +1,12 @@
+# Latest correction — runtime cache reload
+
+The release was updated after the user's start attempt exposed a lost DAT-local
+verification cache. See the final JOURNAL entry. Verification now survives DAT reloads
+in process-local state; invalidation re-enables Install. 878 tests passed, 1 skipped;
+lint, types, and review passed. Package hash remains e01dd6af60cf; the .tox checksum
+changed. Live component restored with Camera input / MacBook Pro Camera and capture
+started, per the user's request. No project save or push.
+
 # Handoff — release candidate, 2026-11-01
 
 Branch **fix/setup-recovery**. Setup recovery is committed at `d228e86`; this follow-up
