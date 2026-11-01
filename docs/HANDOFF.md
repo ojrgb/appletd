@@ -1,33 +1,33 @@
-# Handoff — setup recovery, 2026-11-01
+# Handoff — release candidate, 2026-11-01
 
-Branch **fix/setup-recovery**. **875 passed, 1 skipped**, ruff and mypy clean.
-Milestone review completed; all blocking findings resolved. Nothing pushed.
+Branch **fix/setup-recovery**. Setup recovery is committed at `d228e86`; this follow-up
+prepares the portable release. **877 passed, 1 skipped**; ruff and mypy clean. Nothing pushed. See the final JOURNAL entries for
+source changes and functional verification.
 
-Setup and capture share verified interpreter selection. Launch reuses a cache with
-file fingerprints; setup/explicit configuration changes perform native import probes.
-Install can repair matching-stamp installations with broken dependencies, and performs
-package-only updates offline when existing dependency versions and model are valid.
-Advanced → Setup Diagnostics writes the Textport and `setup_report` DAT. README and
-ATTRIBUTES describe the recovery controls. See the final JOURNAL entry for verification.
+Tracked `appletd.tox` is now a fresh default build, embedded version `e01dd6af60cf`.
+It reloads with capture/video off, blank Python/install paths (including defaults),
+default camera, and cleared runtime storage. Tests used a separate empty installation
+with a downloaded Python, pinned packages and model. Normal Install repaired deliberately
+broken NumPy. Package-only updates spawned no installer. Both the fresh component and
+reloaded release ran default-camera capture. Positive hand detections and other Macs
+remain unverified; arbitrary nested/renamed component paths were not tested.
 
-Live project at verification: repository `appletd.toe`, TouchDesigner 2025.33230.
-The component was backed up before rebuilding. It was rebuilt via td_rebuild, installed,
-then launched with blank Sidecarpython in TOP Input/manual OCR mode. One trigger was
-processed; capture was restored OFF. Editable user parameter modes/expressions were
-preserved. The project's .toe was NOT saved by this work; its pre-existing Git change
-and untracked TDImportCache belong to the user. The tracked release appletd.tox was
-NOT replaced. A separate updated component snapshot was exported to the chat outputs.
-It preserves this project's settings and is not a sanitized public release.
+The clean install exposed a curl HTTP/2 cancellation. Transport-error retries are now
+capability-detected so older curl retains ordinary retries. Review covered this change
+and the export procedure. The screenspace builder still prints an absent-channel
+verification warning during a completely fresh build before group gating exists;
+the finished component has no operator errors. No performance claim was made.
 
-Remaining feedback: verify physical camera behavior on other Mac models, reproduce
-unspecified hand-detection reports, and prepare a public .tox export when requested.
-The old MacBook-only camera expression is already replaced in source/live component.
-Windows support would require another inference backend, not an installer fix.
+Live project: repository `appletd.toe`, TouchDesigner 2025.33230. The original component
+is restored at /project1/appletd, TOP Input, capture OFF, final source embedded and
+Installed-ready. The .toe was NOT saved; preserve its pre-existing Git modification
+and the untracked TDImportCache. Test components were removed. Release candidate and
+notes are in this chat's outputs directory. The MCP executes commands but usually
+returns a malformed response; local result files were used to confirm execution.
 
-Continue using tools/td_rebuild.py rather than individual builders. The sidecar runs
-the INSTALLED package: checkout → embedded DATs → Install → restart. Do not commit on
-main; ask before every push. Review correctness/concurrency at milestone boundaries.
-Do not use the camera without authorization. Preserve the user's .toe and cache files.
+Continue through tools/td_rebuild.py. The launch chain remains checkout → embedded
+DATs → Install → restart. Work on a branch; ask before every push. The release is
+ready for review, not published.
 
 ---
 

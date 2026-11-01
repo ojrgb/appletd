@@ -5821,3 +5821,35 @@ OCR pulse consumed a frame. Capture was returned to its original off state. The 
 camera expression already includes FaceTime and engine-selected defaults. Physical
 camera checks on other Mac models and the commenters' unspecified tracking failures
 remain unverified. No performance benchmark was taken, and no public release was pushed.
+
+
+## Release validation — setup recovery, 2026-11-01
+
+Built a new component through all 19 builders and exported `appletd.tox` with
+capture/video off, blank interpreter/install-root values and defaults, the default
+camera token, and cleared runtime storage. Reloaded the actual saved file with the
+source component removed; its embedded version is `e01dd6af60cf`, and no operator
+errors were reported. The user's working component was restored in TOP Input mode,
+capture off, with the final installer embedded and installed. The .toe was not saved.
+
+An empty install directory downloaded the pinned Python, dependencies and depth
+model. A real HTTP/2 cancellation interrupted the model download; curl's standard
+retry policy did not cover it. Setup now enables `--retry-all-errors` when curl
+supports it, retaining ordinary retries on older curl. Review identified that
+compatibility requirement; shell tests cover both capability outcomes.
+
+In the isolated install, deliberately breaking NumPy produced an actionable install
+status. Normal Install repaired it and the fresh bundled interpreter ran capture.
+Updating only the embedded package then returned Installed-ready without spawning
+an installer. The serialized release also ran capture after reload and installation.
+Default MacBook Pro Camera capture delivered 1280x720 source dimensions; the separate
+video TOP delivered 1920x1080 without errors in TouchDesigner 2025.33230. These are
+functional checks, not performance benchmarks. No camera imagery was saved.
+
+Limits: no person was available to validate positive hand detections; other Mac
+models and arbitrary component paths remain untested. Fresh-build screenspace
+verification reports absent channels before the groups layer has established its
+gating; the final network has no operator errors. This existing verification warning
+is not a confirmed output defect. No public release or push was performed.
+
+Final gate: **877 passed, 1 skipped**, ruff and mypy clean.

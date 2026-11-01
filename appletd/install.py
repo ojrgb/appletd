@@ -282,6 +282,10 @@ REPORTED=no
 # to need the download to finish. This gives up only when less than 1 KB has moved in
 # 60 s, which no working download does and no hung one survives.
 CURL_LIMITS="--connect-timeout 30 --speed-limit 1024 --speed-time 60 --retry 2"
+# Older macOS curl versions lack retries for interrupted HTTP/2 streams.
+if curl --retry-all-errors --version >/dev/null 2>&1; then
+    CURL_LIMITS="$CURL_LIMITS --retry-all-errors"
+fi
 
 say() {
     if [ "$1" = FAIL ]; then REPORTED=yes; fi
