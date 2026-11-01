@@ -116,7 +116,7 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
         ("Network", ("Oscport", "Maskbuffer", "Depthbuffer",
                      "Framesbuffer", "Flowbuffer")),
         ("Install", ("Installroot", "Sidecarpython", "Pythonurl", "Sourceversion",
-                     "Forceinstall")),
+                     "Forceinstall", "Diagnose")),
         ("Diagnostics", ("Printstatus", "Capturepid", "Keeplayout")),
     ),
     "About": (

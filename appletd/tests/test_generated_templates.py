@@ -33,6 +33,10 @@ TOOLS = pathlib.Path(__file__).resolve().parents[2] / "tools"
 # Kept here rather than parsed out of the call site: a wrong dict here fails loudly,
 # and parsing the call site would only prove the parser works.
 TEMPLATES: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    ("td_add_install.py", "CONTROL_SOURCE",
+     {"comp": "/project1/appletd", "log": repr("/tmp/appletd_install.log"),
+      "control": "install_control"}),
+    ("td_add_install.py", "CALLBACK_SOURCE", {"control": "install_control"}),
     ("td_add_about.py", "CONTROL_SOURCE",
      {"comp": "/project1/appletd", "magic": b"\x00\x00\x00\x0110",
       "min_bytes": 50_000, "licence": "/blob/main/LICENSE"}),

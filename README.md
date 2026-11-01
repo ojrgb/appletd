@@ -38,6 +38,26 @@ python3.11 -m venv ~/.venvs/appletd
 > `disable-library-validation` and the interpreter inside the bundle does not, so as a
 > subprocess it is an ordinary hardened binary. Nothing to be done from this side.
 
+### If setup or tracking is not working
+
+- **Update needed:** press **Install**. This installs the code embedded in this
+  component; **About → Apply Update** replaces the component itself.
+- **Python import error:** leave **Advanced → Sidecarpython** empty and press
+  **Install**, or choose a Python 3.11+ interpreter. Install and capture use the
+  same verified runtime. A valid interpreter with missing packages can be repaired.
+- **Blank picture:** enable **Output Video**, refresh the camera list, and connect
+  **outvideo** to a **Null TOP**. Landmark data comes from **out1**, a CHOP output.
+- **No hands:** enable **Hands**, restart capture, then use
+  **Advanced → Setup Diagnostics**. The report distinguishes disabled tracking,
+  missing runtime and unmatched video devices; its channel values are a snapshot.
+- **Installation fails:** check free disk space (setup reserves 512 MiB), and read
+  the install log named in the diagnostics. Apple Silicon Macs are required;
+  Windows and Intel Macs are unsupported. The tested TD build is listed below.
+
+A matching package version alone does not prove the runtime works. **Installed –
+ready** means setup verified the interpreter's native imports. Launch reuses that
+verified result; changing the runtime files requires setup verification again.
+
 ---
 
 ## Compatibility

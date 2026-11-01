@@ -1,4 +1,38 @@
-# Handoff
+# Handoff — setup recovery, 2026-11-01
+
+Branch **fix/setup-recovery**. **875 passed, 1 skipped**, ruff and mypy clean.
+Milestone review completed; all blocking findings resolved. Nothing pushed.
+
+Setup and capture share verified interpreter selection. Launch reuses a cache with
+file fingerprints; setup/explicit configuration changes perform native import probes.
+Install can repair matching-stamp installations with broken dependencies, and performs
+package-only updates offline when existing dependency versions and model are valid.
+Advanced → Setup Diagnostics writes the Textport and `setup_report` DAT. README and
+ATTRIBUTES describe the recovery controls. See the final JOURNAL entry for verification.
+
+Live project at verification: repository `appletd.toe`, TouchDesigner 2025.33230.
+The component was backed up before rebuilding. It was rebuilt via td_rebuild, installed,
+then launched with blank Sidecarpython in TOP Input/manual OCR mode. One trigger was
+processed; capture was restored OFF. Editable user parameter modes/expressions were
+preserved. The project's .toe was NOT saved by this work; its pre-existing Git change
+and untracked TDImportCache belong to the user. The tracked release appletd.tox was
+NOT replaced. A separate updated component snapshot was exported to the chat outputs.
+It preserves this project's settings and is not a sanitized public release.
+
+Remaining feedback: verify physical camera behavior on other Mac models, reproduce
+unspecified hand-detection reports, and prepare a public .tox export when requested.
+The old MacBook-only camera expression is already replaced in source/live component.
+Windows support would require another inference backend, not an installer fix.
+
+Continue using tools/td_rebuild.py rather than individual builders. The sidecar runs
+the INSTALLED package: checkout → embedded DATs → Install → restart. Do not commit on
+main; ask before every push. Review correctness/concurrency at milestone boundaries.
+Do not use the camera without authorization. Preserve the user's .toe and cache files.
+
+---
+
+## Previous handoff (historical)
+
 
 **843 tests**, `ruff check appletd/ tools/` and `mypy appletd` clean. Branch
 **feat/ocr-text-dat**, off `main` — nothing pushed; a push has to be asked for.

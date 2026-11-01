@@ -1664,13 +1664,23 @@ def main():
 
     chop = comp.op("derive_chop")
     if chop is not None:
-        before = chop.numChans
+        was_cooking = comp.allowCooking
         was_descriptor = master.par.Descriptor.eval()
-        master.par.Descriptor = not was_descriptor
-        chop.cook(force=True)
-        after = chop.numChans
-        master.par.Descriptor = was_descriptor
-        chop.cook(force=True)
+        try:
+            # A disabled stream holds its channels even under a forced child cook.
+            # Enable only this COMP for the check; no camera or stream toggle changes.
+            comp.allowCooking = True
+            chop.cook(force=True)
+            before = chop.numChans
+            master.par.Descriptor = not was_descriptor
+            chop.cook(force=True)
+            after = chop.numChans
+        finally:
+            try:
+                master.par.Descriptor = was_descriptor
+                chop.cook(force=True)
+            finally:
+                comp.allowCooking = was_cooking
         print("4. proof the toggles bite: Descriptor flipped changed derive_chop "
               "from %d channels to %d" % (before, after))
         if before == after:

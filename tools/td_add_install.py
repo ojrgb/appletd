@@ -95,6 +95,7 @@ POLL_FRAMES = 30
 # not something to write into a project file.
 _process = None
 _step = ""
+_runtime_cache = {}
 
 
 def _install_module():
@@ -107,6 +108,100 @@ def _install_module():
             "own logic out of the .toe, so without that DAT there is nothing to read."
             %% SRC_PATH)
     return mod(dat)
+
+
+def _runtime_fingerprint(root, python):
+    paths = (python, os.path.join(root, "INSTALLED.json"),
+             os.path.join(root, "site-packages", "numpy"),
+             os.path.join(root, "site-packages", "objc"))
+    result = []
+    for path in paths:
+        try:
+            info = os.stat(path)
+            result.append((info.st_ino, info.st_mtime_ns, info.st_size))
+        except OSError:
+            result.append(None)
+    return tuple(result)
+
+
+def runtime_root(comp):
+    """Use the same package root as capture, including a development checkout."""
+    control = comp.op("sidecar_control")
+    root = control.module.package_root(comp) if control is not None else ""
+    if not root:
+        root = str(comp.par.Installroot.eval() or _install_module().DEFAULT_INSTALL_ROOT)
+    return os.path.abspath(os.path.expanduser(root))
+
+
+def runtime_python(comp=None, root=None, verify=False):
+    """Reuse setup's verified runtime; launch never blocks on an import probe."""
+    comp = comp or _comp()
+    module = _install_module()
+    root = os.path.abspath(os.path.expanduser(root)) if root else runtime_root(comp)
+    override = (str(comp.par.Sidecarpython.eval()).strip()
+                or os.environ.get("APPLETD_PYTHON", "").strip() or None)
+    key = (root, override)
+    cached = _runtime_cache.get(key)
+    if not verify:
+        if cached and cached[1] == _runtime_fingerprint(root, cached[0]):
+            return cached[0]
+        raise RuntimeError("Runtime not verified or changed - press Install to repair")
+    _runtime_cache.pop(key, None)
+    checked = module.find_interpreter(root, override=override)
+    if checked is None:
+        if override:
+            raise RuntimeError("Selected Python cannot load appletd dependencies: %%s. "
+                               "Press Install to repair, or select Python 3.11+." %% override)
+        raise RuntimeError("No compatible Python runtime - press Install to repair")
+    _runtime_cache[key] = (checked.path, _runtime_fingerprint(root, checked.path))
+    return checked.path
+
+
+def diagnostics():
+    """Write a readable setup report without opening the camera or starting capture."""
+    comp = _comp()
+    module = _install_module()
+    root = str(comp.par.Installroot.eval() or module.DEFAULT_INSTALL_ROOT)
+    stamp = module.read_stamp(root) or {}
+    lines = ["appletd setup report", "Requires an Apple Silicon Mac; Windows unsupported.",
+             "Tested TD build: 2025.33070; current: " + str(app.build),
+             "Install: " + state(comp),
+             "Embedded version: " + str(comp.par.Sourceversion.eval()),
+             "Installed version: " + str(stamp.get("version", "none"))]
+    try:
+        lines.append("Verified Python: " + runtime_python(comp))
+    except (RuntimeError, OSError) as problem:
+        lines.append(str(problem))
+    for name in ("Active", "Capturestate", "Inputmode", "Camera", "Streamhands",
+                 "Outputvideo", "Hideunused"):
+        par = getattr(comp.par, name, None)
+        if par is not None:
+            lines.append("%%s: %%s" %% (name, par.eval()))
+    video = comp.op("video_in")
+    if video is not None:
+        lines.append("Video device: " + str(video.par.device.eval()))
+        lines.append("Video warnings: " + (video.warnings() or "none"))
+        if comp.par.Inputmode.eval() == "camera" and not video.par.device.eval():
+            lines.append("No video device matched. Refresh Camera List and choose a camera.")
+    osc = comp.op("hands_osc")
+    if osc is not None:
+        for name in ("sc_uptime_s", "seq", "age_ms", "h0_found", "h1_found"):
+            channel = osc[name]
+            value = "no data" if channel is None else float(channel)
+            lines.append("%%s: %%s" %% (name, value))
+    if not comp.par.Streamhands.eval():
+        lines.append("Hands is OFF. Enable it and restart to detect hands.")
+    if not comp.par.Outputvideo.eval():
+        lines.append("Output Video is OFF. Enable it to display the camera image.")
+    lines += ["Connect outvideo to a Null TOP for the picture; out1 to a Null CHOP for data.",
+              "OSC values are a snapshot; frozen values do not prove capture is alive.",
+              "Install log: " + LOG_PATH, "Capture log: /tmp/appletd_sidecar.log"]
+    report = comp.op("setup_report")
+    if report is None:
+        report = comp.create(textDAT, "setup_report")
+    report.text = "\\n".join(lines)
+    print(report.text)
+    return report.text
 
 
 def _comp():
@@ -192,6 +287,15 @@ def state(comp=None):
               "directory - cleared, so it resolves to %%r" %% (stale, root))
     wanted = str(comp.par.Sourceversion.eval())
     found = install.probe(root, wanted_version=wanted)
+    # A checkout may intentionally have no install stamp. Verify the root capture
+    # actually uses, even when the separate managed installation is incomplete.
+    runtime_error = ""
+    if (found.state == "installed"
+            or os.path.isfile(os.path.join(runtime_root(comp), "appletd", "__init__.py"))):
+        try:
+            runtime_python(comp, verify=True)
+        except (RuntimeError, OSError) as problem:
+            runtime_error = str(problem)
 
     if found.state == "missing":
         text = "Not installed - press Install"
@@ -207,19 +311,14 @@ def state(comp=None):
             missing.append("the depth model")
         text = "Install needed - missing %%s" %% ", ".join(missing)
     elif found.state == "stale":
-        text = ("Update needed - installed %%s, this file wants %%s"
+        text = ("Update needed - press Install (installed %%s, required %%s)"
                 %% (found.stamp_version, found.wanted_version))
     else:
         # Only here does it cost a subprocess, and only because "the files are there"
         # is not the same claim as "the interpreter can import them" - which is the
         # distinction the whole install design turns on (BUILD_PLAN 21.1).
-        checked = install.find_interpreter(
-            root, override=str(comp.par.Sidecarpython.eval()) or None)
-        if checked is None:
-            text = "Install needed - nothing here can import pyobjc"
-        else:
-            text = "Installed - %%s" %% os.path.basename(os.path.dirname(
-                os.path.dirname(checked.path)))
+        text = ("Install needed - " + runtime_error if runtime_error
+                else "Installed - ready")
     comp.par.Installstate = text
     # The button is greyed out when there is nothing to do. `Forceinstall` on Advanced
     # is always live, for the case where somebody knows better than the probe.
@@ -253,6 +352,19 @@ def write_package(root):
 
 
 def install(force=False):
+    """Report local write and launch failures as well as installer-process failures."""
+    try:
+        return _install(force)
+    except (OSError, RuntimeError) as problem:
+        message = "Install failed - " + str(problem)
+        comp = _comp()
+        if comp is not None:
+            comp.par.Installstate = message
+        print("[appletd] " + message)
+        return message
+
+
+def _install(force=False):
     """Write the package out and start the installer. Returns a message.
 
     `force` skips the "already installed" shortcut. It does NOT skip the interpreter
@@ -268,20 +380,43 @@ def install(force=False):
     module = _install_module()
     try:
         module.require_arm64()
+        module.require_install_space(str(comp.par.Installroot.eval()
+                                        or module.DEFAULT_INSTALL_ROOT))
     except RuntimeError as refused:
         comp.par.Installstate = "Install failed - %%s" %% refused
         return str(refused)
 
     root = str(comp.par.Installroot.eval() or module.DEFAULT_INSTALL_ROOT)
     version = str(comp.par.Sourceversion.eval())
-    if not force and module.probe(root, wanted_version=version).state == "installed":
-        return state(comp)
+    found = module.probe(root, wanted_version=version)
 
     # Reuse an interpreter that works before downloading one. `Sidecarpython` first,
     # then the install's own, then the machine's.
-    override = str(comp.par.Sidecarpython.eval()) or None
+    override = (str(comp.par.Sidecarpython.eval()).strip()
+                or os.environ.get("APPLETD_PYTHON", "").strip() or None)
     checked = module.find_interpreter(root, override=override)
     python = checked.path if checked is not None else ""
+    if override and checked is None:
+        basic = module.verify_interpreter(os.path.expanduser(override), native=False)
+        if not basic.ok:
+            comp.par.Installstate = ("Install failed - selected Python must be 3.11+. "
+                                     "Clear Sidecar Python to install automatically.")
+            return str(comp.par.Installstate.eval())
+        python = basic.path
+    if (not force and checked is not None and found.packages and found.model
+            and module.requirements_match(root)):
+        # A stale package needs no network when its native dependencies already work.
+        try:
+            write_package(root)
+            module.write_stamp(root, version, python)
+        except (OSError, RuntimeError) as problem:
+            comp.par.Installstate = "Install failed - " + str(problem)
+            return str(comp.par.Installstate.eval())
+        result = state(comp)
+        control = comp.op("sidecar_control")
+        if control is not None and control.module.running_pids():
+            comp.par.Installstate = result + " - restart capture to run it"
+        return str(comp.par.Installstate.eval())
 
     _step = "writing %%d modules" %% len(module.EMBEDDED_MODULES)
     comp.par.Installstate = "Installing - " + _step
@@ -394,12 +529,19 @@ CALLBACK_SOURCE = '''# Generated by tools/td_add_install.py
 # never fires for a pulse, which cost an afternoon in August on a different button.
 
 
+def onValueChange(par, prev):
+    par.owner.op(%(control)r).module.state()
+
+
 def onPulse(par):
     control = par.owner.op(%(control)r)
     if control is None:
         print("[appletd] no %(control)s DAT - run tools/td_add_install.py")
         return
-    control.module.install(force=par.name == "Forceinstall")
+    if par.name == "Diagnose":
+        control.module.diagnostics()
+    else:
+        control.module.install(force=par.name == "Forceinstall")
 '''
 
 START_SOURCE = '''# Generated by tools/td_add_install.py
@@ -476,7 +618,9 @@ def main():
     if "Forceinstall" not in existing:
         advanced.appendPulse(
             "Forceinstall", label="Force Install  (ignores the probe)")
-    print("1. Install and Installstate on General, Forceinstall on Advanced")
+    if "Diagnose" not in existing:
+        advanced.appendPulse("Diagnose", label="Setup Diagnostics (Textport)")
+    print("1. Install status on General; repair and diagnostics on Advanced")
 
     # ORDER IS NOT SET HERE. tools/td_add_pages.py owns every page's order from one
     # table. A builder that sorts its own page names parameters the pages layer may
@@ -500,11 +644,11 @@ def main():
             dat.nodeX, dat.nodeY = where
         if name == CALLBACKS:
             dat.par.op = comp.path
-            dat.par.pars = "Install Forceinstall"
+            dat.par.pars = "Install Forceinstall Diagnose Sidecarpython Installroot"
             dat.par.custom = True
             dat.par.builtin = False
             dat.par.onpulse = True
-            dat.par.valuechange = False
+            dat.par.valuechange = True
             dat.par.active = True
         elif name == ON_START:
             dat.par.active = True

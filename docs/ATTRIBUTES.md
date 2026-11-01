@@ -450,7 +450,7 @@ On `General`, above the smoothing controls.
 | parameter | default | what it does |
 |---|---|---|
 | `Install` | pulse | install the sidecar's Python, packages and depth model |
-| `Installstate` | read-only | what is installed against what this build wants |
+| `Installstate` | read-only | readiness or the action needed; updates say press Install |
 | `Active` | off | is the capture process running |
 | `Autorefresh` | off | apply a launch-flag change by itself, 3 s after the last one |
 | `Outputvideo` | off | the image the sidecar is looking at, on `outvideo`, with any overlays composited on |
@@ -562,10 +562,11 @@ channels are normalised 0..1, about a thousand times smaller.
 | `Capturepid` | read-only | what was last started. Not proof it is still alive |
 | `Maskbuffer`, `Depthbuffer`, `Framesbuffer` | `/tmp/appletd_*.buf` | shared files; must match on both sides |
 | `Installroot` | — | where the sidecar's Python and packages go |
-| `Sidecarpython` | — | interpreter override; empty means the installed one |
+| `Sidecarpython` | — | Python 3.11+ override; empty selects a verified runtime automatically |
 | `Pythonurl` | python-build-standalone | the interpreter the installer fetches |
 | `Sourceversion` | read-only | the build this component was made from |
-| `Forceinstall` | pulse | reinstall regardless of the stamp |
+| `Forceinstall` | pulse | reinstall dependencies regardless of the stamp |
+| `Diagnose` | pulse | print setup, runtime, camera and tracking state to the Textport and `setup_report` DAT; never starts capture |
 | `Keeplayout` | off | builders leave existing nodes where you put them |
 
 Changing `Oscport` takes effect on this side immediately and on the sidecar only after a

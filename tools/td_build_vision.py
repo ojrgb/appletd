@@ -127,38 +127,12 @@ def sidecar_environment(comp=None):
 
 
 def sidecar_python(comp=None):
-    """Which interpreter to launch. `Sidecarpython` wins, then the install's own,
-    then the documented convention.
-
-    NOT verified here - `appletd.install.verify_interpreter` does that, by running it,
-    and the Install panel is where that belongs. This only has to pick.
-    """
+    """Use the same native-import verification as the Install panel."""
     comp = comp or op(%(comp)r)
-    if comp is not None:
-        par = getattr(comp.par, "Sidecarpython", None)
-        if par is not None and str(par.eval()).strip():
-            return os.path.expanduser(str(par.eval()).strip())
-        # A development machine's own interpreter, from the ENVIRONMENT rather than
-        # from a parameter - a parameter is saved into the .tox, which is exactly how
-        # one person's venv came to ship inside it.
-        dev = os.environ.get(DEV_PYTHON_ENV, "").strip()
-        if dev:
-            return os.path.expanduser(dev)
-        root = package_root(comp)
-        own = os.path.join(root, "python", "bin", "python3") if root else ""
-        if own and os.path.exists(own):
-            return own
-    # THE INSTALL'S OWN INTERPRETER, even when the package is not where this thinks it
-    # is - `Installroot` may be blank and the install may still be in the default
-    # place. Checked separately so a half-finished install still names the right
-    # interpreter rather than falling through to whatever `python3` happens to be.
-    own = os.path.join(os.path.expanduser(INSTALL_ROOT_DEFAULT),
-                       "python", "bin", "python3")
-    if os.path.exists(own):
-        return own
-    # AND THEN `python3` ON PATH, which is a guess and says so by being one. A baked
-    # venv path would be worse: a confident answer right on exactly one computer.
-    return "python3"
+    control = None if comp is None else comp.op("install_control")
+    if control is None:
+        raise RuntimeError("Install controls missing - load the latest appletd.tox")
+    return control.module.runtime_python(comp, root=package_root(comp))
 
 
 # Where the sidecar's stdout and stderr go: which streams started, which model it
@@ -658,6 +632,16 @@ def start():
               "writers on one buffer publish torn frames that read as coherent."
               %% (len(survivors), " ".join(str(p) for p in survivors)))
         return 0
+    comp = op(%(comp)r)
+    try:
+        python = sidecar_python(comp)
+    except (RuntimeError, OSError) as problem:
+        reason = str(problem)
+        if comp is not None:
+            comp.store("failure_reason", reason)
+            comp.par.Capturestate = "Stopped - " + reason
+        print("[appletd] " + reason)
+        return 0
     # The toggle reaches the sidecar as a LAUNCH FLAG, read once at startup.
     # That is the whole mechanism, and it is why the toggle says "restart to
     # apply": the sidecar is a separate process and there is no control channel
@@ -708,7 +692,7 @@ def start():
               "sidecar would open the camera and run no inference at all.")
         return 0
 
-    argv = [sidecar_python(comp), "-m", "appletd.sidecar",
+    argv = [python, "-m", "appletd.sidecar",
             "--port", str(port), "--parent-pid", str(os.getpid()),
             "--slots", "chirality" if assign else "off",
             "--streams", ",".join(streams)]
@@ -1061,7 +1045,7 @@ def list_cameras(comp=None):
         # the interpreter it tried - an empty list with no explanation is what made
         # that bug invisible.
         print("[appletd] could not list cameras with %%r: %%r"
-              %% (sidecar_python(comp), exc))
+              %% (str(comp.par.Sidecarpython.eval()) or "automatic selection", exc))
         return []
     if found.returncode != 0:
         print("[appletd] --list-cameras exited %%d: %%s"
@@ -1163,7 +1147,8 @@ def refresh_cameras(comp=None, want=None):
 # other - the mistake that launched the sidecar without `depth` while the panel said
 # otherwise.
 def launch_pars(comp):
-    names = ["Camera", "Cameraflip", "Inputmode", "Framesbuffer",
+    names = ["Sidecarpython", "Installroot", "Sourceversion",
+             "Camera", "Cameraflip", "Inputmode", "Framesbuffer",
              "Slotassign", "Oscport", "Segquality", "Multiperson",
              "Flowaccuracy", "Flowbuffer",
              "Ocrlevel", "Ocrlanguage", "Ocrcorrect", "Ocrlines",
@@ -1592,6 +1577,7 @@ OTHER_BUILDERS_OWN = {
     "screen_only_notes": "td_add_screenspace.py",
     "early_trim": "td_add_groups.py",
     "profiler": "tools/td_profile.py",
+    "setup_report": "td_add_install.py",
     "seg_mask": "td_add_segmentation.py",
     "seg_fit": "td_add_segmentation.py",
     "outmask": "td_add_segmentation.py",
@@ -2578,7 +2564,7 @@ def main():
     # not watching cannot report anything. Built from the same table the launcher uses.
     watched = ["Active", "Autorefresh", "Restartcapture", "Freeze", "Hideunused",
                "Outputvideo", "Handsoverlay", "Poseoverlay", "Faceoverlay",
-               "Printstatus", "Listcameras",
+               "Printstatus", "Listcameras", "Sidecarpython", "Installroot", "Sourceversion",
                "Camera", "Cameraflip", "Inputmode", "Framesbuffer",
                "Slotassign", "Oscport", "Segquality", "Multiperson",
                "Flowaccuracy", "Flowbuffer",

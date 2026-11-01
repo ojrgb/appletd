@@ -34,6 +34,21 @@ before you commit them.
 
 ## First run, in every example
 
-The component needs its Python installed once — press **Install** on the Vision page
+The component needs its Python installed once — press **Install** on the General page
 and wait for `Installstate` to read `Installed`. It downloads nothing if you already
 have a working interpreter. See the root [README](../README.md#install).
+
+
+## Minimal camera and hands setup
+
+On an Apple Silicon Mac, drop `appletd.tox` into a project, press **Install**, and
+wait for **Installed – ready**. Select **Camera** input, pick your device, turn
+**Hands** and **Output Video** on, then enable **Active**.
+
+Connect **outvideo → Null TOP** for the image and **out1 → Null CHOP** for landmarks.
+Use output names rather than connector numbers: hiding unused outputs renumbers them.
+For the index fingertip, inspect `h0_index_tip_x` and `h0_index_tip_y`; check `h0_found`
+before using those values. Missing hands keep their channels and publish zeros.
+
+If the picture or data is absent, press **Advanced → Setup Diagnostics** and inspect
+the Textport report. It does not turn the camera on.

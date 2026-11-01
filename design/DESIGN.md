@@ -2490,3 +2490,21 @@ Everything in §2 and §3 was measured on the target machine during the spike th
 produced [`reference/`](reference/). Section 9's claims about the TD C++ SDK come
 from reading the headers and samples in the local TouchDesigner install.
 Sections 4–8 and 10 are design proposals and have not been built.
+
+## Setup recovery — 2026-11-01
+
+Installation and launch must use the same verified interpreter selection: explicit
+Sidecarpython (or the development environment override), the installation stamp's
+interpreter, the bundled interpreter, then supported local candidates. A selected
+explicit override that fails must be reported, not silently replaced at launch.
+Validation checks Python 3.11+ and native imports against the installation's own
+site-packages. No unverified `python3` fallback may start a sidecar.
+
+The Install button repairs an invalid runtime even when the package version matches.
+A package-only update reuses verified dependencies and the existing depth model;
+it writes the embedded package and stamps completion without requiring downloads.
+Status distinguishes installed files from a usable runtime, and stale versions say
+which action repairs them. A diagnostics report exposes configuration and camera/
+OSC state without starting capture. Low-space and unsupported-platform failures are
+reported before writing the package. The disk reserve is a conservative estimate,
+not a measured installation size.

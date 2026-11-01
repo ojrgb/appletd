@@ -5792,3 +5792,32 @@ exactly wrong for a one-shot after idling, because the previous cook was the old
 The writer now reads non-delayed when it has not cooked for more than two frames, so a
 trigger pays the GPU sync once and gets the frame it was pulsed for.
 
+
+## 2026-11-01 — setup and capture agree on the runtime
+
+A loaded component selected Xcode Python 3.9 against NumPy extensions built for 3.11.
+The Install panel had correctly discovered a working venv; the launcher used a
+separate resolver and fell through to `python3`. Capture now uses setup's verified
+selection, cached with file fingerprints so restarts do not repeat native imports.
+Explicit interpreter changes are watched, and development checkouts use the same
+root for verification and launch.
+
+Install no longer short-circuits a repair just because files and stamps match. It
+can repair dependencies for a valid explicit interpreter, upgrades pip's target
+packages, and performs package-only updates without network access when native
+imports, pinned versions and the depth model already check out. Failed local writes,
+low space and unsupported operating systems now produce actionable status. The
+status says `Installed - ready`; Setup Diagnostics prints runtime, camera, stream
+and output information without starting capture.
+
+The milestone review found and closed explicit-interpreter repair, callback coverage,
+launch-time probe blocking, checkout-root cache mismatch and exception-safe verification
+cleanup issues. The groups builder's Descriptor proof also needed its disabled hands
+COMP temporarily enabled; otherwise its check reported a failure against frozen data.
+
+Verified in TouchDesigner 2025.33230: normal Install updated the embedded package,
+blank Sidecarpython resolved the working venv, capture ran on TOP Input, and a manual
+OCR pulse consumed a frame. Capture was returned to its original off state. The current
+camera expression already includes FaceTime and engine-selected defaults. Physical
+camera checks on other Mac models and the commenters' unspecified tracking failures
+remain unverified. No performance benchmark was taken, and no public release was pushed.
