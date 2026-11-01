@@ -38,6 +38,26 @@ python3.11 -m venv ~/.venvs/appletd
 > `disable-library-validation` and the interpreter inside the bundle does not, so as a
 > subprocess it is an ordinary hardened binary. Nothing to be done from this side.
 
+### If setup or tracking is not working
+
+- **Update needed:** press **Install**. This installs the code embedded in this
+  component; **About → Apply Update** replaces the component itself.
+- **Python import error:** leave **Advanced → Sidecarpython** empty and press
+  **Install**, or choose a Python 3.11+ interpreter. Install and capture use the
+  same verified runtime. A valid interpreter with missing packages can be repaired.
+- **Blank picture:** enable **Output Video**, refresh the camera list, and connect
+  **outvideo** to a **Null TOP**. Landmark data comes from **out1**, a CHOP output.
+- **No hands:** enable **Hands**, restart capture, then use
+  **Advanced → Setup Diagnostics**. The report distinguishes disabled tracking,
+  missing runtime and unmatched video devices; its channel values are a snapshot.
+- **Installation fails:** check free disk space (setup reserves 512 MiB), and read
+  the install log named in the diagnostics. Apple Silicon Macs are required;
+  Windows and Intel Macs are unsupported. The tested TD build is listed below.
+
+A matching package version alone does not prove the runtime works. **Installed –
+ready** means setup verified the interpreter's native imports. Launch reuses that
+verified result; changing the runtime files requires setup verification again.
+
 ---
 
 ## Compatibility
@@ -68,6 +88,8 @@ instead of building your own: [`examples/`](examples/).
 | `Streamhands` `Streampose` `Streamface` | one Vision request each |
 | `Streamsegment` + `Segquality` | person mask: `fast`, `balanced`, `accurate` |
 | `Streamflow` + `Flowaccuracy` | optical flow, as a TOP |
+| `Streamocr` + `Ocrlevel` `Ocrlanguage` | text recognition, as a Table DAT |
+| `Ocrmode` + `Ocrtrigger` | read every frame, or one frame per pulse and nothing between |
 | `Streamdepth` + `Depthpins` | depth, and the pins that make it metric |
 | `Coordstx` `Coordspx` | world-space and pixel-space channel sets |
 | `Facekeypoints` `Onefaceonly` `Fingertipsonly` | shorten the channel list |
@@ -81,6 +103,7 @@ Separate outputs, because `out1` cannot be both a CHOP and a TOP:
     outdepth    TOP    the depth map, raw or in metres
     outflow     TOP    optical flow, x and y displacement in pixels
     outvideo    TOP    the camera image, with any overlays composited on
+    outtext     DAT    recognised text: one row per line, with confidence and box
 
 The sidecar is also a normal CLI, with no TouchDesigner involved:
 
@@ -107,6 +130,7 @@ hands_distance      hands_center_x      hands_angle_z
     mask     person segmentation, three qualities
     depth    Depth Anything V2 Small via Core ML, in metres if you pin it
     flow     optical flow, per pixel, in input pixels
+    text     recognised lines with their boxes, 30 languages, as a table
 
 An absent hand reports **zeros with all channels still present** — a CHOP whose
 channels vanish breaks every downstream reference silently.
@@ -151,6 +175,7 @@ M4 Pro, macOS 26.5. Every figure depends on the Neural Engine.
 | segmentation `fast` | 2.21 ms | 256 × 192 |
 | segmentation `accurate` | 30.73 ms | 2016 × 1512 |
 | depth | **23.00 ms** | 518 × 392 fp16 |
+| text `fast`, language pinned | 5.92 ms | up to 32 rows |
 
 
 Method and every other figure: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). MediaPipe

@@ -54,6 +54,9 @@ LAYERS = (
     ("segmentation", "td_add_segmentation.py"),
     ("depth", "td_add_depth.py"),
     ("flow", "td_add_flow.py"),
+    # Text: an OSC In DAT, a table and the first DAT output. Independent of every
+    # operator above for the same reason the image layers are.
+    ("ocr", "td_add_ocr.py"),
     # After the master exists and before the page layout: it adds two parameters and
     # an image input, and touches no operator any other builder owns.
     ("topinput", "td_add_topinput.py"),
@@ -124,6 +127,8 @@ REQUIRES = {
     "depth": ("pages",),
     # Its own page, its own three operators, its own callbacks - and four parameters.
     "flow": ("pages",),
+    # Its own page, five operators nothing else touches, and six parameters.
+    "ocr": ("pages",),
     # Two parameters and an image input, and no operator any other builder owns.
     "topinput": ("pages",),
     # NOTHING. `video` appends no parameter and owns five TOPs nothing else touches.

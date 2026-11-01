@@ -2482,3 +2482,53 @@ ORDER for every page, from the one table.
 and it had already caused one silent failure by resetting them from a deferred callback
 (2.17). The preset half of the generated callback went with it, along with six comments
 that referred to it.
+
+## Step 32 — text recognition, and the first DAT output — DONE 2026-09-13
+
+`VNRecognizeTextRequest` returns strings, and nothing this component had could carry
+one: OSC fed CHOPs and the shared buffers carried images. So this step is a new output
+KIND as much as a new request.
+
+### 28.1 The decisions, in the order they were taken
+
+  * **Scope**: recognised lines as a Table DAT — `outtext`, one row per slot with
+    `text`, `conf`, `x1`, `y1`, `x2`, `y2`. Nothing else.
+  * **Transport**: OSC on its own port, base + 3, one typed message a frame. Priced
+    against a text sibling of `maskbuf` plus a Script DAT, and against a JSON file
+    plus a File In DAT; the socket already existed and a frame of text is a few
+    hundred bytes.
+  * **Rows**: fixed slots plus a count. `--ocr-lines` rows every frame, blank where
+    nothing was read, `Ocrfound` for how many Vision saw. The zeros rule, for text.
+  * **Channels**: none. `sc_ocr` in the status channels, nothing on `out1`.
+
+### 28.2 What was found in TouchDesigner before building
+
+The stock OSC In DAT was tried first, with a bundle of two string messages on a scratch
+port. It takes bundles and UTF-8 fine, and its table **splits every string argument on
+whitespace** into separate columns — `"line two"` became two cells. Its
+`onReceiveOSC(dat, rowIndex, message, bytes, timeStamp, address, args, peer)` callback
+receives `args` typed and intact: spaces, `£`, `ü`, empty strings. So the callback is
+the consumer, the DAT's own table is kept to one line, and the message is ONE per
+frame rather than one per line — one callback per frame, and a frame is atomic with no
+bundle boundary to track.
+
+### 28.3 What was built
+
+  * `appletd/text_types.py` — `TextLine`, `TextFrame`, `fill_slots` (cap lowest
+    confidence first, then reading order), `pack_text_args`/`unpack_text_args`.
+  * `appletd/ocr.py` — `TextDetector`, level/language/correction/slots.
+  * `appletd/osc.py` — `encode_typed_message` with the `s` tag; `encode_bundle_of`.
+  * `appletd/streams.py` — `REQUEST_OCR`, port offset 3, `OCR_LEVELS`; `port_for`
+    now answers for a request that is not a stream.
+  * The engine, source and sidecar wiring, on the pose pattern: a `LatestTextBox`,
+    a `TextSource` protocol, `_send_text` every tick.
+  * `tools/td_add_ocr.py` — `ocr_osc`, `ocr_callbacks` (carrying a copy of
+    `unpack_text_args`, held to the original by a test), `ocr_table`, `outtext` on
+    connector 5, `ocr_par_callbacks` to blank the rows when the toggle goes off, and a
+    Text page.
+
+Verified against the live project by sending real frames from the package's own encoder
+to port 10003: three lines landed in reading order with `£` intact, `outtext` mirrored
+the table, `Ocrfound` read 9 for a frame with nine lines and eight slots, and the toggle
+blanked the rows. MEASURED costs are in docs/BENCHMARKS.md; the live camera path is
+unverified as of this step.

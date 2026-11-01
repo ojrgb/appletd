@@ -129,6 +129,16 @@ reasons, both found by reading the compiled headers rather than by guessing:
 - only the segment's *owner* registers in TD's `TD1zzSharedNameDirectory`, so a
   process that did not create the segment cannot be found.
 
+### Text goes back over OSC — as one typed message into a DAT
+
+`VNRecognizeTextRequest` returns strings, which a CHOP cannot carry, so text is the
+one request with a port and no channels: one `/ocr` message a frame on base + 3,
+floats and strings typed, into an **OSC In DAT**. Not the DAT's own table, though —
+measured, it splits every string argument on whitespace into separate columns — but
+its `onReceiveOSC` callback, which gets the arguments intact and writes a Table DAT.
+One message per frame is one callback per frame. The rows are fixed slots, blank
+where nothing was read, so the table never changes shape: the zeros rule, for text.
+
 ### fp16 all the way through
 
 Depth Anything V2 outputs `OneComponent16Half` with about **7,300 distinct values

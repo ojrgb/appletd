@@ -23,6 +23,7 @@ Ref: docs/BUILD_PLAN.md 21.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -147,6 +148,9 @@ RUNTIME_MODULES: Final[tuple[str, ...]] = (
     # that. Guarded now by test_install.py, which reads the imports back out of the
     # generated DAT sources rather than trusting this list to be complete.
     "motion",
+    # Text recognition: the detector and its wire contract. Both imported by the
+    # sidecar whenever `ocr` is in --streams.
+    "ocr",
     "osc",
     "pins",
     "pose",
@@ -158,6 +162,7 @@ RUNTIME_MODULES: Final[tuple[str, ...]] = (
     "spaces",
     "streams",
     "td_layout",
+    "text_types",
     "types",
 )
 
@@ -179,7 +184,14 @@ EMBEDDED_MODULES: Final[tuple[str, ...]] = RUNTIME_MODULES + PANEL_MODULES
 # the whole point, and `numpy` was a runtime dependency declared only in the dev
 # requirements previously - an interpreter with pyobjc and no numpy runs until
 # `appletd.pins` is imported and then dies.
-_VERIFY_IMPORTS: Final = "import objc, numpy"
+_VERIFY_PYTHON: Final = (
+    "import sys; "
+    "sys.version_info >= (3, 11) or sys.exit('appletd requires Python 3.11 or newer'); "
+)
+_VERIFY_IMPORTS: Final = (_VERIFY_PYTHON +
+    "import objc, numpy, Vision, CoreML, AVFoundation, libdispatch")
+# Conservative workspace reserve for wheels, extraction and the depth model; unmeasured.
+MIN_INSTALL_FREE_BYTES: Final = 512 * 1024 * 1024
 # The same two as directories, for the cheap version of the question in `probe`.
 PACKAGE_MARKERS: Final[tuple[str, ...]] = ("objc", "numpy")
 _VERIFY_TIMEOUT_S: Final = 30.0
@@ -270,6 +282,10 @@ REPORTED=no
 # to need the download to finish. This gives up only when less than 1 KB has moved in
 # 60 s, which no working download does and no hung one survives.
 CURL_LIMITS="--connect-timeout 30 --speed-limit 1024 --speed-time 60 --retry 2"
+# Older macOS curl versions lack retries for interrupted HTTP/2 streams.
+if curl --retry-all-errors --version >/dev/null 2>&1; then
+    CURL_LIMITS="$CURL_LIMITS --retry-all-errors"
+fi
 
 say() {
     if [ "$1" = FAIL ]; then REPORTED=yes; fi
@@ -309,7 +325,8 @@ cd "$ROOT"
 
 # ---- the interpreter -------------------------------------------------------
 if [ -z "$PYTHON" ]; then
-    if [ -x "%(python_bin)s" ]; then
+    if [ -x "%(python_bin)s" ] && "%(python_bin)s" -c \
+        'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
         say STEP "reusing the interpreter from a previous install"
         PYTHON="$ROOT/%(python_bin)s"
     else
@@ -338,7 +355,7 @@ fi
 # ---- the packages ----------------------------------------------------------
 say STEP "installing Python packages"
 SITE="$ROOT/%(site_packages)s"
-"$PYTHON" -m pip install --quiet --target "$SITE" %(requirements)s
+"$PYTHON" -m pip install --quiet --upgrade --target "$SITE" %(requirements)s
 
 say STEP "checking the packages import"
 # THE check, and the only one that has ever told the truth about an interpreter:
@@ -501,6 +518,8 @@ def require_arm64() -> None:
     refusal that says why.
     """
     machine = platform.machine()
+    if platform.system() != "Darwin":
+        raise RuntimeError("Requires an Apple Silicon Mac; Windows and Linux are unsupported.")
     if machine != "arm64":
         raise RuntimeError(
             "appletd is Apple Silicon only; this machine reports %r. Every timing in "
@@ -527,7 +546,8 @@ class InterpreterCheck(NamedTuple):
 
 
 def verify_interpreter(python: str,
-                       site_packages: str | None = None) -> InterpreterCheck:
+                       site_packages: str | None = None, *,
+                       native: bool = True) -> InterpreterCheck:
     """Can `python` import pyobjc and numpy? Runs it and finds out.
 
     Contract: NEVER raises for an interpreter that is missing, broken, or refuses to
@@ -547,7 +567,7 @@ def verify_interpreter(python: str,
         environment["PYTHONPATH"] = site_packages
     try:
         done = subprocess.run(
-            [python, "-c", _VERIFY_IMPORTS],
+            [python, "-c", _VERIFY_IMPORTS if native else _VERIFY_PYTHON],
             capture_output=True, text=True, timeout=_VERIFY_TIMEOUT_S,
             env=environment, check=False)
     except OSError as problem:
@@ -576,6 +596,10 @@ def candidate_interpreters(install_root: str = DEFAULT_INSTALL_ROOT,
 
     if override:
         add(os.path.expanduser(override))
+    stamp = read_stamp(install_root)
+    recorded = stamp.get("python") if stamp else None
+    if isinstance(recorded, str) and os.path.isabs(recorded):
+        add(recorded)
     # An install we have already done, before anything on the wider machine.
     add(os.path.join(install_root, PYTHON_BIN))
     # The convention the README documents.
@@ -600,11 +624,34 @@ def find_interpreter(install_root: str = DEFAULT_INSTALL_ROOT,
     """
     site_packages = os.path.join(install_root, SITE_PACKAGES)
     extra = site_packages if os.path.isdir(site_packages) else None
-    for candidate in candidate_interpreters(install_root, override):
+    candidates = ([os.path.expanduser(override)] if override
+                  else candidate_interpreters(install_root))
+    for candidate in candidates:
         checked = verify_interpreter(candidate, extra)
         if checked.ok:
             return checked
     return None
+
+
+def requirements_match(root: str) -> bool:
+    """Whether installed distribution versions match the embedded dependency pins."""
+    distributions = importlib.metadata.distributions(path=[os.path.join(root, SITE_PACKAGES)])
+    versions = {str(d.metadata["Name"]).lower().replace("_", "-"): d.version
+                for d in distributions}
+    return all(versions.get(name.lower()) == version
+               for name, version in (pin.split("==", 1) for pin in REQUIREMENTS))
+
+
+def require_install_space(root: str) -> None:
+    """Check free bytes on the target volume before writing or downloading."""
+    target = Path(root).expanduser().resolve()
+    while not target.exists():
+        target = target.parent
+    free = shutil.disk_usage(target).free
+    if free < MIN_INSTALL_FREE_BYTES:
+        raise RuntimeError(
+            "Not enough disk space: %.0f MiB free; free at least 512 MiB and press Install."
+            % (free / (1024 * 1024)))
 
 
 class InstallState(NamedTuple):

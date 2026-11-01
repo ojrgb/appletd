@@ -63,13 +63,43 @@ results. The one live observation that *is* recorded is a latency, at the bottom
 | segmentation, `balanced` | **8.54 ms** | 512 × 384 | feathered |
 | segmentation, `accurate` | **30.73 ms** | 2016 × 1512 | cannot hold 30 fps on its own |
 | depth, Depth Anything V2 Small | **23.00 ms** | 518 × 392 fp16 | p95 23.27, max 23.33 |
+| text, `fast`, `en-US`, no correction | **5.92 ms** | up to `--ocr-lines` rows | max 7.88 — synthetic, see below |
 
 A 30 fps frame interval is **33.3 ms**. Depth alone is 69% of it; depth plus hands is
 79%; depth plus `accurate` segmentation is ~162% and cannot work.
 
 Requests run in this order on the one capture queue — cheapest and most-read first, so
-whatever is dropped is dropped from the end: `hands`, `pose`, `face`, `segment`,
-`depth`.
+whatever is dropped is dropped from the end: `hands`, `pose`, `face`, `segment`, `ocr`,
+`depth`, `flow`.
+
+### Text recognition — synthetic replay, 2026-09-13
+
+Not the fixture: it has no text in it. A 1280×720 frame with six lines of 44 px text
+drawn by Pillow, one `CVPixelBuffer` wrapped once, 24 timed calls after a discarded
+first. macOS 26.6.2, pyobjc 12.2.2, request revision 3.
+
+| configuration | median | max | read correctly |
+|---|---|---|---|
+| `accurate`, Vision's defaults | 60.63 ms | 72.32 | 6 of 6 |
+| `accurate`, `en-US`, correction off | 47.94 ms | 50.75 | 6 of 6 |
+| `fast`, Vision's defaults | 8.55 ms | 9.69 | 6 of 6 |
+| `fast`, `en-US`, correction ON | 8.32 ms | 10.38 | 6 of 6 |
+| `fast`, `en-US`, correction off | **5.92 ms** | 7.88 | 6 of 6 |
+
+Two things worth having from it:
+
+- **The lever is the language, not the level.** Pinning `en-US` and switching
+  correction off is 2.3× on `fast` and 1.3× on `accurate`. There is no separate
+  English-only model to download — the two levels are the two models; correction is a
+  dictionary pass over the result, autodetection a second pass over the image.
+- **`fast` reports a flat 0.5 confidence** for every line; `accurate` reported 1.0.
+  The `conf` column means something only at `accurate`.
+
+Both levels misread the pound sign in `Tickets £5.50` (`75.50` and `05.50`); the
+other five lines were exact. Clean synthetic text is the easy case — real signage is
+UNMEASURED.
+
+Vision lists **30 recognition languages** on this machine.
 
 ### Two facts about the depth output worth having
 
@@ -573,6 +603,74 @@ GPU sync, so a frame that arrives mid-render stalls - 3.3 ms at 720p, 10 ms at 1
 `numpyArray(delayed=True)` returns the PREVIOUS frame instead and does not stall, which
 costs one frame of latency and removes the spike. For a capture path already one frame
 behind, that is the right trade.
+
+## TOP Input at 1080p — the float path, measured 2026-09-14
+
+Found by Omer: a 1920×1080 Text TOP into `Input Mode = TOP Input` put **15.7 ms** on
+TouchDesigner's main thread per frame (`frames_write`, natural gauge, 8-bit RGBA
+input). The readback was 0.57 of it. The rest was the conversion to BGRA bytes, because
+`numpyArray()` returns **float32 whatever the TOP's format** — 33 MB a frame — and the
+writer walked it five times.
+
+The same array, pass by pass, in the sidecar's venv (best of 15, M4 Pro):
+
+| pass over 33 MB float32 | ms |
+|---|---|
+| flip + BGRA swizzle (fancy index) | 3.36 |
+| clip | 2.12 |
+| ×255 + 0.5 | 1.12 |
+| cast to uint8 | 2.35 |
+| contiguous copy + `tobytes` | 4.51 |
+| **whole chain, as it ran in TouchDesigner** | **14.16** |
+| cast-first, no clip (the best reordering) | 10.47 |
+
+So reordering could not fix it; the float→uint8 cast of 33 MB is the floor while the
+cast happens at all.
+
+**What replaced it.** The float array goes into the buffer untouched, and Vision reads
+it as it is — a `128RGBAFloat` pixel buffer, with the bottom-first row order given to
+the request as an orientation (`DownMirrored`; `Down` when `Camera Flip` is on too).
+Verified: text at 1080p read correctly with the flag and as garbage without it, which
+is `test_ocr.py`'s job to keep true.
+
+| | ms per frame at 1080p |
+|---|---|
+| TD: readback, `numpyArray(delayed=True)` | 0.57 (measured 2026-09-07) |
+| TD: memcpy into the buffer, through a memoryview | **0.48** |
+| TD: the same through `.tobytes()` first | 1.01 — which is why the writer does not |
+| sidecar: copy out of the seqlock | 0.49 |
+| sidecar: conversion | **none** |
+| sidecar: the conversion, had it moved here instead | 9.59 |
+
+The writer is also paced to **30 fps** by `frames_pull` — the camera path's rate, and
+all Vision can use — so at TouchDesigner's 60 the readback runs every other frame.
+
+**In the live project, after** (natural gauge, the same 1080p Text TOP, `Streamocr` on):
+
+| | before | after |
+|---|---|---|
+| `frames_write`, TD main thread | 15.7 ms | **1.2–1.3 ms** |
+| sidecar CPU, whole process | — | **40%** of one core, of which text at 1080p is 30 |
+| sidecar `read` gauge | — | 0.6 ms |
+| sidecar `wrap` gauge | — | 0.08 ms |
+
+**Manual text mode**, same rig, measured live: `cpu 7%` against Automatic's 43%, the
+writer's cook count frozen, and one pulse costing one frame (read 2-4 ms cold, against
+0.6 warm) and one 11 ms inference. The 7 that remain are the 60 Hz send loop encoding
+three streams of zeros plus the text message, and the poll.
+
+The first run after the float change read **55%** and `read 1.2 ms`, and both were the
+reader's poll loop: `MaskReader.read()` copied the whole 33 MB payload every 2 ms to
+find out whether `seq` had moved, and `frames.py` copied it again into a `bytearray`.
+`MaskReader.seq()` now peeks at the header, and `read(writable=True)` copies once —
+which is what the 55 → 40 and 1.2 → 0.6 are. The 30 points that remain are Vision
+reading 1080p text, which no transport can remove; a Fit TOP to 720p halves it.
+
+**How to see the sidecar's share on a running system:** the status line now carries
+`cpu NN%` (this process's CPU time over the interval, every thread, against the wall
+clock), `frames N @ read X wrap Y ms` (the two transport gauges above, live), and each
+enabled request's inference gauge. All gauges, none of them measurements; the table
+above is the measurement.
 
 ## Optical flow — measured 2026-09-07
 

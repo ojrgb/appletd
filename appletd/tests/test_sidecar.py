@@ -178,7 +178,8 @@ def test_sending_keeps_working_when_the_socket_fails(receiver: socket.socket) ->
     # each of hands, pose and face, and all three fail on a closed socket.
     # Counting sends rather than ticks is what makes "the socket is broken"
     # visible per bundle (DESIGN.md 6.4).
-    assert sidecar.n_send_errors == len(STREAM_NAMES)
+    # Plus one: the text message goes to its own port on the same tick.
+    assert sidecar.n_send_errors == len(STREAM_NAMES) + 1
     assert sidecar.n_sent == 0
 
 

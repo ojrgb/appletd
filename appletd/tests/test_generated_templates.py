@@ -33,6 +33,10 @@ TOOLS = pathlib.Path(__file__).resolve().parents[2] / "tools"
 # Kept here rather than parsed out of the call site: a wrong dict here fails loudly,
 # and parsing the call site would only prove the parser works.
 TEMPLATES: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    ("td_add_install.py", "CONTROL_SOURCE",
+     {"comp": "/project1/appletd", "log": repr("/tmp/appletd_install.log"),
+      "control": "install_control"}),
+    ("td_add_install.py", "CALLBACK_SOURCE", {"control": "install_control"}),
     ("td_add_about.py", "CONTROL_SOURCE",
      {"comp": "/project1/appletd", "magic": b"\x00\x00\x00\x0110",
       "min_bytes": 50_000, "licence": "/blob/main/LICENSE"}),
@@ -48,6 +52,24 @@ TEMPLATES: tuple[tuple[str, str, dict[str, Any]], ...] = (
      {"resolver": "PACKAGE_ROOT", "port": 10000, "comp": "/project1/appletd",
       "request_toggles": (("hands", "Streamhands"),), "max_pins": 8,
       "default_mark": "default"}),
+    # The text receiver, whose body carries a copy of a package function and a
+    # `format()` call chosen precisely so no `%` has to be escaped in it.
+    ("td_add_ocr.py", "CALLBACK_SOURCE",
+     {"address": "/ocr", "table": "ocr_table",
+      "columns": ("text", "conf", "x1", "y1", "x2", "y2"), "header": 3, "per_slot": 6}),
+    # The TOP Input writer and its puller. The writer's body has a `%%`-formatted
+    # print, which is the escaping this file exists to catch.
+    ("td_add_topinput.py", "WRITER_SOURCE",
+     {"comp": "/project1/appletd", "resolver": "PACKAGE_ROOT"}),
+    ("td_add_topinput.py", "PULL_SOURCE",
+     {"comp": "/project1/appletd", "writer": "frames_write",
+      "stream_toggles": ("Streamhands",)}),
+    # Sends over the control port, so it carries the resolver and a `run()` string
+    # with `%%r` inside - the escaping this file exists to catch.
+    ("td_add_ocr.py", "PAR_CALLBACK_SOURCE",
+     {"table": "ocr_table", "osc": "ocr_osc", "writer": "frames_write",
+      "comp": "/project1/appletd", "resolver": "PACKAGE_ROOT",
+      "blank_row": ["", "0.0000", "0.0000", "0.0000", "0.0000", "0.0000"]}),
 )
 
 

@@ -320,7 +320,7 @@ appears on in an unmirrored image is UNMEASURED.
 
 ---
 
-## Sidecar status — 9 channels
+## Sidecar status — 10 channels
 
 On the hands port, so they arrive whatever else is enabled. Read them off the
 `housekeeping` Null CHOP beside `out1`.
@@ -328,7 +328,7 @@ On the hands port, so they arrive whatever else is enabled. Read them off the
 | channel | meaning |
 |---|---|
 | `sc_uptime_s` | seconds since the sidecar started sending. **FROZEN means the process is gone** |
-| `sc_hands`, `sc_pose`, `sc_face`, `sc_segment`, `sc_depth`, `sc_flow` | 1 when the sidecar really started that stream |
+| `sc_hands`, `sc_pose`, `sc_face`, `sc_segment`, `sc_ocr`, `sc_depth`, `sc_flow` | 1 when the sidecar really started that stream |
 | `sc_src_w`, `sc_src_h` | the frame size the sidecar is actually capturing |
 
 `sc_uptime_s` is what tells "sidecar dead" apart from "stream switched off". The `sc_*`
@@ -450,14 +450,14 @@ On `General`, above the smoothing controls.
 | parameter | default | what it does |
 |---|---|---|
 | `Install` | pulse | install the sidecar's Python, packages and depth model |
-| `Installstate` | read-only | what is installed against what this build wants |
+| `Installstate` | read-only | readiness or the action needed; updates say press Install |
 | `Active` | off | is the capture process running |
 | `Autorefresh` | off | apply a launch-flag change by itself, 3 s after the last one |
 | `Outputvideo` | off | the image the sidecar is looking at, on `outvideo`, with any overlays composited on |
 | `Restartcapture` | pulse | stop and start in one press |
 | `Freeze` | pulse | hold the current outputs and stop capturing |
 | `Capturestate` | read-only | `Running` / `Stopped` / `Requires Restart`, a countdown while an action is pending, and `Stopped - <reason>` when the sidecar failed to start |
-| `Inputmode` | Camera | `Camera`, or `TOP Input` to take frames from the COMP's image input |
+| `Inputmode` | Camera | `Camera`, or `TOP Input` to take frames from the COMP's image input. Frames are written at 30 fps while `Active` is on, whether or not anything downstream reads the video, and go to the sidecar as float32 exactly as TouchDesigner returns them — about 1 ms a frame at 1080p on TD's thread |
 | `Camera` | `(default)` | a menu of the real devices. `(default)` is the built-in camera, whatever this Mac calls it |
 | `Cameraflip` | off | mirror the image on X **before Vision sees it**. Restarts by itself |
 | `Listcameras` | pulse | re-enumerate and repopulate the menu |
@@ -562,10 +562,11 @@ channels are normalised 0..1, about a thousand times smaller.
 | `Capturepid` | read-only | what was last started. Not proof it is still alive |
 | `Maskbuffer`, `Depthbuffer`, `Framesbuffer` | `/tmp/appletd_*.buf` | shared files; must match on both sides |
 | `Installroot` | — | where the sidecar's Python and packages go |
-| `Sidecarpython` | — | interpreter override; empty means the installed one |
+| `Sidecarpython` | — | Python 3.11+ override; empty selects a verified runtime automatically |
 | `Pythonurl` | python-build-standalone | the interpreter the installer fetches |
 | `Sourceversion` | read-only | the build this component was made from |
-| `Forceinstall` | pulse | reinstall regardless of the stamp |
+| `Forceinstall` | pulse | reinstall dependencies regardless of the stamp |
+| `Diagnose` | pulse | print setup, runtime, camera and tracking state to the Textport and `setup_report` DAT; never starts capture |
 | `Keeplayout` | off | builders leave existing nodes where you put them |
 
 Changing `Oscport` takes effect on this side immediately and on the sidecar only after a
@@ -657,6 +658,52 @@ in the previous frame, not where it is going.
 
 Costs 16-30 ms a frame depending on accuracy, and 7.2 MB per frame at 720p — enough
 that the camera will drop buffers with this and depth both on.
+
+---
+
+## Text page
+
+`outtext` is a **Table DAT**, not channels — the only output that is neither a CHOP nor
+a TOP, because what `VNRecognizeTextRequest` returns is strings.
+
+| parameter | default | what it does |
+|---|---|---|
+| `Streamocr` | off | the text request. A launch flag |
+| `Ocrmode` | `Automatic` | `Automatic` reads every frame. `Manual` reads **nothing until `Ocrtrigger` is pulsed**, then one frame, and the table holds that reading. Live — no restart |
+| `Ocrtrigger` | pulse | read one frame now, in either mode. Live |
+| `Ocrlevel` | `fast` | `fast` (5.9 ms) or `accurate` (48 ms). A launch flag |
+| `Ocrlanguage` | `en-US` | the language(s) to read, as BCP 47 tags, comma-separated. **Empty means detect**, which is the slow path. A launch flag |
+| `Ocrcorrect` | off | Vision's language correction — a dictionary pass over the result, +2.4 ms. Helps blurry text, not clean signage. A launch flag |
+| `Ocrlines` | 8 | rows in the table, 1 to 32. A launch flag |
+| `Ocrfound` | read-only | lines Vision saw this frame. **More than `Ocrlines` means some were dropped** |
+
+The table has a header row and then exactly `Ocrlines` rows, always:
+
+| column | meaning |
+|---|---|
+| `text` | the line, as recognised |
+| `conf` | Vision's confidence for it. **A flat 0.5 at `fast`**; a real 0..1 only at `accurate` |
+| `x1`, `y1` | the box's bottom-left corner, normalised, origin bottom-left — like `h0_bbox_x1/_y1` |
+| `x2`, `y2` | its top-right corner |
+
+- **Rows read top of image first**, then left to right. Lines beyond `Ocrlines` are
+  dropped lowest-confidence first.
+- **The shape never changes.** A slot with nothing in it is an empty `text` and zeros,
+  so a cell reference downstream keeps meaning what it meant — the zeros rule applied
+  to text. Switching `Streamocr` off blanks the rows.
+- **Pinning the language is the lever.** `fast` with the defaults is 8.6 ms; with
+  `en-US` pinned and correction off, 5.9. There is no smaller English model — the two
+  levels are the two models.
+- **Cells update only when something changed**, so a sign that is not moving cooks
+  nothing downstream.
+- The text arrives on `Oscport + 3` as one OSC message a frame; `ocr_osc`'s callback
+  writes the table. The DAT's own table is not the output and is kept to one line.
+- **Manual mode costs nothing between triggers**, on either side: the sidecar runs no
+  text request, and on TOP Input the frame writer stops cooking unless another stream
+  wants frames. `Ocrmode` and `Ocrtrigger` reach the running sidecar over
+  `Oscport + 4`, the one message path into it; a trigger on TOP Input arms the sidecar
+  and then cooks one frame 40 ms later. Measured: 7% of a core in Manual against 43% in
+  Automatic, for a 1080p input.
 
 ---
 

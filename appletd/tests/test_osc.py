@@ -17,7 +17,14 @@ import struct
 
 import pytest
 
-from appletd.osc import encode_bundle, encode_channels, encode_message
+from appletd.osc import (
+    decode_messages,
+    encode_bundle,
+    encode_bundle_of,
+    encode_channels,
+    encode_message,
+    encode_typed_message,
+)
 from appletd.types import N_CHANNELS, blank_frame, channel_names, channel_values
 
 # MEASURED: the exact size of our 137-channel bundle, and the reason it matters.
@@ -173,3 +180,71 @@ def test_datagram_socket_sends_that_bundle_and_a_default_receiver_gets_it() -> N
     finally:
         sender.close()
         receiver.close()
+
+
+# ---------------------------------------------------------------------------
+# The typed message the text request sends
+# ---------------------------------------------------------------------------
+def test_typed_message_bytes_are_exactly_the_osc_format() -> None:
+    """Address, then a type-tag string with one letter per argument, then each
+    argument in turn - strings NUL-padded to 4, floats as big-endian float32."""
+    raw = encode_typed_message("/ocr", ["ab", 1.0])
+    assert raw == (b"/ocr\x00\x00\x00\x00" + b",sf\x00" + b"ab\x00\x00"
+                   + struct.pack(">f", 1.0))
+
+
+def test_typed_strings_go_through_as_utf8_and_stay_aligned() -> None:
+    """Recognised text is not ASCII. The receiver that matters passes the bytes
+    through (MEASURED in TouchDesigner: `£` and `ü` arrived intact)."""
+    raw = encode_typed_message("/ocr", ["£5 für", 0.5, "", "abcd"])
+    assert len(raw) % 4 == 0
+    assert "£5 für".encode() in raw
+    # An empty string still takes four bytes - OSC requires the terminating NUL.
+    assert raw.count(b"\x00\x00\x00\x00") >= 1
+    # Four characters need FOUR more bytes of padding, not zero.
+    assert b"abcd\x00\x00\x00\x00" in raw
+
+
+def test_typed_message_refuses_anything_but_float_and_str() -> None:
+    """An int or a bool silently sent as a float is a type the receiver cannot tell
+    from a measurement, so it is refused rather than coerced."""
+    with pytest.raises(TypeError):
+        encode_typed_message("/ocr", [1])
+    with pytest.raises(TypeError):
+        encode_typed_message("/ocr", [True])
+    with pytest.raises(ValueError, match="must start with"):
+        encode_typed_message("ocr", [])
+
+
+def test_bundle_of_wraps_messages_the_same_way_encode_bundle_does() -> None:
+    message = encode_message("/a", 2.0)
+    assert encode_bundle_of([message]) == encode_bundle([("/a", 2.0)])
+    typed = encode_typed_message("/ocr", ["x", 0.0])
+    wrapped = encode_bundle_of([typed])
+    assert wrapped[:8] == b"#bundle\x00"
+    assert struct.unpack(">i", wrapped[16:20])[0] == len(typed)
+    assert wrapped[20:] == typed
+
+
+# ---------------------------------------------------------------------------
+# Decoding, for the control port
+# ---------------------------------------------------------------------------
+def test_decode_round_trips_a_typed_message_and_a_bundle() -> None:
+    message = encode_typed_message("/ocr/mode", ["manual", 0.5, ""])
+    assert decode_messages(message) == [("/ocr/mode", ["manual", 0.5, ""])]
+    bundle = encode_bundle_of([encode_typed_message("/a", []),
+                               encode_typed_message("/b", ["x y", 2.0])])
+    assert decode_messages(bundle) == [("/a", []), ("/b", ["x y", 2.0])]
+    # The channel encoder's bundles decode too - the same wire, read back.
+    assert decode_messages(encode_bundle([("/seq", 3.0)])) == [("/seq", [3.0])]
+
+
+def test_decode_widens_an_int_and_refuses_what_it_does_not_know() -> None:
+    raw = b"/x\x00\x00,i\x00\x00" + struct.pack(">i", 7)
+    assert decode_messages(raw) == [("/x", [7.0])]
+    with pytest.raises(ValueError, match="type tag"):
+        decode_messages(b"/x\x00\x00,b\x00\x00" + struct.pack(">i", 0))
+    with pytest.raises(ValueError, match="must start with"):
+        decode_messages(b"x\x00\x00\x00,\x00\x00\x00")
+    with pytest.raises((ValueError, IndexError, struct.error)):
+        decode_messages(encode_typed_message("/ocr/mode", ["manual"])[:6])

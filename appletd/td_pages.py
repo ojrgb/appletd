@@ -32,7 +32,7 @@ from appletd.td_layout import MAX_PINS
 # The page order, top to bottom. `About` last because it is the only page that is not
 # about running the thing.
 PAGE_ORDER: Final = ("General", "Hands", "Body Pose", "Face", "Segmentation Mask",
-                     "Depth", "Optical Flow", "Advanced", "About")
+                     "Depth", "Optical Flow", "Text", "Advanced", "About")
 
 # Pages that existed before and no longer do. The layout pass moves their
 # parameters out by the table below and then destroys the empty page - a page left
@@ -103,6 +103,11 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
     "Optical Flow": (
         ("", ("Streamflow", "Flowaccuracy")),
     ),
+    "Text": (
+        ("", ("Streamocr", "Ocrmode", "Ocrtrigger")),
+        ("Request", ("Ocrlevel", "Ocrlanguage", "Ocrcorrect", "Ocrlines")),
+        ("This frame", ("Ocrfound",)),
+    ),
     "Advanced": (
         ("Output", ("Screenspaceonly", "Deleteempty", "Hideunused",
                     "Slotassign")),
@@ -111,7 +116,7 @@ LAYOUT: Final[dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
         ("Network", ("Oscport", "Maskbuffer", "Depthbuffer",
                      "Framesbuffer", "Flowbuffer")),
         ("Install", ("Installroot", "Sidecarpython", "Pythonurl", "Sourceversion",
-                     "Forceinstall")),
+                     "Forceinstall", "Diagnose")),
         ("Diagnostics", ("Printstatus", "Capturepid", "Keeplayout")),
     ),
     "About": (

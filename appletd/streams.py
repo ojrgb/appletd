@@ -10,6 +10,7 @@ sides of a UDP socket, and the two sides are written by different tools.
   * The IMAGE requests - segment, depth, flow - have NO port. `port_for` refuses them
     by name rather than returning a plausible number; they publish through a shared
     buffer instead.
+  * TEXT has a port and no channels: one typed OSC message a frame, into a DAT.
   * A status channel per request, so a panel showing a stream as on after somebody
     flipped it without restarting is not left lying.
 
@@ -78,10 +79,47 @@ REQUEST_DEPTH: Final = "depth"
 # and enabling it is a decision.
 REQUEST_FLOW: Final = "flow"
 
-# What `--streams` accepts. STREAM_NAMES plus the requests that have no port, in the
-# order they RUN on the capture queue: the cheap ones a live project reads first.
-REQUEST_NAMES: Final[tuple[str, ...]] = (*STREAM_NAMES, REQUEST_SEGMENT,
+# TEXT RECOGNITION. A port like the streams and no channels like the images: what
+# `VNRecognizeTextRequest` returns is strings, which a CHOP cannot carry, so the
+# result is one typed OSC message a frame into a Table DAT (appletd/text_types.py,
+# DESIGN.md 6.4). It is a REQUEST rather than a STREAM here because everything that
+# iterates STREAM_NAMES builds an OSC In CHOP and a channel COMP, and text has
+# neither.
+#
+# MEASURED at 1280x720, six lines: 5.92 ms at `fast` with the language pinned and
+# correction off, 60.6 ms at `accurate` with the defaults (docs/BENCHMARKS.md). It
+# runs after the mask and before depth, in cost order.
+REQUEST_OCR: Final = "ocr"
+
+# What `--streams` accepts. STREAM_NAMES plus the requests that have no channels, in
+# the order they RUN on the capture queue: the cheap ones a live project reads first.
+REQUEST_NAMES: Final[tuple[str, ...]] = (*STREAM_NAMES, REQUEST_SEGMENT, REQUEST_OCR,
                                          REQUEST_DEPTH, REQUEST_FLOW)
+# The requests whose output is an IMAGE through a shared buffer. Named as a set because
+# `port_for` refuses exactly these, and the message it refuses with says where the
+# image actually goes.
+IMAGE_REQUESTS: Final[frozenset[str]] = frozenset((REQUEST_SEGMENT, REQUEST_DEPTH,
+                                                   REQUEST_FLOW))
+
+# The text recognition levels, IN COST ORDER, here for the same boundary reason the
+# flow accuracies are. Vision's own default is `accurate`; ours is `fast`, because at
+# 60 ms a frame `accurate` cannot share a 33 ms frame interval with anything.
+OCR_LEVELS: Final[tuple[str, ...]] = ("fast", "accurate")
+DEFAULT_OCR_LEVEL: Final = "fast"
+# The language pinned when nobody says otherwise, as a BCP 47 tag Vision accepts.
+# Pinning one is the single biggest lever on cost - 8.6 ms to 5.9 with correction off
+# - and an empty string means "detect it", which is the slow path.
+DEFAULT_OCR_LANGUAGE: Final = "en-US"
+
+# WHEN the text request runs. `auto` is every frame, like every other request.
+# `manual` runs it ONCE per `/ocr/trigger` and otherwise not at all - so a sign that
+# is read once and then left alone costs nothing after the reading, on either side.
+# The mode is a launch flag AND a control message: the flag so a sidecar started in
+# manual mode is quiet from its first frame, the message so switching needs no restart.
+OCR_MODE_AUTO: Final = "auto"
+OCR_MODE_MANUAL: Final = "manual"
+OCR_MODES: Final[tuple[str, ...]] = (OCR_MODE_AUTO, OCR_MODE_MANUAL)
+DEFAULT_OCR_MODE: Final = OCR_MODE_AUTO
 
 # The optical flow accuracy levels, IN COST ORDER, and here for exactly the reason the
 # segmentation qualities below are: `sidecar.py` needs them for its command line and
@@ -191,10 +229,21 @@ DEFAULT_CAMERA_MARK: Final = "default"
 
 ORIENTATION_UP: Final = 1
 ORIENTATION_UP_MIRRORED: Final = 2
+# Rotated 180 degrees, and flipped about the horizontal axis. The TOP Input path
+# needs the second: TouchDesigner hands a frame back with the BOTTOM row first, and
+# telling Vision so costs nothing where turning 33 MB of pixels over on
+# TouchDesigner's main thread cost 3.4 ms a frame. Mirror plus upside-down is a
+# half turn, which is the first.
+ORIENTATION_DOWN: Final = 3
+ORIENTATION_DOWN_MIRRORED: Final = 4
 
 
-def orientation_for(flip: bool) -> int:
+def orientation_for(flip: bool, upside_down: bool = False) -> int:
     """The EXIF orientation a `Camera Flip` setting asks Vision for.
+
+    `upside_down` is the TOP Input path only: its frames arrive bottom row first,
+    and this is where that fact becomes a flag on the request rather than a pass
+    over the pixels. The camera path never sets it.
 
     WHAT MOVES WITH IT, and it is everything: Vision reports landmark coordinates
     in the ORIENTED image, and returns its image outputs - the segmentation mask,
@@ -211,6 +260,8 @@ def orientation_for(flip: bool) -> int:
     the honest answer for an overlay drawn on a mirrored image, and the wrong one
     for asking which of the user's actual hands is raised.
     """
+    if upside_down:
+        return ORIENTATION_DOWN if flip else ORIENTATION_DOWN_MIRRORED
     return ORIENTATION_UP_MIRRORED if flip else ORIENTATION_UP
 
 # What runs when nobody says otherwise: exactly what ran before there was a
@@ -232,25 +283,47 @@ PORT_OFFSETS: Final[dict[str, int]] = {
     STREAM_HANDS: 0,
     STREAM_POSE: 1,
     STREAM_FACE: 2,
+    # Text: a port with no OSC In CHOP behind it. TouchDesigner's OSC In DAT listens
+    # here (tools/td_add_ocr.py).
+    REQUEST_OCR: 3,
 }
 
 
 def port_for(stream: str, base_port: int = BASE_PORT) -> int:
     """The UDP port a stream is sent to.
 
-    Contract: `stream` must be one of STREAM_NAMES; anything else raises rather
-              than returning a plausible number, because a wrong port is a
-              silent failure at the far end - TouchDesigner shows an OSC In CHOP
-              with no channels and no error.
+    Contract: `stream` must be one of STREAM_NAMES or REQUEST_OCR; anything else
+              raises rather than returning a plausible number, because a wrong port
+              is a silent failure at the far end - TouchDesigner shows an OSC In
+              CHOP with no channels and no error.
     """
     if stream not in PORT_OFFSETS:
-        if stream in (REQUEST_SEGMENT, REQUEST_DEPTH, REQUEST_FLOW):
+        if stream in IMAGE_REQUESTS:
             raise ValueError(
                 "%r has no UDP port - it publishes an IMAGE through a shared buffer, "
                 "not channels over OSC (appletd/maskbuf.py)" % (stream,))
         raise ValueError("unknown stream %r; known: %s"
                          % (stream, ", ".join(STREAM_NAMES)))
     return base_port + PORT_OFFSETS[stream]
+
+
+# ---------------------------------------------------------------------------
+# The control port - the one that runs the OTHER way
+# ---------------------------------------------------------------------------
+# Streams are launch flags and the sidecar has never listened to anything after
+# starting (DESIGN.md 6.4). This is the deliberate exception: a UDP port the SIDECAR
+# binds, on which TouchDesigner sends the few things that must not cost a restart -
+# today the text request's mode and its trigger. Nothing here changes what is on the
+# wire to TouchDesigner, and a sidecar that never hears a message behaves exactly as
+# its launch flags said.
+CONTROL_PORT_OFFSET: Final = 4
+CONTROL_OCR_MODE: Final = "/ocr/mode"          # one string: an OCR_MODES name
+CONTROL_OCR_TRIGGER: Final = "/ocr/trigger"    # no arguments: run text once
+
+
+def control_port(base_port: int = BASE_PORT) -> int:
+    """Where the sidecar listens. Base plus the offset after the last stream port."""
+    return base_port + CONTROL_PORT_OFFSET
 
 
 # ---------------------------------------------------------------------------
@@ -365,9 +438,10 @@ N_STATUS_CHANNELS: Final = 1 + len(REQUEST_NAMES) + 2
 # python -O and these are contract checks (the same reasoning as types.py).
 # ---------------------------------------------------------------------------
 def _self_check() -> None:
-    if set(PORT_OFFSETS) != set(STREAM_NAMES):
-        raise RuntimeError("PORT_OFFSETS and STREAM_NAMES disagree: %s vs %s"
-                           % (sorted(PORT_OFFSETS), sorted(STREAM_NAMES)))
+    if set(PORT_OFFSETS) != set(STREAM_NAMES) | {REQUEST_OCR}:
+        raise RuntimeError("PORT_OFFSETS must be exactly STREAM_NAMES plus the text "
+                           "request: %s vs %s" % (sorted(PORT_OFFSETS),
+                                                  sorted(STREAM_NAMES)))
     if len(set(PORT_OFFSETS.values())) != len(PORT_OFFSETS):
         raise RuntimeError("two streams share a port offset - they would collide "
                            "on one socket and interleave silently")
@@ -377,10 +451,19 @@ def _self_check() -> None:
     for name in DEFAULT_STREAMS:
         if name not in REQUEST_NAMES:
             raise RuntimeError("%r is not in REQUEST_NAMES" % (name,))
-    if (set(REQUEST_NAMES) - set(STREAM_NAMES)
-            - {REQUEST_SEGMENT, REQUEST_DEPTH, REQUEST_FLOW}):
-        raise RuntimeError("a request without a port was added to REQUEST_NAMES "
-                           "without teaching `port_for` to refuse it by name")
+    if set(REQUEST_NAMES) - set(PORT_OFFSETS) - IMAGE_REQUESTS:
+        raise RuntimeError("a request was added to REQUEST_NAMES with neither a port "
+                           "nor a place in IMAGE_REQUESTS, so `port_for` can neither "
+                           "answer for it nor refuse it by name")
+    if DEFAULT_OCR_LEVEL not in OCR_LEVELS:
+        raise RuntimeError("the default text level %r is not one of %s"
+                           % (DEFAULT_OCR_LEVEL, OCR_LEVELS))
+    if DEFAULT_OCR_MODE not in OCR_MODES:
+        raise RuntimeError("the default text mode %r is not one of %s"
+                           % (DEFAULT_OCR_MODE, OCR_MODES))
+    if CONTROL_PORT_OFFSET in PORT_OFFSETS.values():
+        raise RuntimeError("the control port collides with a stream's port: the "
+                           "sidecar would bind a port it also sends to")
     if DEFAULT_SEGMENT_QUALITY not in SEGMENT_QUALITIES:
         raise RuntimeError("the default segmentation quality %r is not one of %s"
                            % (DEFAULT_SEGMENT_QUALITY, SEGMENT_QUALITIES))

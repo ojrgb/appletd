@@ -127,38 +127,12 @@ def sidecar_environment(comp=None):
 
 
 def sidecar_python(comp=None):
-    """Which interpreter to launch. `Sidecarpython` wins, then the install's own,
-    then the documented convention.
-
-    NOT verified here - `appletd.install.verify_interpreter` does that, by running it,
-    and the Install panel is where that belongs. This only has to pick.
-    """
+    """Use the same native-import verification as the Install panel."""
     comp = comp or op(%(comp)r)
-    if comp is not None:
-        par = getattr(comp.par, "Sidecarpython", None)
-        if par is not None and str(par.eval()).strip():
-            return os.path.expanduser(str(par.eval()).strip())
-        # A development machine's own interpreter, from the ENVIRONMENT rather than
-        # from a parameter - a parameter is saved into the .tox, which is exactly how
-        # one person's venv came to ship inside it.
-        dev = os.environ.get(DEV_PYTHON_ENV, "").strip()
-        if dev:
-            return os.path.expanduser(dev)
-        root = package_root(comp)
-        own = os.path.join(root, "python", "bin", "python3") if root else ""
-        if own and os.path.exists(own):
-            return own
-    # THE INSTALL'S OWN INTERPRETER, even when the package is not where this thinks it
-    # is - `Installroot` may be blank and the install may still be in the default
-    # place. Checked separately so a half-finished install still names the right
-    # interpreter rather than falling through to whatever `python3` happens to be.
-    own = os.path.join(os.path.expanduser(INSTALL_ROOT_DEFAULT),
-                       "python", "bin", "python3")
-    if os.path.exists(own):
-        return own
-    # AND THEN `python3` ON PATH, which is a guess and says so by being one. A baked
-    # venv path would be worse: a confident answer right on exactly one computer.
-    return "python3"
+    control = None if comp is None else comp.op("install_control")
+    if control is None:
+        raise RuntimeError("Install controls missing - load the latest appletd.tox")
+    return control.module.runtime_python(comp, root=package_root(comp))
 
 
 # Where the sidecar's stdout and stderr go: which streams started, which model it
@@ -290,7 +264,7 @@ AUTOREFRESH_MS = 3000
 
 # The outputs a freeze holds. Everything this COMP publishes, in the order somebody
 # meets them: the merged CHOP, then the two image outputs.
-FROZEN_OUTPUTS = ("out1", "outmask", "outdepth", "outvideo", "outflow")
+FROZEN_OUTPUTS = ("out1", "outmask", "outdepth", "outvideo", "outflow", "outtext")
 
 # The outputs, IN CONNECTOR ORDER, with what feeds each. Connector order is
 # ALPHABETICAL BY OPERATOR NAME and an Out OP has no index parameter to override it,
@@ -299,7 +273,8 @@ OUTPUT_CHAIN = (("out1", "trim_empty"),
                 ("outdepth", "depth_fit"),
                 ("outmask", "seg_fit"),
                 ("outvideo", "video_over"),
-                ("outflow", "flow_map"))
+                ("outflow", "flow_map"),
+                ("outtext", "ocr_table"))
 
 
 def _output_wanted(comp, name):
@@ -307,6 +282,9 @@ def _output_wanted(comp, name):
     if name == "outflow":
         return bool(getattr(comp.par, "Streamflow", None)
                     and comp.par.Streamflow.eval())
+    if name == "outtext":
+        return bool(getattr(comp.par, "Streamocr", None)
+                    and comp.par.Streamocr.eval())
     if name == "outvideo":
         return bool(getattr(comp.par, "Outputvideo", None)
                     and comp.par.Outputvideo.eval())
@@ -402,7 +380,9 @@ def apply_output_visibility(comp=None):
         target = comp.op(name)
         if wanted and target is None:
             feed = comp.op(source)
-            kind = td.outCHOP if name == "out1" else td.outTOP
+            # Three families of output, one Out operator each. A DAT out created as a
+            # TOP out would connect to nothing and report no error.
+            kind = {"out1": td.outCHOP, "outtext": td.outDAT}.get(name, td.outTOP)
             target = comp.create(kind, name)
             target.nodeX, target.nodeY = master_xy(name)
             target.par.connectorder = OUTPUT_ORDER[name]
@@ -652,6 +632,16 @@ def start():
               "writers on one buffer publish torn frames that read as coherent."
               %% (len(survivors), " ".join(str(p) for p in survivors)))
         return 0
+    comp = op(%(comp)r)
+    try:
+        python = sidecar_python(comp)
+    except (RuntimeError, OSError) as problem:
+        reason = str(problem)
+        if comp is not None:
+            comp.store("failure_reason", reason)
+            comp.par.Capturestate = "Stopped - " + reason
+        print("[appletd] " + reason)
+        return 0
     # The toggle reaches the sidecar as a LAUNCH FLAG, read once at startup.
     # That is the whole mechanism, and it is why the toggle says "restart to
     # apply": the sidecar is a separate process and there is no control channel
@@ -702,7 +692,7 @@ def start():
               "sidecar would open the camera and run no inference at all.")
         return 0
 
-    argv = [sidecar_python(comp), "-m", "appletd.sidecar",
+    argv = [python, "-m", "appletd.sidecar",
             "--port", str(port), "--parent-pid", str(os.getpid()),
             "--slots", "chirality" if assign else "off",
             "--streams", ",".join(streams)]
@@ -737,6 +727,20 @@ def start():
     if "flow" in streams:
         argv += ["--flow-path", str(comp.par.Flowbuffer.eval()),
                  "--flow-accuracy", str(comp.par.Flowaccuracy.eval())]
+    if "ocr" in streams:
+        # All four are launch flags: the level and the language configure the request
+        # once, and the row count sizes every frame the sidecar sends.
+        argv += ["--ocr-level", str(comp.par.Ocrlevel.eval()),
+                 "--ocr-language", str(comp.par.Ocrlanguage.eval()),
+                 "--ocr-lines", str(int(comp.par.Ocrlines.eval()))]
+        # The MODE is passed at launch so a manual sidecar is quiet from its first
+        # frame, but it is NOT a launch flag: switching it reaches the running process
+        # over the control port, so it is deliberately absent from `launch_pars`.
+        mode = getattr(comp.par, "Ocrmode", None)
+        if mode is not None:
+            argv += ["--ocr-mode", str(mode.eval())]
+        if bool(comp.par.Ocrcorrect.eval()):
+            argv += ["--ocr-correct"]
     if "depth" in streams:
         argv += ["--depth-path", str(comp.par.Depthbuffer.eval())]
         # The pins, off the Depth page's rows. Built HERE rather than read from one
@@ -1041,7 +1045,7 @@ def list_cameras(comp=None):
         # the interpreter it tried - an empty list with no explanation is what made
         # that bug invisible.
         print("[appletd] could not list cameras with %%r: %%r"
-              %% (sidecar_python(comp), exc))
+              %% (str(comp.par.Sidecarpython.eval()) or "automatic selection", exc))
         return []
     if found.returncode != 0:
         print("[appletd] --list-cameras exited %%d: %%s"
@@ -1143,9 +1147,11 @@ def refresh_cameras(comp=None, want=None):
 # other - the mistake that launched the sidecar without `depth` while the panel said
 # otherwise.
 def launch_pars(comp):
-    names = ["Camera", "Cameraflip", "Inputmode", "Framesbuffer",
+    names = ["Sidecarpython", "Installroot", "Sourceversion",
+             "Camera", "Cameraflip", "Inputmode", "Framesbuffer",
              "Slotassign", "Oscport", "Segquality", "Multiperson",
              "Flowaccuracy", "Flowbuffer",
+             "Ocrlevel", "Ocrlanguage", "Ocrcorrect", "Ocrlines",
              "Maskbuffer", "Depthbuffer", "Depthpinson", "Depthpincount"]
     names += [par_name for _n, par_name in REQUEST_TOGGLES]
     # `%(max_pins)d`, not a 9 typed here. Three files had that 9 and one had the
@@ -1542,6 +1548,7 @@ COMP_NAME = "appletd"
 # Nothing complained; only `sc_depth` reading 0 said anything.
 REQUEST_TOGGLES = (("hands", "Streamhands"), ("pose", "Streampose"),
                    ("face", "Streamface"), ("segment", "Streamsegment"),
+                   ("ocr", "Streamocr"),
                    ("flow", "Streamflow"),
                    ("depth", "Streamdepth"))
 
@@ -1570,6 +1577,7 @@ OTHER_BUILDERS_OWN = {
     "screen_only_notes": "td_add_screenspace.py",
     "early_trim": "td_add_groups.py",
     "profiler": "tools/td_profile.py",
+    "setup_report": "td_add_install.py",
     "seg_mask": "td_add_segmentation.py",
     "seg_fit": "td_add_segmentation.py",
     "outmask": "td_add_segmentation.py",
@@ -1582,6 +1590,13 @@ OTHER_BUILDERS_OWN = {
     "flow_map": "td_add_flow.py",
     "flow_callbacks": "td_add_flow.py",
     "outflow": "td_add_flow.py",
+    # Text. `outtext` is an output connector like `outmask`, so destroying it would
+    # disconnect whatever a project had wired to it.
+    "ocr_osc": "td_add_ocr.py",
+    "ocr_callbacks": "td_add_ocr.py",
+    "ocr_par_callbacks": "td_add_ocr.py",
+    "ocr_table": "td_add_ocr.py",
+    "outtext": "td_add_ocr.py",
     "video_in": "td_add_video.py",
     "video_source": "td_add_video.py",
     "video_flip": "td_add_video.py",
@@ -1590,6 +1605,7 @@ OTHER_BUILDERS_OWN = {
     "in_frames": "td_add_topinput.py",
     "frames_write": "td_add_topinput.py",
     "frames_callbacks": "td_add_topinput.py",
+    "frames_pull": "td_add_topinput.py",
     "depth_map": "td_add_depth.py",
     "depth_fit": "td_add_depth.py",
     "outdepth": "td_add_depth.py",
@@ -2548,10 +2564,11 @@ def main():
     # not watching cannot report anything. Built from the same table the launcher uses.
     watched = ["Active", "Autorefresh", "Restartcapture", "Freeze", "Hideunused",
                "Outputvideo", "Handsoverlay", "Poseoverlay", "Faceoverlay",
-               "Printstatus", "Listcameras",
+               "Printstatus", "Listcameras", "Sidecarpython", "Installroot", "Sourceversion",
                "Camera", "Cameraflip", "Inputmode", "Framesbuffer",
                "Slotassign", "Oscport", "Segquality", "Multiperson",
                "Flowaccuracy", "Flowbuffer",
+               "Ocrlevel", "Ocrlanguage", "Ocrcorrect", "Ocrlines",
                "Maskbuffer", "Depthbuffer"]
     watched += [par_name for _n, par_name in REQUEST_TOGGLES]
     # The depth pins live on a page tools/td_add_depth.py owns, so they may not exist

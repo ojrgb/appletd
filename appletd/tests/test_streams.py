@@ -19,6 +19,7 @@ from appletd.streams import (
     REQUEST_DEPTH,
     REQUEST_FLOW,
     REQUEST_NAMES,
+    REQUEST_OCR,
     REQUEST_SEGMENT,
     SEGMENT_QUALITIES,
     STREAM_FACE,
@@ -156,8 +157,19 @@ def test_the_portless_requests_sort_after_the_ported_ones() -> None:
     rename live channels. Also the order the requests run in on the capture queue:
     hands first, because that is what a live project is reading."""
     assert REQUEST_NAMES[:len(STREAM_NAMES)] == STREAM_NAMES
-    assert REQUEST_NAMES[len(STREAM_NAMES):] == (REQUEST_SEGMENT, REQUEST_DEPTH,
-                                                 REQUEST_FLOW)
+    assert REQUEST_NAMES[len(STREAM_NAMES):] == (REQUEST_SEGMENT, REQUEST_OCR,
+                                                 REQUEST_DEPTH, REQUEST_FLOW)
+
+
+def test_text_has_a_port_and_no_channels() -> None:
+    """The one request that is neither a stream nor an image: strings go out on a
+    port of their own as one typed message, into a DAT (DESIGN.md 6.4). Not in
+    STREAM_NAMES, because everything that iterates that builds an OSC In CHOP."""
+    assert REQUEST_OCR in REQUEST_NAMES
+    assert REQUEST_OCR not in STREAM_NAMES
+    assert port_for(REQUEST_OCR) == BASE_PORT + 3
+    assert parse_streams("ocr,hands") == (STREAM_HANDS, REQUEST_OCR)
+    assert REQUEST_NAMES.index(REQUEST_OCR) < REQUEST_NAMES.index(REQUEST_DEPTH)
 
 
 def test_the_quality_levels_are_in_cost_order_and_the_default_is_the_cheapest() -> None:
@@ -177,7 +189,7 @@ def test_the_status_channels_are_named_and_ordered() -> None:
     start, which is what these channels are for. The ORDER is the port order followed
     by the portless requests, and reordering it would rename live channels."""
     assert status_channel_names() == ("sc_uptime_s", "sc_hands", "sc_pose", "sc_face",
-                                     "sc_segment", "sc_depth", "sc_flow",
+                                     "sc_segment", "sc_ocr", "sc_depth", "sc_flow",
                                      "sc_src_w", "sc_src_h")
 
 

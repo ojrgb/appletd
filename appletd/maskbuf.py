@@ -142,7 +142,7 @@ class MaskFrame(NamedTuple):
     seq: int
     frame: int          # the writer's own frame counter, monotonic, never reset
     timestamp: float    # seconds, from the writer's clock. NOT comparable to ours
-    pixels: bytes
+    pixels: bytes | bytearray   # a bytearray when the reader asked for `writable`
     source_width: int   # the frame this describes. 0 = not stated
     source_height: int
     aux: bytes          # 32 opaque bytes, meaning owned by the writer
@@ -391,6 +391,7 @@ class MaskReader:
         self._identity = (0, 0)
         self.misses = 0                 # cumulative, for the profiler to report
         self.remaps = 0                 # how often the writer replaced its buffer
+        self.n_reads = 0                # full copies out of the buffer
         self._open()
 
     def _open(self) -> None:
@@ -426,8 +427,50 @@ class MaskReader:
     def path(self) -> str:
         return self._path
 
-    def read(self, attempts: int = DEFAULT_ATTEMPTS) -> MaskFrame | None:
+    def _remap_if_replaced(self) -> None:
+        """A stat FIRST, every read, and it is not paranoia - it is the difference
+        between an exception and a SIGBUS. If the writer restarts at a different
+        quality level it re-creates its buffer at a different size, and touching a
+        page past the end of a file that SHRANK kills the process. Inside
+        TouchDesigner that is the user's whole project, with no traceback.
+
+        `os.stat` is about a microsecond against the read's twenty, and a file that
+        has GONE is left alone deliberately: POSIX keeps the mapping valid after an
+        unlink, which is what lets a sidecar restart without faulting the reader.
+        """
+        try:
+            stat = os.stat(self._path)
+        except OSError:
+            stat = None
+        if stat is not None and (stat.st_ino, stat.st_size) != self._identity:
+            self._open()
+            self.remaps += 1
+
+    def seq(self) -> int:
+        """The writer's sequence counter, from the header alone. Never copies pixels.
+
+        For a reader that POLLS: `read()` copies the whole payload before it can say
+        whether anything changed, and at 33 MB a frame polled every 2 ms that was
+        most of a core spent copying a frame that had not moved (MEASURED: the
+        sidecar at 55% CPU on the TOP Input path, 30% of it Vision). Compare this
+        against the last frame's `seq` and call `read()` only when it differs.
+
+        Contract: odd means a write is in progress and even means a coherent frame is
+                  there; 0 means nothing has been published. Compares equal to the
+                  `seq` of the `MaskFrame` a following `read()` returns.
+        """
+        self._remap_if_replaced()
+        assert self._map is not None
+        return int(struct.unpack_from("<I", self._map, 8)[0])
+
+    def read(self, attempts: int = DEFAULT_ATTEMPTS, *,
+             writable: bool = False) -> MaskFrame | None:
         """One coherent frame, or None.
+
+        `writable` returns the pixels as a `bytearray`, copied out of the mapping
+        ONCE. The TOP Input path needs a writable buffer because
+        `CVPixelBufferCreateWithBytes` refuses a read-only one, and `bytearray(bytes)`
+        after the fact was a second copy of 33 MB.
 
         None means one of three things, and the caller treats them all the same way -
         keep showing the last frame:
@@ -440,23 +483,7 @@ class MaskReader:
         or a different build, which retrying forever would hide behind a mask that is
         simply always blank.
         """
-        # A stat FIRST, every read, and it is not paranoia - it is the difference
-        # between an exception and a SIGBUS. If the writer restarts at a different
-        # quality level it re-creates its buffer at a different size, and touching a
-        # page past the end of a file that SHRANK kills the process. Inside
-        # TouchDesigner that is the user's whole project, with no traceback.
-        #
-        # `os.stat` is about a microsecond against the read's twenty, and a file that
-        # has GONE is left alone deliberately: POSIX keeps the mapping valid after an
-        # unlink, which is what lets a sidecar restart without faulting the reader.
-        try:
-            stat = os.stat(self._path)
-        except OSError:
-            stat = None
-        if stat is not None and (stat.st_ino, stat.st_size) != self._identity:
-            self._open()
-            self.remaps += 1
-
+        self._remap_if_replaced()
         assert self._map is not None                    # _open sets it or raises
         for _ in range(max(1, attempts)):
             (magic, version, seq, seq_tail, width, height, components, dtype,
@@ -497,7 +524,15 @@ class MaskReader:
                 # the next read is 16 ms away and will be fine.
                 self.misses += 1
                 continue
-            pixels = self._map[HEADER_BYTES:HEADER_BYTES + size]
+            pixels: bytes | bytearray
+            if writable:
+                # One copy, straight into a bytearray. The memoryview is released at
+                # the end of the block - an outstanding export stops the mapping from
+                # being closed or replaced.
+                with memoryview(self._map) as view:
+                    pixels = bytearray(view[HEADER_BYTES:HEADER_BYTES + size])
+            else:
+                pixels = self._map[HEADER_BYTES:HEADER_BYTES + size]
             # INSIDE the seqlock, with the pixels: the aux describes this frame, so a
             # read that paired one frame's fit with another's map would be a metric
             # depth map that is quietly scaled from the wrong solve.
@@ -512,9 +547,9 @@ class MaskReader:
             if after_seq != seq or after_tail != seq or seq_tail != seq:
                 self.misses += 1
                 continue
+            self.n_reads += 1
             return MaskFrame(width, height, components, dtype, seq, frame,
-                             timestamp, bytes(pixels), source_w, source_h,
-                             bytes(aux))
+                             timestamp, pixels, source_w, source_h, bytes(aux))
         return None
 
     def close(self) -> None:

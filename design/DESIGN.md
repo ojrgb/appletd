@@ -2052,11 +2052,21 @@ obvious alternative and is worse here:
 The cost is three OSC In CHOPs instead of one, and three port numbers to keep in
 step — which is why they are computed from one constant rather than typed twice.
 
-**Streams are launch flags.** `--streams hands,pose`, parsed once at startup. There
-is no control channel into the sidecar and there is not going to be one: the
+**Streams are launch flags.** `--streams hands,pose`, parsed once at startup. The
 process is started by a `Popen` from TouchDesigner (§8.2), so a toggle is an
 argument on that command line and takes effect on the next Start. The TD toggles
 say "restart to apply" for that reason.
+
+**One control port, and what it is for — added 2026-09-14.** The sentence that stood
+here read "there is no control channel into the sidecar and there is not going to be
+one", and it held for a year. It gave way for the text request's `Manual` mode: a
+trigger that costs a 1.5 s restart is not a trigger. So the sidecar binds
+`Oscport + 4` and reads OSC from it once a tick - `/ocr/mode auto|manual` and
+`/ocr/trigger`, nothing else. The rule that replaces the old one: a launch flag stays a
+launch flag unless applying it live is the whole point of the control, and everything
+the port can say is also a launch flag, so a sidecar that never hears a message
+behaves exactly as its command line said. It is one-way and unacknowledged; the
+result of a trigger arrives where results always did, on the text port.
 
 **The channel contract per stream is CONSTANT, whatever is enabled.** A disabled
 stream still sends its bundle, all zeros, at the send rate. This is not laziness
@@ -2171,6 +2181,40 @@ considered and deferred: it would break the panel in a live project, the paramet
 paths every callback names, and the `--slots` plumbing, in exchange for tidiness.
 The trigger for doing it is a second thing needing to control the process — a
 `visionpose` COMP wanting its own Start — not the current asymmetry.
+
+**A request with a PORT and NO CHANNELS: text.** `VNRecognizeTextRequest` returns
+strings, and a CHOP cannot carry one. So `ocr` is the first request whose output is a
+**DAT**: `outtext`, a Table DAT with one row per slot - `text`, `conf`, `x1`, `y1`,
+`x2`, `y2`, the box normalised with a bottom-left origin exactly like `h{i}_bbox_*`.
+
+  * **OSC, on its own port** (base + 3), like the channel streams and unlike the
+    images. A frame of text is a few hundred bytes, so the datagram question does not
+    arise, and the alternative - a text sibling of `maskbuf` plus a Script DAT - was
+    a fifth `/tmp` buffer and a second seqlock for something the socket already does.
+    `osc.py` gains the `s` type tag; nothing else on the wire changes.
+  * **One message per frame**, `/ocr`, carrying every slot as typed arguments, rather
+    than one message per line. MEASURED in TouchDesigner: the stock OSC In DAT's own
+    table SPLITS STRING ARGUMENTS ON WHITESPACE into separate columns, so the raw table
+    is unusable for text. Its `onReceiveOSC` callback receives the typed arguments
+    intact - spaces, UTF-8, empty strings - and writes a Table DAT. One message per
+    frame is one callback per frame, and it makes a frame atomic without a bundle
+    boundary.
+  * **Fixed slots and a count**, which is the zeros rule applied to text: every frame
+    carries exactly `--ocr-lines` rows, blank where nothing was read, so the table
+    never changes shape and a cell reference downstream never breaks. Lines beyond
+    the slot count are dropped lowest-confidence first; `Ocrfound` says how many
+    Vision saw, so a project can tell when that happened.
+  * **DAT-only.** No `ocr_*` channels on `out1`; `sc_ocr` in the status channels is
+    the liveness signal, as for every other request. A CHOP presence was priced and
+    declined - it needs a second receiver on the port and entries in every trim list.
+  * **Pinning the language is the lever.** MEASURED, synthetic 1280x720, six lines:
+    `accurate` with defaults 60.6 ms, `fast` with defaults 8.6 ms, `fast` with `en-US`
+    pinned and language correction OFF **5.9 ms**. There is no English-only model to
+    fetch - the two `recognitionLevel`s are the two models - but correction is a
+    dictionary pass over the result, and autodetection is a second pass over the
+    image. Defaults are therefore `fast`, `en-US`, correction off, which is the row a
+    live project can afford beside hands' 3.41 ms. `fast` reports a flat 0.5
+    confidence for every line; only `accurate` gives a real one.
 
 ---
 
@@ -2446,3 +2490,28 @@ Everything in §2 and §3 was measured on the target machine during the spike th
 produced [`reference/`](reference/). Section 9's claims about the TD C++ SDK come
 from reading the headers and samples in the local TouchDesigner install.
 Sections 4–8 and 10 are design proposals and have not been built.
+
+## Setup recovery — 2026-11-01
+
+Installation and launch must use the same verified interpreter selection: explicit
+Sidecarpython (or the development environment override), the installation stamp's
+interpreter, the bundled interpreter, then supported local candidates. A selected
+explicit override that fails must be reported, not silently replaced at launch.
+Validation checks Python 3.11+ and native imports against the installation's own
+site-packages. No unverified `python3` fallback may start a sidecar.
+
+The Install button repairs an invalid runtime even when the package version matches.
+A package-only update reuses verified dependencies and the existing depth model;
+it writes the embedded package and stamps completion without requiring downloads.
+Status distinguishes installed files from a usable runtime, and stale versions say
+which action repairs them. A diagnostics report exposes configuration and camera/
+OSC state without starting capture. Low-space and unsupported-platform failures are
+reported before writing the package. The disk reserve is a conservative estimate,
+not a measured installation size.
+
+Runtime verification is held in a private, versioned Python module for the lifetime
+of the TouchDesigner process, keyed by resolved package root and interpreter override.
+DAT recompilation or component renaming must not discard that result. It is never
+serialized into component storage. Launch still checks file fingerprints without a
+native import probe. An absent or invalidated result enables Install and clears the
+misleading Installed-ready status; project-open setup primes a new process's cache.

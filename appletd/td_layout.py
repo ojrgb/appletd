@@ -153,6 +153,9 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "in_frames": (-3 * COL_W, -1 * ROW_H),
     "frames_write": (-2 * COL_W, -1 * ROW_H),
     "frames_callbacks": (-1 * COL_W, -1 * ROW_H),
+    # The per-frame puller, at the end of the same row: it exists because nothing
+    # downstream asks the writer to cook (tools/td_add_topinput.py).
+    "frames_pull": (0 * COL_W, -1 * ROW_H),
     # The camera passthrough, and the overlay composite that sits on top of it.
     "video_in": (COL_W, -4 * ROW_H),
     # WHICH PICTURE, following `Input Mode`: the camera, or the frames TouchDesigner
@@ -169,6 +172,14 @@ MASTER_NODES: Final[dict[str, tuple[int, int]]] = {
     "flow_map": (COL_W, -6 * ROW_H),
     "flow_callbacks": (0 * COL_W, -6 * ROW_H),
     "outflow": (2 * COL_W, -6 * ROW_H),
+    # Text, the one DAT path: an OSC In DAT on its own port, the callback that turns
+    # its typed message into rows, the table, and the COMP's first DAT output. Its
+    # own row below flow's, because it shares no operator with either network.
+    "ocr_par_callbacks": (-1 * COL_W, -7 * ROW_H),
+    "ocr_callbacks": (0 * COL_W, -7 * ROW_H),
+    "ocr_osc": (COL_W, -7 * ROW_H),
+    "ocr_table": (2 * COL_W, -7 * ROW_H),
+    "outtext": (3 * COL_W, -7 * ROW_H),
     # Beside the teardown DAT, because it is the other half of the same job: one
     # starts the process when a project opens, the other stops it when TouchDesigner
     # quits.
@@ -479,6 +490,9 @@ OUTPUT_ORDER: dict[str, int] = {
     # would insert itself in the middle and renumber two live connectors. This is the
     # case that makes the pinning load-bearing rather than tidy.
     "outflow": 4,       # optical flow, two float components
+    # The first DAT output. Alphabetically it would land between `outmask` and
+    # `outvideo`; pinned to the end like everything added after the first three.
+    "outtext": 5,       # recognised text, one row per slot
 }
 
 

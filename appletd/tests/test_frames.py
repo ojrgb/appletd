@@ -14,11 +14,18 @@ import numpy
 import pytest
 
 from appletd.frames import FrameBufferReader, FrameError, sample_buffer_from_bgra
-from appletd.maskbuf import MaskWriter
+from appletd.maskbuf import DTYPE_F32, MaskWriter
 
 
 def _bgra(width: int, height: int, value: int = 0) -> bytes:
     return bytes(bytearray([value]) * (width * height * 4))
+
+
+def _rgba_float(width: int, height: int, value: float = 0.0) -> memoryview:
+    """What TouchDesigner's `numpyArray` hands over, as the writer sends it: float32
+    RGBA, bottom row first, through a memoryview and not `tobytes`."""
+    array = numpy.full((height, width, 4), value, dtype=numpy.float32)
+    return memoryview(array.data).cast("B")
 
 
 def test_a_written_frame_comes_back_the_same_shape(tmp_path: pathlib.Path) -> None:
@@ -28,24 +35,28 @@ def test_a_written_frame_comes_back_the_same_shape(tmp_path: pathlib.Path) -> No
         reader = FrameBufferReader(path)
         frame = reader.latest()
         assert frame is not None
-        pixels, _captured_at = frame
-        assert pixels.shape == (16, 32, 4)
-        assert int(pixels[0][0][0]) == 7
+        assert frame.pixels.shape == (16, 32, 4)
+        assert int(frame.pixels[0][0][0]) == 7
+        assert frame.upside_down is False
         reader.close()
 
 
-def test_the_same_frame_is_only_delivered_once(tmp_path: pathlib.Path) -> None:
+def test_the_same_frame_is_only_delivered_once_and_not_copied_again(
+        tmp_path: pathlib.Path) -> None:
     """The reader is polled faster than TouchDesigner writes, so "nothing new" is the
-    common case and has to be cheap and unambiguous."""
+    common case and has to be cheap: a peek at the header, not a copy of 33 MB."""
     path = str(tmp_path / "frames.buf")
     with MaskWriter(path, 8, 8, components=4) as writer:
         writer.write(_bgra(8, 8, 1))
         reader = FrameBufferReader(path)
         assert reader.latest() is not None
-        assert reader.latest() is None
+        for _ in range(10):
+            assert reader.latest() is None
+        assert reader._reader is not None and reader._reader.n_reads == 1
         writer.write(_bgra(8, 8, 2))
         assert reader.latest() is not None
         assert reader.frames_read == 2
+        assert reader._reader.n_reads == 2
         reader.close()
 
 
@@ -55,6 +66,38 @@ def test_a_mask_buffer_is_refused_rather_than_reshaped(tmp_path: pathlib.Path) -
     path = str(tmp_path / "mask.buf")
     with MaskWriter(path, 16, 16, components=1) as writer:
         writer.write(bytes(16 * 16))
+        reader = FrameBufferReader(path)
+        with pytest.raises(FrameError, match="four components"):
+            reader.latest()
+        reader.close()
+
+
+def test_a_float_frame_comes_back_as_float_and_flagged_upside_down(
+        tmp_path: pathlib.Path) -> None:
+    """The TOP Input contract: TouchDesigner writes float32 RGBA bottom row first,
+    the reader hands it on UNTOUCHED and says so, and it wraps for Vision without
+    a conversion anywhere."""
+    path = str(tmp_path / "frames.buf")
+    with MaskWriter(path, 32, 16, components=4, dtype=DTYPE_F32) as writer:
+        writer.write(_rgba_float(32, 16, 0.25))
+        reader = FrameBufferReader(path)
+        frame = reader.latest()
+        assert frame is not None
+        assert frame.pixels.dtype == numpy.float32
+        assert frame.pixels.shape == (16, 32, 4)
+        assert float(frame.pixels[0][0][0]) == 0.25
+        assert frame.upside_down is True
+        assert frame.pixels.flags.writeable
+        assert frame.to_sample_buffer() is not None
+        assert reader.last_read_ms >= 0.0
+        reader.close()
+
+
+def test_a_two_component_float_buffer_is_a_flow_field_not_a_frame(
+        tmp_path: pathlib.Path) -> None:
+    path = str(tmp_path / "flow.buf")
+    with MaskWriter(path, 8, 8, components=2, dtype=DTYPE_F32) as writer:
+        writer.write(bytes(8 * 8 * 2 * 4))
         reader = FrameBufferReader(path)
         with pytest.raises(FrameError, match="four components"):
             reader.latest()
@@ -93,9 +136,9 @@ def test_the_frame_is_writable_because_vision_needs_it_to_be(tmp_path: pathlib.P
         reader = FrameBufferReader(path)
         got = reader.latest()
         assert got is not None
-        pixels, captured_at = got
-        assert pixels.flags.writeable
-        assert sample_buffer_from_bgra(pixels, captured_at) is not None
+        assert got.pixels.flags.writeable
+        assert sample_buffer_from_bgra(got.pixels, got.captured_at) is not None
+        assert got.to_sample_buffer() is not None
         reader.close()
 
 

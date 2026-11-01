@@ -928,7 +928,7 @@ def test_every_download_gives_up_on_a_stalled_connection() -> None:
     needs it to finish.
     """
     script = _script()
-    downloads = [line for line in script.split("\n") if "curl " in line
+    downloads = [line for line in script.split("\n") if "curl " in line and " -o " in line
                  and not line.strip().startswith("#")]
     assert len(downloads) >= 4, downloads
     for line in downloads:
@@ -950,4 +950,19 @@ def test_the_stall_limits_are_a_shell_variable_not_repeated() -> None:
     """Four downloads, one definition - the same reason every other constant in this
     file is a constant."""
     script = _script()
-    assert script.count("CURL_LIMITS=") == 1
+    assert script.count('--connect-timeout 30 --speed-limit 1024 --speed-time 60') == 1
+
+
+@pytest.mark.parametrize("supports_all_errors", [False, True])
+def test_transport_retries_respect_installed_curl(supports_all_errors: bool) -> None:
+    script = _script()
+    limits = script[script.index('CURL_LIMITS='):script.index('\nsay()')]
+    probe_exit = 0 if supports_all_errors else 2
+    result = subprocess.run(
+        ['/bin/sh', '-c', 'curl() { return %d; }\n' % probe_exit + limits
+         + '\nprintf "%s" "$CURL_LIMITS"'],
+        capture_output=True, text=True, check=True)
+    assert '--retry 2' in result.stdout
+    assert '--connect-timeout 30' in result.stdout
+    assert '--speed-time 60' in result.stdout
+    assert ('--retry-all-errors' in result.stdout) is supports_all_errors

@@ -5661,3 +5661,220 @@ undiagnosable from the panel.
 **Unverified:** the reporter has not yet run the fix. The device-type rule is checked
 against their list with fakes, not their hardware, and a Mac with no built-in camera
 still has to pick a device by name — the error now says so and lists them.
+
+## 2026-09-13 — text recognition, and the first output that is neither a CHOP nor a TOP
+
+**Four decisions were Omer's, taken before anything was built**, because ROADMAP §7 said
+the surface question had to be settled first: recognised lines as a Table DAT and nothing
+else; OSC on its own port rather than a fifth `/tmp` buffer or a JSON file; fixed slots
+plus a count rather than a table that changes shape; DAT-only, with no `ocr_*` channels
+on `out1`. docs/BUILD_PLAN.md step 32 has them in order.
+
+**The stock OSC In DAT was tried before the design was final, and that changed the
+message shape.** Sent a bundle of two string messages at a scratch DAT in the live
+project: bundles and UTF-8 fine, and every string argument SPLIT ON WHITESPACE into
+separate columns — `"line two"` was two cells. The DAT's `onReceiveOSC` callback gets the
+typed `args` intact. So the consumer is the callback, the DAT's own table is kept to one
+line, and the sidecar sends ONE message per frame with every slot in it rather than one
+per line: one callback a frame, and a frame is atomic without tracking a bundle boundary.
+
+**Measured before choosing the defaults.** Synthetic 1280×720, six lines: `accurate` with
+Vision's defaults 60.6 ms; `fast` with defaults 8.6; `fast` with `en-US` pinned and
+correction off **5.9**. The lever is the language, not the level — there is no smaller
+English model, the two levels are the two models; correction is a dictionary pass and
+detection a second pass over the image. `fast` reports a flat 0.5 confidence for every
+line, which the `conf` column now says out loud. Both levels misread `£5.50`.
+
+**What surprised.** `port_for` had two categories — a stream with a port and channels,
+or an image with neither — and text is a third: a port and no channels. `STREAM_NAMES`
+could not take it, because everything that iterates that tuple builds an OSC In CHOP and
+a channel COMP; `IMAGE_REQUESTS` could not either. So `PORT_OFFSETS` grew an entry that
+is not a stream and the self-check states the new rule. And the sidecar's socket-failure
+test counted three sends a tick for a year; it is four now.
+
+**Verified two ways without a camera.** Frames from the package's own encoder into the
+built network: three lines in reading order with `£` intact, `outtext` mirroring the
+table, `Ocrfound` reading 9 for nine lines and eight slots, the toggle blanking the rows.
+Then the REAL sidecar on the TOP Input path — `--streams ocr --frames-path` on port
+20000, synthetic frames written the way `frames_write` writes them — `sc_ocr` 1, three
+lines, a blank fourth slot, exit 0. **Unverified: the live camera path**, and real
+signage rather than rendered text.
+
+**Then Omer ran it, and the first two attempts failed for two different reasons.** The
+first was the install: the sidecar runs the INSTALLED package, which was two modules
+short and rejected `--ocr-level` outright - and `Capturestate` said exactly that, which
+is the 2026-09-13 fix paying for itself. Install, confirm the files, restart. The second
+was older: with the network editor closed, `frames_write` had cooked **4 times in 3,700
+frames**. Its `Tick` expression marks it dirty, but TouchDesigner cooks an operator when
+something downstream ASKS, and nothing did - `video_source` reads `in_frames` directly,
+and a DAT consumer pulls no TOP. TOP Input had only ever worked with a viewer open on the
+writer. `frames_pull`, an Execute DAT, now cooks it once a frame while `Active` is on in
+TOP Input mode. With it, a 256x256 Text TOP reading `derivative` came through
+`outtext` with its box.
+
+One thing left as found: on the TOP path the engine still records "camera delivered
+256x256, requested 1280x720" as an error every status line. It is the size assertion
+doing its job on the wrong input, and it is noise in this mode.
+
+## 2026-09-14 — 15.7 ms at 1080p, and the conversion that was never needed
+
+Omer bumped the TOP Input source to 1920x1080 and `frames_write` went to **15.7 ms** on
+TouchDesigner's main thread. The readback was 0.57 of it. Everything else was turning
+TouchDesigner's float32 RGBA - `numpyArray()` returns float32 whatever the TOP's format,
+33 MB a frame - into BGRA bytes: five passes, **14.16 ms** measured in the venv on the
+same array. Reordering the passes could get it to 10.5; the cast alone is over 2.
+
+**Moving the conversion to the sidecar was the obvious answer and only half right.** It
+would take 9.6 ms a frame off TouchDesigner and put it on the sidecar's reader thread -
+a third of a core at 30 fps, and 10 ms of latency. Measured before deciding, which is
+what made the second question worth asking: does Vision need the conversion at all? It
+does not. A `128RGBAFloat` pixel buffer wrapped straight round the float array, with the
+bottom-first row order given as `kCGImagePropertyOrientationDownMirrored`, read all
+three test lines at 1080p in 12 ms; the same buffer told it was upright read garbage.
+So the pixels are now touched by nobody: TouchDesigner copies 33 MB once (0.48 ms
+through a memoryview - `tobytes` first would have doubled it), the sidecar copies once
+out of the seqlock (0.49) and hands the array to Vision with a flag.
+
+**Kept to the TOP path, deliberately.** The camera path is untouched: `orientation_for`
+gained an `upside_down` argument the camera never passes, the engine takes an
+orientation per submitted frame and defaults to the camera's, and the
+delivered-versus-requested size assertion now applies only when there is a camera to
+lie. `frames_pull` paces the writer to 30 fps, which is what Vision could use anyway.
+
+**How the sidecar's side is measured now.** The status line carries `cpu NN%` for the
+whole process, and on the frames path `read X wrap Y ms` - the two gauges of what the
+transport costs there. `test_ocr.py` pins the contract itself: a float frame the wrong
+way up reads correctly once Vision is told, and does not otherwise.
+
+**Then the sidecar's own gauge earned its keep.** First run: `cpu 55%`, `read 1.2 ms`
+- against a 0.5 ms memcpy and 10 ms of Vision at 30 fps, which is 30%. The rest was
+the poll: `FrameBufferReader` asked `MaskReader.read()` every 2 ms, and `read()` copies
+the whole payload before it can say whether `seq` moved - up to 500 copies of 33 MB a
+second for a frame that arrives 30 times. And each real frame was copied twice, once
+out of the mapping and once into a `bytearray` for writability. A header-only
+`MaskReader.seq()` and a `read(writable=True)` that copies once took it to **40% and
+0.6 ms**. The TD side reads **1.2-1.3 ms** at 1080p on the natural gauge, from 15.7.
+
+## 2026-09-14 — Manual text, and the first message into a running sidecar
+
+Omer asked for `Automatic / Manual` on the Text page with a `Trigger` pulse: Manual
+reads one frame per pulse, and between pulses both sides should be as close to idle as
+they can be. A mode that costs a restart to switch and a trigger that IS a restart were
+both non-starters, so the sentence in DESIGN.md 6.4 - "there is no control channel into
+the sidecar and there is not going to be one" - gave way, narrowly: the sidecar binds
+`Oscport + 4`, drains it once per 60 Hz tick, and understands two messages. Everything
+the port can say is also a launch flag, so a sidecar that never hears one behaves as its
+command line said, and a stray datagram is counted and dropped inside the loop rather
+than raised.
+
+**What "minimum" turned out to mean on each side.** Sidecar: `_publish_text` returns
+before Vision in manual mode unless armed, and the arm is consumed before the request
+runs so a trigger landing mid-request is kept rather than lost. TouchDesigner: the
+`ocr_osc` callback already returns on an unchanged `seq`; the new cost was the TOP Input
+writer, which the puller now cooks only if some non-text stream is on or text is
+automatic - the toggle list is baked into the DAT at build, from the COMP, so a new
+stream cannot be missed.
+
+**The race, found on paper before it was found live.** On TOP Input a trigger has to
+produce its own frame. Send the trigger, cook the writer: the reader thread picks the
+frame up within 2 ms and Vision sees it before the send loop has polled the trigger up
+to 16 ms later - and in manual mode there is no next frame to catch up on. So the pulse
+arms first and cooks the frame 40 ms later, through `run(delayMilliSeconds=)`.
+
+**Measured, live, 1080p Text TOP on TOP Input.** Automatic: sidecar `cpu 43%`, writer
+at 30 fps. Switched to Manual over the control port: `cpu 7%`, `frames` frozen, the
+writer's cook count frozen, `ocr_osc` the only operator still cooking in the COMP at
+0.07 ms. One pulse: one frame written, one inference, and the table read the NEW sign.
+
+**Not on the first try.** The first trigger read the OLD sign. `numpyArray(delayed=True)`
+returns the frame from the PREVIOUS cook - invisible while cooking continuously, and
+exactly wrong for a one-shot after idling, because the previous cook was the old sign.
+The writer now reads non-delayed when it has not cooked for more than two frames, so a
+trigger pays the GPU sync once and gets the frame it was pulsed for.
+
+
+## 2026-11-01 — setup and capture agree on the runtime
+
+A loaded component selected Xcode Python 3.9 against NumPy extensions built for 3.11.
+The Install panel had correctly discovered a working venv; the launcher used a
+separate resolver and fell through to `python3`. Capture now uses setup's verified
+selection, cached with file fingerprints so restarts do not repeat native imports.
+Explicit interpreter changes are watched, and development checkouts use the same
+root for verification and launch.
+
+Install no longer short-circuits a repair just because files and stamps match. It
+can repair dependencies for a valid explicit interpreter, upgrades pip's target
+packages, and performs package-only updates without network access when native
+imports, pinned versions and the depth model already check out. Failed local writes,
+low space and unsupported operating systems now produce actionable status. The
+status says `Installed - ready`; Setup Diagnostics prints runtime, camera, stream
+and output information without starting capture.
+
+The milestone review found and closed explicit-interpreter repair, callback coverage,
+launch-time probe blocking, checkout-root cache mismatch and exception-safe verification
+cleanup issues. The groups builder's Descriptor proof also needed its disabled hands
+COMP temporarily enabled; otherwise its check reported a failure against frozen data.
+
+Verified in TouchDesigner 2025.33230: normal Install updated the embedded package,
+blank Sidecarpython resolved the working venv, capture ran on TOP Input, and a manual
+OCR pulse consumed a frame. Capture was returned to its original off state. The current
+camera expression already includes FaceTime and engine-selected defaults. Physical
+camera checks on other Mac models and the commenters' unspecified tracking failures
+remain unverified. No performance benchmark was taken, and no public release was pushed.
+
+
+## Release validation — setup recovery, 2026-11-01
+
+Built a new component through all 19 builders and exported `appletd.tox` with
+capture/video off, blank interpreter/install-root values and defaults, the default
+camera token, and cleared runtime storage. Reloaded the actual saved file with the
+source component removed; its embedded version is `e01dd6af60cf`, and no operator
+errors were reported. The user's working component was restored in TOP Input mode,
+capture off, with the final installer embedded and installed. The .toe was not saved.
+
+An empty install directory downloaded the pinned Python, dependencies and depth
+model. A real HTTP/2 cancellation interrupted the model download; curl's standard
+retry policy did not cover it. Setup now enables `--retry-all-errors` when curl
+supports it, retaining ordinary retries on older curl. Review identified that
+compatibility requirement; shell tests cover both capability outcomes.
+
+In the isolated install, deliberately breaking NumPy produced an actionable install
+status. Normal Install repaired it and the fresh bundled interpreter ran capture.
+Updating only the embedded package then returned Installed-ready without spawning
+an installer. The serialized release also ran capture after reload and installation.
+Default MacBook Pro Camera capture delivered 1280x720 source dimensions; the separate
+video TOP delivered 1920x1080 without errors in TouchDesigner 2025.33230. These are
+functional checks, not performance benchmarks. No camera imagery was saved.
+
+Limits: no person was available to validate positive hand detections; other Mac
+models and arbitrary component paths remain untested. Fresh-build screenspace
+verification reports absent channels before the groups layer has established its
+gating; the final network has no operator errors. This existing verification warning
+is not a confirmed output defect. No public release or push was performed.
+
+Final gate: **877 passed, 1 skipped**, ruff and mypy clean.
+
+
+## Runtime verification after component restoration — 2026-11-01
+
+The user's first startup after release preparation failed with Runtime not verified
+while Install still said Installed-ready. The live DAT cache was empty: renaming the
+component during release isolation recompiled its module and discarded verification.
+Re-verification restored capture, confirming the dependencies themselves were valid.
+Verification now lives in a process-local, versioned module, without entering saved
+component storage. Cache misses re-enable Install and report verification needed.
+
+Regression tests cover DAT reexecution and file invalidation. Live rename/restore
+preserved the verified interpreter; clearing the process cache and recompiling the DAT
+then invoking project-open setup repopulated it. The reloaded artifact ran capture.
+This simulates an empty process cache, not a complete TouchDesigner application restart.
+The user's Camera input / MacBook Pro Camera selection was applied on restoration.
+Final gate: 878 passed, 1 skipped; ruff and mypy clean; correctness review found no blockers.
+The rebuilt .tox retains package source hash e01dd6af60cf because this fix is in the
+installer DAT builder, not the embedded sidecar package. Nothing pushed; .toe unsaved.
+
+## Manual acceptance — 2026-11-01
+
+User confirmed hand tracking, loss/recovery, restart, and project reopening passed.
+User saved the tested appletd.tox and appletd.toe and approved committing and pushing.
+Other-Mac verification remains unconfirmed.

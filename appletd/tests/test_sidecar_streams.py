@@ -20,11 +20,13 @@ Ref: DESIGN.md 6.4; appletd/streams.py; appletd/sidecar.py.
 from __future__ import annotations
 
 import socket
+import struct
 from collections.abc import Iterator
 
 import pytest
 
 from appletd.face_types import FaceFrame, blank_face_frame, face_channel_names
+from appletd.osc import encode_bundle_of, encode_typed_message
 from appletd.pose_types import PoseFrame, blank_pose_frame, pose_channel_names
 from appletd.sidecar import SEQ_MODULUS, Sidecar
 from appletd.source import (
@@ -33,9 +35,14 @@ from appletd.source import (
     LatestFaceBox,
     LatestFrameBox,
     LatestPoseBox,
+    LatestTextBox,
     PoseSource,
+    TextSource,
 )
 from appletd.streams import (
+    CONTROL_OCR_MODE,
+    CONTROL_OCR_TRIGGER,
+    REQUEST_OCR,
     STREAM_FACE,
     STREAM_HANDS,
     STREAM_NAMES,
@@ -44,13 +51,57 @@ from appletd.streams import (
     status_channel_names,
 )
 from appletd.tests.test_sidecar import decode_bundle
-from appletd.types import LandmarkFrame, blank_frame
+from appletd.text_types import (
+    DEFAULT_TEXT_LINES,
+    TEXT_ADDRESS,
+    TEXT_ARGS_PER_SLOT,
+    TEXT_HEADER_ARGS,
+    TextFrame,
+    TextLine,
+    fill_slots,
+)
+from appletd.types import Confidence, LandmarkFrame, NormX, NormY, blank_frame
 
 # The ports have to be ADJACENT, because that is what the port scheme means: hands
 # on the base, pose on base + 1, face on base + 2. So the fixture cannot just take
 # three ephemeral ports - it has to find a base whose two neighbours are free.
 MAX_PORT_ATTEMPTS = 40
-N_PORTS = len(STREAM_NAMES)
+# The three channel streams plus the TEXT port at base + 3, which carries one typed
+# message a tick rather than channels (DESIGN.md 6.4).
+N_PORTS = len(STREAM_NAMES) + 1
+
+
+def _osc_string(message: bytes, at: int) -> tuple[str, int]:
+    """A NUL-terminated string at `at`, and the 4-aligned offset after it."""
+    end = message.index(b"\x00", at)
+    return message[at:end].decode("utf-8"), (end // 4 + 1) * 4
+
+
+def decode_typed_bundle(payload: bytes) -> list[tuple[str, list[object]]]:
+    """An INDEPENDENT decoder for messages with a `,fs...` type tag, from the OSC
+    spec rather than from our encoder. Returns (address, args) per message."""
+    assert payload[:8] == b"#bundle\x00"
+    out: list[tuple[str, list[object]]] = []
+    offset = 16
+    while offset < len(payload):
+        size = struct.unpack(">i", payload[offset:offset + 4])[0]
+        message = payload[offset + 4:offset + 4 + size]
+        offset += 4 + size
+        address, cursor = _osc_string(message, 0)
+        tags, cursor = _osc_string(message, cursor)
+        assert tags.startswith(",")
+        args: list[object] = []
+        for tag in tags[1:]:
+            if tag == "f":
+                args.append(struct.unpack(">f", message[cursor:cursor + 4])[0])
+                cursor += 4
+            elif tag == "s":
+                value, cursor = _osc_string(message, cursor)
+                args.append(value)
+            else:
+                raise AssertionError("unexpected type tag %r" % tag)
+        out.append((address, args))
+    return out
 
 
 class FakeStreamSource:
@@ -63,12 +114,17 @@ class FakeStreamSource:
     known frame.
     """
 
-    def __init__(self, streams: tuple[str, ...] = STREAM_NAMES) -> None:
+    def __init__(self, streams: tuple[str, ...] = STREAM_NAMES,
+                 text_slots: int = DEFAULT_TEXT_LINES) -> None:
         self.box = LatestFrameBox()
         self.pose_box = LatestPoseBox()
         self.face_box = LatestFaceBox()
+        self.text_box = LatestTextBox(slots=text_slots)
         self._streams = streams
         self._running = False
+        # What the control port told us, for the tests below.
+        self.text_mode = "auto"
+        self.triggers = 0
 
     # -- HandSource --------------------------------------------------------
     def start(self) -> None:
@@ -108,6 +164,19 @@ class FakeStreamSource:
 
     def face_age_ms(self) -> float:
         return self.face_box.age_ms()
+
+    # -- TextSource --------------------------------------------------------
+    def latest_text(self) -> TextFrame:
+        return self.text_box.latest()
+
+    def text_age_ms(self) -> float:
+        return self.text_box.age_ms()
+
+    def set_text_mode(self, mode: str) -> None:
+        self.text_mode = mode
+
+    def trigger_text(self) -> None:
+        self.triggers += 1
 
 
 @pytest.fixture
@@ -165,6 +234,7 @@ def test_the_fake_source_really_satisfies_all_three_protocols() -> None:
     assert isinstance(source, HandSource)
     assert isinstance(source, PoseSource)
     assert isinstance(source, FaceSource)
+    assert isinstance(source, TextSource)
 
 
 def test_each_stream_lands_on_its_own_port(
@@ -405,4 +475,144 @@ def test_every_stream_goes_out_on_every_tick(
     sidecar, _ = _sidecar(ports)
     for _ in range(3):
         sidecar.send_once()
-    assert sidecar.n_sent == 3 * len(STREAM_NAMES)
+    # The three channel bundles plus the text message, every tick.
+    assert sidecar.n_sent == 3 * (len(STREAM_NAMES) + 1)
+
+
+# ---------------------------------------------------------------------------
+# Text: a port with one typed message and no channels
+# ---------------------------------------------------------------------------
+def _text_line(text: str, y1: float, conf: float = 0.5) -> TextLine:
+    return TextLine(text=text, confidence=Confidence(conf), x1=NormX(0.1), y1=NormY(y1),
+                    x2=NormX(0.4), y2=NormY(y1 + 0.05))
+
+
+def test_text_lands_on_the_fourth_port_as_one_typed_message(
+        ports: tuple[socket.socket, ...]) -> None:
+    """Base + 3, one message, `/ocr`, and exactly the argument count the receiving
+    callback in TouchDesigner checks for (DESIGN.md 6.4)."""
+    sidecar, _ = _sidecar(ports, streams=(*STREAM_NAMES, REQUEST_OCR))
+    assert port_for(REQUEST_OCR, sidecar.port) == ports[3].getsockname()[1]
+    sidecar.send_once()
+    messages = decode_typed_bundle(ports[3].recv(65535))
+    assert len(messages) == 1
+    address, args = messages[0]
+    assert address == TEXT_ADDRESS
+    assert len(args) == TEXT_HEADER_ARGS + TEXT_ARGS_PER_SLOT * DEFAULT_TEXT_LINES
+    assert args[2] == float(DEFAULT_TEXT_LINES)
+    # Nothing published: every slot blank, and nothing found.
+    assert args[1] == 0.0
+    assert all(args[TEXT_HEADER_ARGS + TEXT_ARGS_PER_SLOT * i] == ""
+               for i in range(DEFAULT_TEXT_LINES))
+    # And no channel stream received any of it: the hands port carries `sc_ocr`,
+    # the status channel, and nothing else about text.
+    hands = decode_bundle(ports[0].recv(65535))
+    assert TEXT_ADDRESS.lstrip("/") not in hands
+    assert hands["sc_ocr"] == 1.0
+
+
+def test_a_published_text_frame_arrives_with_its_strings_intact(
+        ports: tuple[socket.socket, ...]) -> None:
+    """Spaces, a pound sign, an empty slot: the strings a Table DAT will show."""
+    sidecar, source = _sidecar(ports)
+    lines = fill_slots([_text_line("Mind the gap", y1=0.7),
+                        _text_line("Tickets £5", y1=0.2, conf=0.9)], DEFAULT_TEXT_LINES)
+    source.text_box.publish(TextFrame(seq=SEQ_MODULUS + 7, captured_at=0.0, width=1280,
+                                      height=720, slots=DEFAULT_TEXT_LINES, found=2,
+                                      lines=lines))
+    sidecar.send_once()
+    (_address, args), = decode_typed_bundle(ports[3].recv(65535))
+    assert args[0] == 7.0                       # wrapped, like every other seq
+    assert args[1] == 2.0
+    assert args[3] == "Mind the gap"
+    assert args[3 + TEXT_ARGS_PER_SLOT] == "Tickets £5"
+    assert args[4 + TEXT_ARGS_PER_SLOT] == pytest.approx(0.9, abs=1e-6)
+    assert args[3 + 2 * TEXT_ARGS_PER_SLOT] == ""
+
+
+def test_a_disabled_text_stream_still_sends_a_blank_table_of_the_launched_shape(
+        ports: tuple[socket.socket, ...]) -> None:
+    """The zeros rule turned round: a table that stops receiving would HOLD its last
+    sign, so a disabled stream keeps sending blank rows - as many as `--ocr-lines`.
+    The shape comes from the source's blank frame, which the production source
+    sizes from that flag (the test below); the fake is sized the same way."""
+    source = FakeStreamSource((STREAM_HANDS,), text_slots=3)
+    source.start()
+    sidecar = Sidecar(host="127.0.0.1", port=ports[0].getsockname()[1],
+                      source=source, streams=(STREAM_HANDS,), ocr_lines=3)
+    sidecar.send_once()
+    (_address, args), = decode_typed_bundle(ports[3].recv(65535))
+    assert args[2] == 3.0
+    assert args[1] == 0.0
+    assert len(args) == TEXT_HEADER_ARGS + TEXT_ARGS_PER_SLOT * 3
+
+
+def test_the_production_source_sizes_its_blank_text_frame_from_the_launch_flag() -> None:
+    """`InProcessSource` constructs without a camera; only `start()` opens one. With
+    text DISABLED its box still carries `--ocr-lines` slots, which is what the test
+    above relies on."""
+    from appletd.source import InProcessSource
+
+    source = InProcessSource(streams=(STREAM_HANDS,), ocr_lines=3)
+    assert isinstance(source, TextSource)
+    frame = source.latest_text()
+    assert frame.slots == 3 and len(frame.lines) == 3 and frame.found == 0
+
+
+def test_a_source_with_no_text_support_still_sends_the_text_message(
+        ports: tuple[socket.socket, ...]) -> None:
+    from appletd.source import FakeSource
+
+    hands_only = FakeSource(lambda seq: blank_frame(seq=seq), interval_s=0.01)
+    assert not isinstance(hands_only, TextSource)
+    sidecar = Sidecar(host="127.0.0.1", port=ports[0].getsockname()[1],
+                      source=hands_only)
+    sidecar.send_once()
+    (address, _args), = decode_typed_bundle(ports[3].recv(65535))
+    assert address == TEXT_ADDRESS
+
+
+# ---------------------------------------------------------------------------
+# The control port: the one that runs the other way
+# ---------------------------------------------------------------------------
+def test_a_mode_message_reaches_the_source_and_the_sidecar(
+        ports: tuple[socket.socket, ...]) -> None:
+    sidecar, source = _sidecar(ports, streams=(*STREAM_NAMES, REQUEST_OCR))
+    assert sidecar.ocr_mode == "auto" and source.text_mode == "auto"
+    applied = sidecar.handle_control(encode_typed_message(CONTROL_OCR_MODE, ["manual"]))
+    assert applied == 1
+    assert sidecar.ocr_mode == "manual" and source.text_mode == "manual"
+    sidecar.handle_control(encode_typed_message(CONTROL_OCR_MODE, ["auto"]))
+    assert source.text_mode == "auto"
+
+
+def test_a_trigger_arms_the_source_once_per_message(
+        ports: tuple[socket.socket, ...]) -> None:
+    sidecar, source = _sidecar(ports, streams=(*STREAM_NAMES, REQUEST_OCR))
+    for _ in range(3):
+        sidecar.handle_control(encode_typed_message(CONTROL_OCR_TRIGGER, []))
+    assert source.triggers == 3
+    assert sidecar.n_control == 3 and sidecar.n_triggers == 3
+    sidecar.handle_control(encode_typed_message(CONTROL_OCR_MODE, ["manual"]))
+    assert sidecar.n_control == 4 and sidecar.n_triggers == 3   # a mode is not a trigger
+
+
+def test_a_bundle_of_control_messages_is_applied_in_order(
+        ports: tuple[socket.socket, ...]) -> None:
+    sidecar, source = _sidecar(ports, streams=(*STREAM_NAMES, REQUEST_OCR))
+    bundle = encode_bundle_of([encode_typed_message(CONTROL_OCR_MODE, ["manual"]),
+                               encode_typed_message(CONTROL_OCR_TRIGGER, [])])
+    assert sidecar.handle_control(bundle) == 2
+    assert source.text_mode == "manual" and source.triggers == 1
+
+
+def test_nonsense_on_the_control_port_is_counted_and_dropped(
+        ports: tuple[socket.socket, ...]) -> None:
+    """This runs inside the send loop. A stray datagram must not cost a tick."""
+    sidecar, source = _sidecar(ports, streams=(*STREAM_NAMES, REQUEST_OCR))
+    assert sidecar.handle_control(b"hello") == 0                      # not OSC
+    assert sidecar.handle_control(encode_typed_message("/ocr/mode", ["sideways"])) == 0
+    assert sidecar.handle_control(encode_typed_message("/unknown", [1.0])) == 0
+    assert sidecar.handle_control(encode_typed_message(CONTROL_OCR_MODE, ["manual"])[:6]) == 0
+    assert sidecar.n_control_rejected == 4
+    assert source.text_mode == "auto" and source.triggers == 0
